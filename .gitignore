@@ -2,8 +2,12 @@ __pycache__/
 *.pyc
 output/
 _work/
+.portable/
+portable/
+.cache/
 .DS_Store
 Thumbs.db
 .venv-audio-sep/
-portable/
+.venv/
 *.log
+queue.json
