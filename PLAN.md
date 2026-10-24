@@ -4,6 +4,17 @@ YouTube link → highest-quality audio (yt-dlp) → Demucs v4 four-stems (`htdem
 See `README.md` for usage and `AGENTS.md` for contributing conventions. This doc is the design +
 the findings that shaped it.
 
+## Current state (§0)
+
+The core pipeline + server are implemented under `src/auto_convert/` (package layout, stdlib-only):
+`normalize.py` (URL→watch-id), `core.py` (subprocess runners for yt-dlp/Demucs/ffmpeg),
+`bootstrap.py` (reuse-first dependency detection), `provision.py` (self-provisioning into
+`.portable/`), `_input_queue.py` (`WatchQueue`, resumable + persisted done-set), `run.py` (CLI
+orchestrator with queue integration) and `server.py` (streaming `/status` SSE status server). The
+test suite is green under **both** runners — `python -m unittest discover -s tests` → 88 OK,
+`pytest` → 88 passed. Next steps (§11–§13) extend the same portable design without changing its
+contract: reuse what is installed, download only what is missing.
+
 ## Goal (§1)
 
 Given a YouTube link / partial URL / watch ID, download the highest-quality audio with `yt-dlp`,
@@ -80,3 +91,38 @@ into its own private `.portable/` scope so it "just works" anywhere (Windows pri
 
 - `bootstrap.py`: detect/provision each dependency into `<project>/.portable/<os>/` — Python, yt-dlp, ffmpeg+ffprobe (one static build shipping both), and the inference engine (ONNX Runtime + htdemucs `.onnx`, or audio-separator reusing UVR5 weights). **Reuse-first**: every check hits PATH/existing-installs first; only missing pieces self-provision.
 - Everything needed lives under `.portable/` (gitignored) — no pollution of the system or UVR5 install. Network access is a deliberate capability; some videos may need yt-dlp cookies/oauth (`cookies.txt`).
+
+## §11 — Binary / config discovery (§ next step 2)
+
+### Findings on this box
+
+| Tool | Reusable source found here | Portable? | Notes |
+| --- | --- | --- | --- |
+| ffmpeg + ffprobe | `AppData\Local\Programs\Shotcut\` (both, **shared** MSYS2 build n9.0.2) — good locally but **not self-portable** to another host without Shotcut; also anaconda pkgs (old 4.3.1), `%APPDATA%\yt-dlp_win_x86\`, `File Converter\` (ffmpeg only, no ffprobe). | Low for third-party apps | Prefer a **static build shipping both** into `.portable/` for true portability; reuse only when the host is identical to this one. |
+| UVR5 + HTDemucs weights | Flat PyInstaller install at `AppData\Local\Programs\Ultimate Vocal Remover`; repo `models\Demucs_Models\v3_v4_repo\` ships **6 `.th` weights incl. `955717e8-8726e21a.th`** (the canonical HTDemucs v4). | High — pure model files, no python | Reuse the bundled weight directly; no re-download needed on this or any box with UVR5. |
+| yt-dlp | Official standalone at `AppData\Roaming\yt-dlp_win_x86\yt-dlp.exe` (custom build: drop `--no-subs`; extract-audio needs an ffmpeg location). | Medium — per-OS, self-contained exe | Reuse if same OS/arch; otherwise download the official per-OS standalone into `.portable/<os>/`. |
+
+### Design
+
+1. **Curated known-install roots** (`core.py` / `bootstrap.py`, pure stdlib): probe PATH first, then a curated list of well-known app locations — `%APPDATA%\yt-dlp_win_x86`, `AppData\Local\Programs\{Shotcut,DaVinci Resolve,OBS Studio,Blender,Kdenlive,Avidemux,HandBrake,PotPlayer}` (apps that ship ffmpeg/ffprobe), UVR5 roots, plus `.portable/<os>/`. This is a *best-effort* probe; it does not need to find every copy on this box — it needs to cover the common cases cross-machine.
+2. **Persist discovered paths in `auto_convert.json`** (repo root; records existing binaries + user overrides). On first run / re-provision, write what was found so future runs reuse without rescanning and can report *reused vs downloaded*. A missing/absent file → empty queue on load (already handled by `_input_queue.from_path`).
+3. **Reuse-first provisioning**: `bootstrap.py` checks config + known roots first; only when absent (or `--provision`) does it download into `.portable/<os>/`: official yt-dlp standalone, a static ffmpeg+ffprobe build, and the ONNX Runtime HTDemucs export. The script then points yt-dlp's `--ffmpeg-location` at the discovered dir.
+4. **FFmpeg nuance**: a directory with only `ffmpeg.exe` (no ffprobe) is usable for some yt-dlp builds but not this one — keep the "needs BOTH" rule, and treat third-party shared ffmpeg as *local-reuse-only* (not portable). Open question: whether to also detect a system-wide ffmpeg/ffprobe via `%PATH%` on Windows.
+
+## §12 — Developer experience: VSCode config / extensions (§ next step 1)
+
+No `.vscode/` scaffolding exists yet. Add, so contributors get linting + type-checking + pytest-debug out of the box:
+
+- **`.vscode/extensions.json`** — recommended extensions (Python, Pylance, `ms-python.vscode-pylance`, `pytest-test-selector`, a linter such as `charliermarsh.ruff` or `MS-python.black`/isort formatters, `streetsidesoftware.code-spell-checker`, and `ms-vscode.remote-ssh` for testing the portable layout on another host).
+- **`.vscode/settings.json`** — Python type-checking (pyright), lint/format-on-save (black + isort via ruff or the black extension), exclude `.portable/`, `_work/`, build/output dirs, and ASCII-only source enforcement.
+- **`.vscode/launch.json`** — commented-out pytest-debug task (`python -m pytest tests`) plus `test_server.py` live-server run; a single `run` task for the CLI.
+- Wire linting/type-check into CI (GitHub Actions) so both runners stay green. Reference from `AGENTS.md`/`README.md`.
+
+## §13 — Browser userscript & background-extension (§ next step 3)
+
+Implement the browser UI described in the original UX plan: a local server streams `/status` SSE progress to a popup; the client reads/writes a queue file and posts to `POST /add`.
+
+- **Userscript** (`auto_convert.user.js`, Tampermonkey/Greasemonkey manifest): `GM_addStyle` UI, `@grant GM_xmlhttpRequest`/fetch to poll `/status` (bounded reads), read/write the local queue JSON, show progress + completion alerts with links. Zero-install: run alongside `python -m auto_convert.server`.
+- **Background-extension variant** sharing one protocol (`GET /status` SSE + `POST /add`) — a small server that writes to the same queue file; lets users enqueue from an always-on background page instead of the CLI process.
+- **Shared contract**: both clients use the same `/status` JSON shape (per-item terminal records in `last_completed`; `pending`/`done` counts) and the same queue-file schema (`_input_queue`). The server already emits this; this step is the client side + a test that drives the real SSE stream from an HTTP client.
+- Keep it read-only to the project scope (never write outside `.portable/` or the queue file); alert on completion with download links.
