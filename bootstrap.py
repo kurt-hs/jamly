@@ -16,10 +16,23 @@ the pipeline is runnable *as-is* on this machine.
 from __future__ import annotations
 
 import os
+import platform
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from core import PLATFORM_WINDOWS, which  # noqa: E402
+
+
+def _os_family() -> str:
+    """Coarse OS family used for the portable scope layout (win/linux/macos)."""
+    if sys.platform.startswith("win"):
+        return "win"
+    machine = platform.machine().lower()
+    if any(a in machine for a in ("arm64", "aarch64")):
+        return "macos" if sys.platform == "darwin" else "linux-arm"
+    if sys.platform == "darwin":
+        return "macos"
+    return "linux"
 
 
 # --------------------------------------------------------------------------- #
@@ -149,6 +162,21 @@ def detect_ffmpeg(ffmpeg_dirs: list = None, scope_dir: str = "", additional_dirs
         if os.path.isfile(ff):
             return ToolStatus("ffmpeg", path=d, ok=False,
                               note="ffmpeg only (ffprobe missing)")
+    # scoped fallback: binaries may be nested under .portable/<os>/ffmpeg/* in any subfolder
+    port_root = os.path.join(scope, ".portable", _os_family(), "ffmpeg")
+    if os.path.isdir(port_root):
+        def _scoped(name):
+            for dp, dn, fn in os.walk(port_root):
+                if name in fn and os.path.isfile(os.path.join(dp, name)):
+                    return os.path.join(dp, name)
+            return ""
+        ff_path = _scoped(names[0])
+        fp_path = _scoped(names[1])
+        dff = os.path.dirname(ff_path) if ff_path else ""
+        dfp = os.path.dirname(fp_path) if fp_path else ""
+        if ff_path and fp_path and dff == dfp:
+            return ToolStatus("ffmpeg", path=dff, ok=True,
+                              note="has ffmpeg + ffprobe (scoped)")
     return ToolStatus("ffmpeg")
 
 

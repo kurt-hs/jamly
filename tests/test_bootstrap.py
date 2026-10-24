@@ -174,6 +174,7 @@ class MainGateTests(unittest.TestCase):
             self._weights_only(root)   # python + weights ok, but NO ffmpeg/ffprobe
             old = dict(os.environ)
             os.environ["AUTOCV_UVR_ROOT"] = root
+            os.environ["AUTOCV_SCOPE"] = root   # isolated scope: no portable ffmpeg here
             try:
                 with redirect_stdout(io.StringIO()):
                     rc = b.main()
