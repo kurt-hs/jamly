@@ -7,9 +7,14 @@ import tempfile
 import unittest
 import zipfile
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import bootstrap as b  # noqa: E402
-import provision as p
+
+# src-layout: make the ``auto_convert`` package importable for both `pytest` and
+# `python -m unittest discover -s tests` without an editable install. Inserted before any
+# absolute-package import so it always runs first.
+import sys as _shim_sys  # noqa: E402
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
+from auto_convert import bootstrap as b
+import auto_convert.provision as p
 
 
 def _zip_bytes(entries):

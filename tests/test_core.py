@@ -4,9 +4,14 @@ import sys
 import tempfile
 import unittest
 
-import core  # noqa: E402 (bare module import so `core.<attr>` resolves in tests)
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from core import (  # noqa: E402
+
+# src-layout: make the ``auto_convert`` package importable for both `pytest` and
+# `python -m unittest discover -s tests` without an editable install. Inserted before any
+# absolute-package import so it always runs first.
+import sys as _shim_sys  # noqa: E402
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
+import auto_convert.core as core  # noqa: E402 (module alias for core.X attribute access)
+from auto_convert.core import (  # noqa: E402
     PLATFORM_WINDOWS, RunResult, build_demucs_four_stems_cmd,
     build_ffmpeg_mix_cmd, build_ytdlp_extract_cmd, ensure_output_dir,
     sanitize_filename, run, which, _abs, _exists_exe,
@@ -149,22 +154,22 @@ class DetectEngineTests(unittest.TestCase):
         import unittest.mock as mock
         root = self._make_weight_root()
         with mock.patch.dict(os.environ, {"AUTOCV_UVR_ROOT": root}, clear=False), \
-             mock.patch("core._scan_uvr_roots", return_value=[root]):
+             mock.patch.object(core, "_scan_uvr_roots", return_value=[root]):
             self.assertEqual(core.detect_engine(), core.ENGINE_UVR5)
 
     def test_scan_includes_explicit_env_root(self):
         import unittest.mock as mock
         root = self._make_weight_root()
         with mock.patch.dict(os.environ, {"AUTOCV_UVR_ROOT": root}, clear=False), \
-             mock.patch("core._dir_has_any", return_value=False) as dh:
+             mock.patch.object(core, "_dir_has_any", return_value=False) as dh:
             # _scan must surface the explicit env override regardless of weights
             roots = core._scan_uvr_roots()
             self.assertIn(os.path.abspath(root), roots)
 
     def test_no_weights_or_pkg_is_not_uv5(self):
         import unittest.mock as mock
-        with mock.patch("core._scan_uvr_roots", return_value=[]), \
-             mock.patch("core._dir_has_any", return_value=False):
+        with mock.patch.object(core, "_scan_uvr_roots", return_value=[]), \
+             mock.patch.object(core, "_dir_has_any", return_value=False):
             res = core.detect_engine()
             self.assertNotEqual(res, core.ENGINE_UVR5)
 

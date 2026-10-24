@@ -23,14 +23,13 @@ import sys
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from normalize import normalize_inputs  # noqa: E402
-from core import (  # noqa: E402
+from .normalize import normalize_inputs
+from .core import (
     ENGINE_UVR5, ENGINE_HTDEMUCS,
     _abs, ensure_output_dir, PLATFORM_WINDOWS, run as _run, sanitize_filename,
 )
-from bootstrap import find_ffmpeg  # noqa: E402
-from queue import WatchQueue, default_queue_path  # noqa: E402
+from .bootstrap import find_ffmpeg
+from auto_convert._input_queue import WatchQueue, default_queue_path
 
 ENGINE_CHOICES = ("auto", "uvr5", "htdemucs")
 
@@ -75,7 +74,7 @@ class Plan:
 def build_download_cmd(ytdlp_exe: str, watch_id: str, workdir: str, ffmpeg_dir: str = "") -> List[str]:
     """Extract best audio into <workdir>/audio.<ext>; container decided by yt-dlp."""
     out = os.path.join(workdir, "audio")
-    from core import build_ytdlp_extract_cmd as b
+    from .core import build_ytdlp_extract_cmd as b
     return b(ytdlp_exe, watch_id, output_template=out, ffmpeg_dir=ffmpeg_dir)
 
 
@@ -85,7 +84,7 @@ def build_mix_cmd(ffmpeg_exe: str, bass: str, other: str, vocals: str, output: s
     Drums are excluded by construction -- orchestration passes only bass/other/vocals,
     so this builder never mixes the drum stem in.
     """
-    from core import build_ffmpeg_mix_cmd as b
+    from .core import build_ffmpeg_mix_cmd as b
     return b(ffmpeg_exe, bass, other, vocals, output=output)
 
 
@@ -118,7 +117,7 @@ def gather_inputs(args) -> List[str]:
 
 def resolve_engine(args, scope_dir: str, uvr_root: str) -> Optional[str]:
     """Pick a usable engine. `args.engine` overrides auto-selection; returns None if none."""
-    from core import detect_engine as cde
+    from .core import detect_engine as cde
     chosen = getattr(args, "engine", "auto")
     if chosen != "auto" and chosen in (ENGINE_UVR5, ENGINE_HTDEMUCS):
         return chosen if cde(scope_dir=scope_dir, uvr_root=uvr_root) == chosen else None
@@ -144,7 +143,7 @@ def locate_extracted(workdir: str) -> Optional[str]:
 # sequential orchestration (delegates heavy steps to core/provision)
 # --------------------------------------------------------------------------- #
 def _find_ytdlp(scope_dir: str):
-    from bootstrap import find_ytdlp as fy
+    from .bootstrap import find_ytdlp as fy
     s = fy(scope_dir=scope_dir)
     return s.path if s.ok else None
 
@@ -228,14 +227,14 @@ def run_pipeline(inputs: List[str], args, progress=None) -> List[ItemResult]:
 
 
 def separate(audio_path, engine, workdir, threads, uvr_root=""):
-    from core import separate_stems as ss
+    from .core import separate_stems as ss
     return ss(audio=audio_path, engine=engine, workdir=workdir, threads=threads or 0, uvr_root=uvr_root)
 
 
 def ffmpeg_exe_for(ffmpeg_dir: str) -> str:
     """Return the ffmpeg binary path inside a dir holding BOTH binaries."""
     if not ffmpeg_dir or not os.path.isdir(ffmpeg_dir):
-        from core import which
+        from .core import which
         return which("ffmpeg") or ""
     name = "ffmpeg.exe" if PLATFORM_WINDOWS else "ffmpeg"
     p = os.path.join(_abs(ffmpeg_dir), name)

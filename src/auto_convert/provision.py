@@ -17,8 +17,7 @@ import sys
 import tempfile
 import zipfile
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from core import PLATFORM_WINDOWS, _abs  # noqa: E402
+from .core import PLATFORM_WINDOWS, _abs  # noqa: E402
 
 
 # --------------------------------------------------------------------------- #

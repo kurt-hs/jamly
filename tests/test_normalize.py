@@ -3,8 +3,13 @@ import os
 import sys
 import unittest
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from normalize import (  # noqa: E402
+
+# src-layout: make the ``auto_convert`` package importable for both `pytest` and
+# `python -m unittest discover -s tests` without an editable install. Inserted before any
+# absolute-package import so it always runs first.
+import sys as _shim_sys  # noqa: E402
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
+from auto_convert.normalize import (  # noqa: E402
     InputError, WATCH_ID_RE, YT_URL_RE, extract_watch_id, is_valid_watch_id,
     normalize_inputs,
 )

@@ -5,9 +5,13 @@ import os
 import tempfile
 import unittest
 
-_ROOT = os.path.dirname(os.path.abspath(__file__))   # project root (holds queue.py)
-sys.path.insert(0, _ROOT)                            # ensure `import queue` resolves
-from queue import WatchQueue, default_queue_path
+
+# src-layout: make the ``auto_convert`` package importable for both `pytest` and
+# `python -m unittest discover -s tests` without an editable install. Inserted before any
+# absolute-package import so it always runs first.
+import sys as _shim_sys  # noqa: E402
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
+from auto_convert._input_queue import WatchQueue, default_queue_path
 
 
 class DedupTests(unittest.TestCase):

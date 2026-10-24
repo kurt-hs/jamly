@@ -24,8 +24,8 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from queue import WatchQueue, default_queue_path  # noqa: E402
-from run import ItemResult, process_one  # noqa: E402
+from auto_convert._input_queue import WatchQueue, default_queue_path
+from .run import ItemResult, process_one
 
 
 def build_parser() -> argparse.ArgumentParser:

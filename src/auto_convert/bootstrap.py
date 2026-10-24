@@ -19,8 +19,7 @@ import os
 import platform
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from core import PLATFORM_WINDOWS, which  # noqa: E402
+from .core import PLATFORM_WINDOWS, which  # noqa: E402
 
 
 def _os_family() -> str:

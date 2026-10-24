@@ -9,8 +9,13 @@ import sys
 import unittest
 import unittest.mock as mock
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import run as run_mod  # noqa: E402
+
+# src-layout: make the ``auto_convert`` package importable for both `pytest` and
+# `python -m unittest discover -s tests` without an editable install. Inserted before any
+# absolute-package import so it always runs first.
+import sys as _shim_sys  # noqa: E402
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
+from auto_convert import run as run_mod
 
 
 class DownloadCmdTests(unittest.TestCase):
@@ -61,19 +66,16 @@ class GatherInputsTests(unittest.TestCase):
 
 class ResolveEngineTests(unittest.TestCase):
     def test_auto_uses_available_engine(self):
-        import core
-        with mock.patch("core.detect_engine", return_value="uvr5"):
+        with mock.patch("auto_convert.core.detect_engine", return_value="uvr5"):
             self.assertEqual(run_mod.resolve_engine(argparse.Namespace(engine="auto"), "", ""), "uvr5")
 
     def test_explicit_override_rejected_if_unavailable(self):
-        import core
         # request uvr5 but only htdemucs is available -> None (engine unusable)
-        with mock.patch("core.detect_engine", return_value="htdemucs"):
+        with mock.patch("auto_convert.core.detect_engine", return_value="htdemucs"):
             self.assertIsNone(run_mod.resolve_engine(argparse.Namespace(engine="uvr5"), "", ""))
 
     def test_explicit_htdemucs_accepted_when_available(self):
-        import core
-        with mock.patch("core.detect_engine", return_value="htdemucs"):
+        with mock.patch("auto_convert.core.detect_engine", return_value="htdemucs"):
             self.assertEqual(run_mod.resolve_engine(argparse.Namespace(engine="htdemucs"), "", ""), "htdemucs")
 
 
