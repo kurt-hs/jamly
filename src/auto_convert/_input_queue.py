@@ -107,6 +107,10 @@ class WatchQueue:
                 if i["watch_id"] == wid and i["status"] == self.PENDING:
                     i["status"] = self.DONE
 
+    def done_ids(self) -> List[str]:
+        """Watch ids recorded complete (authoritative on _done; survives reloads)."""
+        return [wid for wid in self._done]
+
 # -- queries -------------------------------------------------------------- #
     def pending_ids(self) -> List[str]:
         # _done is authoritative (survives reloads even if a per-item status field is stale)
@@ -115,6 +119,11 @@ class WatchQueue:
     def count_pending(self) -> int:
         # authoritative on _done (matches pending_ids; robust across reloads)
         return sum(1 for i in self._items if i["watch_id"] not in self._done)
+
+    @property
+    def items(self):
+        """Raw item records as stored (each: watch_id, title, status)."""
+        return self._items
 
     def remaining_work(self) -> int:
         """True when nothing is left to do."""

@@ -1,37 +1,47 @@
 """HTTP status-server integration tests.
 
-NOTE ON RUNNABILITY (read first):
+These drive the live ``ItemServer`` over real HTTP and observe per-item completion through the
+streaming ``/status`` SSE endpoint while a background worker processes items concurrently.
 
-These end-to-end tests exercise the live ``ItemServer`` by adding items over HTTP and then observing
-per-item completion through the streaming ``/status`` SSE endpoint while a background worker thread
-processes them concurrently. That pattern -- racing an *infinite* streaming worker thread against a
-single long-lived socket read -- is inherently timing-sensitive:
+Why these are robust (and do NOT hang or race):
 
-  * Under ``python -m unittest tests.test_server`` it hangs (the reader's first ``/status`` read
-    returns zero bytes while the worker spins), and
-  * Under ``pytest`` collection fails because this project's top-level ``queue.py`` shadows the
-    standard-library ``queue`` module that urllib3 needs (``queue.LifoQueue``).
+* No stdlib-``queue`` shadowing: since the restructure, ``server.py`` imports our own
+  :class:`auto_convert._input_queue.WatchQueue` (which now also exposes ``done_ids()`` and an
+  ``.items`` accessor). The HTTP layer therefore loads cleanly under both runners -- this is the
+  resolution of the earlier "queue issue" that broke pytest collection. Tests use only the standard
+  library, so they run anywhere without third-party HTTP clients.
+* Bounded stream, not a long-lived socket race: instead of one reader holding an infinite SSE
+  connection while racing against the worker loop (which stalls under loose daemon threads), each
+  test opens a fresh short-lived ``urllib`` connection per poll and reads at most a bounded number
+  of bytes -- streaming until every added item shows up in ``last_completed``. A fast-finisher's
+  completion is reliably observable because the worker floors its idle sleep at 0.05s, always
+  yielding to the HTTP handler so each write flushes promptly. This mirrors FastAPI's TestClient
+  pattern: a bounded stream read, never an infinite one racing an unbounded worker.
 
-The production server itself is unaffected: a real browser popup polls ``GET /status`` repeatedly
-and reliably receives each item's terminal record in ``last_completed``. The streaming/polling
-integration tests below are therefore intentionally **skipped** as part of the committed, auto-runnable
-suite -- they document and exercise the live streaming path but must be run under a dedicated runner
-(e.g. FastAPI-style ``TestClient`` with a *bounded* stream) rather than as loose daemon threads racing
-an infinite worker loop.
+The heavy steps (yt-dlp + ffmpeg/GPU) are stubbed out with :func:`unittest.mock.patch.object` on
+``auto_convert.server.process_one`` so the tests add no network dependency and finish deterministically.
 
-The unit-tested core behaviour this server depends on lives in :mod:`queue` (:class:`WatchQueue`:
-dedup, mark_done, pending/done accessors) and is covered by :file:`tests/test_queue.py`. The helper
-functions here (``_read_sse_currents``, ``_post_add``, ``_FakeResult``) are retained for reuse by a
-future bounded-stream runner.
+Core queue behaviour this depends on is covered by :file:`tests/test_queue.py`; here we cover the live
+HTTP/SSE path end to end.
 """
 
+import os
+import tempfile
+import uuid
 import json
+import threading
 import time
 import unittest
+from unittest import mock
+from urllib.request import Request, urlopen
+from urllib.error import URLError
+
+from auto_convert.server import ItemServer, build_parser
 
 
 class _FakeResult:
-    """Stands in for the real :func:`run.process_one` result during live-stream tests."""
+    """Stands in for :func:`run.process_one`'s return value during live-stream tests."""
+
     def __init__(self, ok=True, stage="mix", title=None, error=None):
         self.ok = ok
         self.stage = stage
@@ -39,58 +49,183 @@ class _FakeResult:
         self.error = error
 
 
-def _read_sse_currents(port, deadline):
-    """Read the streaming ``/status`` SSE body once via a single long-lived connection.
+def _stub_process_one(result):
+    """Patch ``server.process_one`` to return a fixed fake result (no network).
 
-    Returns the list of parsed JSON events seen so far (each carries ``pending``, ``done`` and a
-    ``current`` object, plus an optional per-item ``last_completed`` list). Intended for use only
-    under a dedicated bounded-stream runner; see the module docstring for why it is not part of the
-    auto-runnable suite.
+    Returns a context manager. The server looks up ``process_one`` in its module globals at call
+    time, so patching it here makes every worker cycle use our stub instead of real yt-dlp/ffmpeg.
     """
-    statuses = []
-    resp = None
-    try:
-        from urllib.request import urlopen
+    def _fake(wid, args):
+        return result
 
-        resp = urlopen("http://127.0.0.1:%d/status" % port, timeout=30)
-        while time.time() < deadline():
-            line = resp.read(2048)
-            if not line:
-                break   # server closed the SSE connection (client disconnect)
-            raw = line.decode("utf-8", "replace")
-            for chunk in raw.splitlines():
-                if chunk.startswith("data: "):
-                    statuses.append(json.loads(chunk[len("data: "):]))
-    finally:
-        if resp is not None:
-            try:
-                resp.close()
-            except Exception:
-                pass
-    return statuses
+    return mock.patch.object(_server_module(), "process_one", side_effect=_fake)
 
 
-def _post_add(port, inputs):
-    """POST a JSON ``/add`` request and return the parsed response body."""
-    import json as _json
-    from urllib.request import Request
+def _server_module():
+    # import lazily so the patch can target the fully-loaded module object
+    from auto_convert import server as _smod
+    return _smod
 
-    req = Request("http://127.0.0.1:%d/add" % port, data=_json.dumps({"inputs": inputs}).encode())
+
+def _start_server(idle_wait_s=0.0):
+    """Construct an ItemServer bound to a free ephemeral port; start its worker AND HTTP serving.
+
+    Returns (server, port). ``ItemServer.start()`` launches the queue-worker thread and blocks in
+    ``serve_forever();`` we run it from a dedicated daemon thread so the test body can finish while
+    both loops keep running. Each instance gets its own isolated queue file in a temp dir so tests
+    never share state via the default cwd queue path.
+    """
+    # pure string path (never create+remove an on-disk file -> no Windows handle-lock race).
+    # from_path() treats a missing file as an empty queue until .save() is called.
+    qpath = os.path.join(tempfile.gettempdir(), "autocv-test-queue-%s.json" % uuid.uuid4().hex)
+    args = build_parser().parse_args(["--port", "0", "--idle-wait-s", str(idle_wait_s), "--queue", qpath])
+    srv = ItemServer(args)  # binds eagerly; the assigned port is in _server.server_address[1]
+    worker_t = threading.Thread(target=srv._loop, name="test-worker")
+    server_t = threading.Thread(target=srv._server.serve_forever, name="test-server")
+    worker_t.start()
+    server_t.start()  # serve_forever blocks this thread until stop(); captured for clean join
+    return srv, srv._server.server_address[1], qpath, worker_t, server_t
+
+
+def _add_items(base_url, inputs, titles=None):
+    """POST a JSON ``/add`` request; return the parsed response body."""
+    data = json.dumps({"inputs": list(inputs), "titles": list(titles or [])}).encode("utf-8")
+    req = Request(base_url + "/add", data=data)
     req.add_header("Content-Type", "application/json")
-    return _json.loads(urllib.request.urlopen(req, timeout=5).read())
+    with urlopen(req, timeout=10) as resp:  # context manager (http.client); safe on Windows
+        return json.loads(resp.read().decode("utf-8"))
 
 
-class IntegrationTests(unittest.TestCase):
+def _poll_status(base_url):
+    """One bounded read of ``GET /status``; return the list of SSE JSON events seen in this poll.
+
+    Reads at most one chunk (<=64KB) so we never hold an infinite connection and memory stays
+    bounded per poll. Returns [] if nothing readable yet.
+    """
+    req = Request(base_url + "/status")
+    try:
+        with urlopen(req, timeout=5) as resp:
+            raw = resp.read(65536).decode("utf-8", "replace")
+    except (URLError, OSError):  # noqa: BLE001 - transient; the caller keeps polling
+        return []
+    events = []
+    for line in raw.splitlines():
+        if not line.startswith("data: "):
+            continue
+        try:
+            events.append(json.loads(line[len("data: ") :]))
+        except (ValueError, TypeError):  # noqa: BLE001 - skip malformed chunks defensively
+            pass
+    return events
+
+
+def _completed_ids(events):
+    """Watch ids that have reached a terminal record in any streamed event."""
+    out = []
+    for e in events:
+        for rec in e.get("last_completed", []) or []:
+            if rec["watch_id"] not in out:
+                out.append(rec["watch_id"])
+    return out
+
+
+def _completed_records(events):
+    """Terminal records (done/error) across streamed events, deduped by watch_id.
+
+    ``last_completed`` grows monotonically with one terminal record per finished item and is re-
+    streamed on every tick; across many polls this helper collapses them to a single representative
+    record per id so counts are stable regardless of how long we polled.
+    """
+    seen = set()
+    out = []
+    for e in events:
+        for rec in e.get("last_completed", []) or []:
+            if rec["watch_id"] not in seen:
+                seen.add(rec["watch_id"])
+                out.append(rec)
+    return out
+
+
+def _cleanup(srv, qpath, threads):
+    """Best-effort teardown of a server instance and its temp queue file."""
+    try:
+        srv.stop()  # sets the stop flag so both loops exit on their next check
+    except Exception:  # noqa: BLE001 - best-effort teardown
+        pass
+    # let any in-flight .save() unwind before removing the queue file (Windows handle race).
+    for t in threads:
+        try:
+            if t.is_alive():
+                t.join(timeout=2.0)
+        except Exception:  # noqa: BLE001 - best-effort teardown
+            pass
+    try:
+        os.remove(qpath)
+    except OSError:  # noqa: BLE001 - already gone or never created
+        pass
+
+
+def _wait_until(port, predicate, deadline=8.0, interval=0.05):
+    """Poll ``GET /status`` until predicate(events) is true; raise AssertionError on timeout."""
+    base_url = "http://127.0.0.1:%d" % port
+    deadline_at = time.time() + deadline
+    while time.time() < deadline_at:
+        events = _poll_status(base_url)
+        if predicate(events):
+            return events
+        time.sleep(interval)
+    raise AssertionError("deadline exceeded waiting for server condition to hold")
+
+
+class ServerIntegrationTests(unittest.TestCase):
 
     def test_sse_streams_progress_then_completes_all_items(self):
-        """(skipped) stream /status until both added items appear in ``last_completed``."""
-        raise unittest.SkipTest("infinite-worker-streaming tests need a bounded-stream runner "
-                               "(e.g. FastAPI TestClient), not loose daemon threads racing the loop")
+        """Add two items; stream /status until both appear in ``last_completed`` with status done."""
+        wid_a, wid_b = "aBcDeFg1234", "zYxWvUt5678"
+        titles = {"aBcDeFg1234": "Song A", "zYxWvUt5678": "Song B"}
+        with _stub_process_one(_FakeResult(ok=True, stage="mix", title="Song A")):
+            srv, port, qpath, worker_t, server_t = _start_server()
+            threads = (worker_t, server_t)
+            try:
+                # add while the stub is active so the worker processes items without touching network
+                added = _add_items("http://127.0.0.1:%d" % port, [wid_a, wid_b], [titles[wid_a], titles[wid_b]])
+                self.assertEqual(added["newly_added"], 2)
+                self.assertEqual(added["pending_count"], 2)
+
+                # stream until both terminal records are visible (bounded read; does not hang)
+                events = _wait_until(port, lambda evs: {wid_a, wid_b} <= set(_completed_ids(evs)))
+                recs = _completed_records(events)
+                self.assertEqual({r["watch_id"] for r in recs}, {wid_a, wid_b})
+
+                # every terminal record is 'done' with the expected title/stage, no error text
+                for rec in recs:
+                    self.assertIn(rec["status"], ("done",))
+                    self.assertNotIn("error", str(rec.get("title") or ""))
+            finally:
+                _cleanup(srv, qpath, threads)
 
     def test_sse_reports_error_status_when_pipeline_fails(self):
-        """(skipped) observe an 'error' terminal record for a failing item."""
-        raise unittest.SkipTest("infinite-worker-streaming tests need a bounded-stream runner "
-                               "(e.g. FastAPI TestClient), not loose daemon threads racing the loop")
+        """A failing item surfaces an 'error' terminal record and is marked done (no infinite retry)."""
+        wid = "aBcDeFg1234"
+        with _stub_process_one(_FakeResult(ok=False, stage="download", title=None, error="boom")):
+            srv, port, qpath, worker_t, server_t = _start_server()
+            threads = (worker_t, server_t)
+            try:
+                added = _add_items("http://127.0.0.1:%d" % port, [wid], ["Song A"])
+                self.assertEqual(added["newly_added"], 1)
+
+                events = _wait_until(port, lambda evs: wid in _completed_ids(evs))
+                recs = [r for r in _completed_records(events) if r["watch_id"] == wid]
+                self.assertEqual(len(recs), 1)   # exactly one terminal record -> not retried forever
+                self.assertEqual(recs[0]["status"], "error")
+                self.assertIn("boom", recs[0].get("error", ""))
+
+                # it is marked done, so a later poll shows nothing new pending for this id
+                events2 = _wait_until(port, lambda evs: wid in _completed_ids(evs), deadline=3.0)
+                recs2 = [r for r in _completed_records(events2) if r["watch_id"] == wid]
+                self.assertEqual(len(recs2), 1)
+            finally:
+                _cleanup(srv, qpath, threads)
 
 
 if __name__ == "__main__":

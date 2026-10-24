@@ -82,5 +82,43 @@ class PersistenceTests(unittest.TestCase):
         self.assertTrue(p.startswith(os.path.abspath(d)))
 
 
+class AccessorsTests(unittest.TestCase):
+    def _tmp(self):
+        return tempfile.mkdtemp(prefix="acq_")
+
+    def test_done_ids_tracks_completed_and_survives_reload(self):
+        d = self._tmp()
+        q = WatchQueue(path=os.path.join(d, "queue.json"))
+        for wid in ("a", "b", "c"):  # items are stored PENDING by default
+            self.assertTrue(q.add(wid))
+        self.assertEqual(q.done_ids(), [])   # nothing marked done yet
+
+        q.mark_done("a")
+        q.mark_done("c")
+        self.assertEqual(q.done_ids(), ["a", "c"])  # _done is authoritative, order-preserving
+        self.assertEqual(len(q.items), 3)            # .items exposes all raw records (not just pending)
+
+        # persist before reload so the done set is written to disk (add/mark_done do not auto-save);
+        # from_path() reads "done" back and rebuilds _done, which must match the in-memory value.
+        q.save()
+        reloaded = WatchQueue.from_path(q.path)
+        self.assertEqual(reloaded.done_ids(), ["a", "c"])
+        self.assertIn("b", reloaded.pending_ids())
+
+    def test_items_exposes_raw_records_with_expected_keys(self):
+        d = self._tmp()
+        q = WatchQueue(path=os.path.join(d, "queue.json"))
+        q.add("vid123")
+        recs = {i["watch_id"]: i for i in q.items}
+        self.assertEqual(len(recs), 1)
+        self.assertIn("title", recs["vid123"])
+        self.assertIn("status", recs["vid123"])
+        # mark_done flips the status on the same raw record without duplicating it
+        q.mark_done("vid123")
+        self.assertEqual(len(q.items), 1)
+        self.assertEqual(q.items[0]["status"], WatchQueue.DONE)
+        self.assertIn("vid123", q.done_ids())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
