@@ -30,6 +30,7 @@ from core import (  # noqa: E402
     _abs, ensure_output_dir, PLATFORM_WINDOWS, run as _run, sanitize_filename,
 )
 from bootstrap import find_ffmpeg  # noqa: E402
+from queue import WatchQueue, default_queue_path  # noqa: E402
 
 ENGINE_CHOICES = ("auto", "uvr5", "htdemucs")
 
@@ -148,59 +149,81 @@ def _find_ytdlp(scope_dir: str):
     return s.path if s.ok else None
 
 
-def run_pipeline(inputs: List[str], args, progress=None) -> List[ItemResult]:
-    """Execute the full pipeline for each normalized input; return per-item results.
-
-    `progress(wid, stage, idx, total)` is called before each heavy step (optional hook).
-    Heavy steps are delegated to core.separate_stems / provision / subprocesses, so this
-    function itself needs a working yt-dlp + ffmpeg on PATH/scope to actually run.
-    """
+def _resolve_run_env(args) -> tuple:
+    """Resolve tools + engine for one run (cheap file checks; called per item)."""
     scope = os.environ.get("AUTOCV_SCOPE") or os.getcwd()
     uvr_root = os.environ.get("AUTOCV_UVR_ROOT") or ""
     engine = resolve_engine(args, scope, uvr_root)
     ffmpeg_dir = find_ffmpeg(scope)
+    return scope, engine, ffmpeg_dir
 
-    results = [ItemResult(watch_id=w) for w in inputs]
+
+def process_one(wid: str, args, progress=None) -> ItemResult:
+    """Run the full pipeline for ONE watch id; returns an ItemResult.
+
+    Kept separate from run_pipeline so a persistent queue can drive one item at a time,
+    mark it done in the queue file, and resume later. Heavy steps are delegated to
+    core.separate_stems / provision / subprocesses (yt-dlp + ffmpeg required on PATH/scope).
+    """
+    res = ItemResult(watch_id=wid)
+    workdir = make_workdir()
+    audio_path = None
+    stems: Dict[str, str] = {}
+    try:
+        scope, engine, ffmpeg_dir = _resolve_run_env(args)
+        if progress:
+            progress(wid, "pending", 0, 0)
+        ytdlp_exe = _find_ytdlp(scope)
+        cmd = build_download_cmd(ytdlp_exe, wid, workdir, ffmpeg_dir=ffmpeg_dir or "")
+        res.status, res.stage = "download", "download"
+        audio_path = _run(cmd).ok and locate_extracted(workdir)
+        if not audio_path:
+            raise RuntimeError("yt-dlp extract produced no audio file")
+
+        res.status, res.stage = "separate", "separate"
+        stems = separate(audio_path, engine, workdir, args.threads or 0, uvr_root=uvr_root)
+        drums = stems.get("drums")
+        if not drums:
+            raise RuntimeError("no 'drums' stem produced by separation")
+
+        res.status, res.stage = "mix", "mix"
+        base = sanitize_filename("%s %s" % (res.title or "audio", wid))[:80]
+        nodrums_out = os.path.join(args.output_dir, "%s_no_drums.wav" % base)
+        drums_out = os.path.join(args.output_dir, "%s_drums.wav" % base)
+        mix_cmd = build_mix_cmd(ffmpeg_exe_for(ffmpeg_dir), drums, stems["bass"],
+                                stems["other"], stems["vocals"], nodrums_out)
+        _run(mix_cmd)
+        shutil.copy2(_abs(drums), _abs(drums_out))
+
+        res.status, res.stage = "done", ""
+        res.title = base
+        res.drums_path = drums_out
+        res.nodrums_path = nodrums_out
+        res.meta_path = os.path.join(args.output_dir, "%s.meta.json" % base)
+    except Exception as exc:  # noqa: BLE001 - record and continue across the queue
+        res.status, res.stage, res.error = "error", "", str(exc)
+    finally:
+        if not args.replace_existing:
+            shutil.rmtree(workdir, ignore_errors=True)
+    return res
+
+
+def run_pipeline(inputs: List[str], args, progress=None) -> List[ItemResult]:
+    """Execute the full pipeline for each normalized input; return per-item results.
+
+    Thin wrapper over process_one so a persistent queue (#15/#16) can drive one item at a
+    time and save/resume incrementally. `progress(wid, stage, idx, total)` is called before
+    each heavy step (optional hook)."""
+    scope = os.environ.get("AUTOCV_SCOPE") or os.getcwd()
+    engine = resolve_engine(args, scope, os.environ.get("AUTOCV_UVR_ROOT") or "")
+    print("auto_convert: %d input(s), engine=%s" % (len(inputs), engine or "n/a"))
+
+    results = []
     for i, wid in enumerate(inputs):
-        res = results[i]
-        workdir = make_workdir()
-        audio_path = None
-        stems: Dict[str, str] = {}
-        try:
-            if progress:
-                progress(wid, "pending", i, len(inputs))
-            ytdlp_exe = _find_ytdlp(scope)
-            cmd = build_download_cmd(ytdlp_exe, wid, workdir, ffmpeg_dir=ffmpeg_dir or "")
-            res.status, res.stage = "download", "download"
-            audio_path = _run(cmd).ok and locate_extracted(workdir)
-            if not audio_path:
-                raise RuntimeError("yt-dlp extract produced no audio file")
-
-            res.status, res.stage = "separate", "separate"
-            stems = separate(audio_path, engine, workdir, args.threads or 0, uvr_root=uvr_root)
-            drums = stems.get("drums")
-            if not drums:
-                raise RuntimeError("no 'drums' stem produced by separation")
-
-            res.status, res.stage = "mix", "mix"
-            base = sanitize_filename("%s %s" % (res.title or "audio", wid))[:80]
-            nodrums_out = os.path.join(args.output_dir, "%s_no_drums.wav" % base)
-            drums_out = os.path.join(args.output_dir, "%s_drums.wav" % base)
-            mix_cmd = build_mix_cmd(ffmpeg_exe_for(ffmpeg_dir), drums, stems["bass"],
-                                    stems["other"], stems["vocals"], nodrums_out)
-            _run(mix_cmd)
-            shutil.copy2(_abs(drums), _abs(drums_out))
-
-            res.status, res.stage = "done", ""
-            res.title = base
-            res.drums_path = drums_out
-            res.nodrums_path = nodrums_out
-            res.meta_path = os.path.join(args.output_dir, "%s.meta.json" % base)
-        except Exception as exc:  # noqa: BLE001 - record and continue across the queue
-            res.status, res.stage, res.error = "error", "", str(exc)
-        finally:
-            if not args.replace_existing:
-                shutil.rmtree(workdir, ignore_errors=True)
+        res = process_one(wid, args)
+        if progress and len(inputs) > 1:
+            progress(wid, res.stage, i + 1, len(inputs))
+        results.append(res)
     return results
 
 
@@ -240,35 +263,61 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _print_progress(wid: str, res: ItemResult) -> None:
+    """One-line status per item (kept separate so it stays testable / easy to swap)."""
+    if res.ok:
+        print("OK   %s -> drums=%s no_drums=%s" % (res.watch_id, res.drums_path, res.nodrums_path))
+    else:
+        print("FAILED %s: %s" % (res.watch_id, res.error or "unknown error"))
+
+
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
-    inputs = gather_inputs(args)
-    if not inputs:
-        print("no input provided (pass -i URL or pipe URLs via stdin)", file=sys.stderr)
+    scope_dir = os.environ.get("AUTOCV_SCOPE") or os.getcwd()
+    qpath = getattr(args, "queue", None) or os.environ.get("AUTOCV_QUEUE") \
+        or default_queue_path(scope_dir)
+
+    queue = WatchQueue.from_path(qpath)
+    raw_inputs = gather_inputs(args)
+    if not raw_inputs:
+        print("no input provided (pass -i URL or pipe URLs via stdin, or seed the queue file)",
+              file=sys.stderr)
         return 2
 
-    scope_dir = os.environ.get("AUTOCV_SCOPE") or os.getcwd()
-    engine = resolve_engine(args, scope_dir, os.environ.get("AUTOCV_UVR_ROOT") or "")
-    print("auto_convert: %d input(s), engine=%s" % (len(inputs), engine or "n/a"))
+    # seed new ids into the persistent queue (dedup), carrying best-effort title hints
+    titles = [extract_title_hint(w) for w in raw_inputs]
+    newly = queue.add_all(raw_inputs, titles)
+    print("auto_convert: seeded %d item(s) into %s" % (newly, qpath))
 
     if args.dry_run:
-        for wid in inputs:
-            res = ItemResult(watch_id=wid)
-            res.status = "dry-run"
-            res.title = extract_title_hint(wid)
-            print("[dry-run] %s -> engine=%s, outputs under %s/"
-                  "%s_drums.wav + _no_drums.wav (+ .meta.json)"
-                  % (res.watch_id, engine or "?", scope_dir, sanitize_filename(res.watch_id)))
+        pending = queue.pending_ids()
+        print("[dry-run] would process %d pending item(s):"
+              % len(pending), ", ".join(w[:12] for w in pending) or "(none)")
         return 0
 
-    results = run_pipeline(inputs, args)
-    ok = sum(1 for r in results if r.ok)
-    err = [r for r in results if r.status == "error"]
-    for r in results:
-        print("%-28s %s" % (r.watch_id, ("OK   drums=%s no_drums=%s" % (r.drums_path, r.nodrums_path))
-              if r.ok else ("FAILED %s: %s" % (r.status, r.error or ""))))
-    print("%d/%d complete" % (ok, len(results)))
-    return 0 if ok == len(results) and not err else 1
+    # drive the queue one item at a time: mark done + save after each (resumable)
+    remaining = list(queue.pending_ids())
+    if not remaining:
+        print("nothing to do (%d queued, all complete)" % len(remaining))
+        return 0
+    print("processing %d pending item(s); queue=%s" % (len(remaining), qpath))
+
+    ok = err = done = 0
+    for i, wid in enumerate(remaining):
+        res = process_one(wid, args)
+        _print_progress(wid, res)
+        if res.ok:
+            ok += 1
+        else:
+            err += 1
+        queue.mark_done(wid)
+        done += 1
+        try:
+            queue.save()
+        except OSError as exc:
+            print("WARN could not persist queue (%s): %s" % (qpath, exc), file=sys.stderr)
+    print("%d/%d complete" % (ok, len(remaining)))
+    return 0 if err == 0 else 1
 
 
 if __name__ == "__main__":

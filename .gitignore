@@ -11,3 +11,4 @@ Thumbs.db
 .venv/
 *.log
 queue.json
+auto_convert_queue.json
