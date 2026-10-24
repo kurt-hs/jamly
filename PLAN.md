@@ -11,9 +11,17 @@ The core pipeline + server are implemented under `src/auto_convert/` (package la
 `bootstrap.py` (reuse-first dependency detection), `provision.py` (self-provisioning into
 `.portable/`), `_input_queue.py` (`WatchQueue`, resumable + persisted done-set), `run.py` (CLI
 orchestrator with queue integration) and `server.py` (streaming `/status` SSE status server). The
-test suite is green under **both** runners — `python -m unittest discover -s tests` → 88 OK,
-`pytest` → 88 passed. Next steps (§11–§13) extend the same portable design without changing its
-contract: reuse what is installed, download only what is missing.
+test suite is green under **both** runners — `python -m unittest discover -s tests` → **104** OK,
+`pytest` → **104** passed (added `tests/test_logging.py`).
+
+### Implemented: friendly run-time output (§14, done)
+
+A terse/friendly per-stage log was added and unit-tested (`src/auto_convert/logging.py`, `core.py`,
+`run.py`, `tests/test_logging.py`): one line per raw input with `(blank)`/`(invalid)` flags + a dedup
+summary; a tools report naming each binary's version and install type/location (e.g. `[portable] portable`,
+`[app] Shotcut`) or warning when absent; an engine line; a streamed live download bar (`parse_download_progress`
+/`render_bar`); and clickable output links with a Windows "click here to open" hint. Symbols + optional ANSI
+color are emitted through the module logger, forced UTF-8 on startup so block glyphs survive legacy cp1252 consoles.
 
 ## Goal (§1)
 
