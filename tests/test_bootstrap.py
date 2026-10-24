@@ -183,5 +183,20 @@ class MainGateTests(unittest.TestCase):
             self.assertEqual(rc, 3)   # blocked on ffmpeg+ffprobe
 
 
+class FindFfmpegTests(unittest.TestCase):
+    def test_none_for_empty_scope(self):
+        self.assertIsNone(b.find_ffmpeg(tempfile.mkdtemp()))
+
+    def test_returns_dir_with_both_binaries_when_present(self):
+        d = b.find_ffmpeg()
+        if not d:
+            return  # no ffmpeg provisioned on this machine (skipped assertion)
+        has_ff = os.path.isfile(os.path.join(d, "ffmpeg.exe")) or \
+                 os.path.isfile(os.path.join(d, "ffmpeg"))
+        has_fp = os.path.isfile(os.path.join(d, "ffprobe.exe")) or \
+                 os.path.isfile(os.path.join(d, "ffprobe"))
+        self.assertTrue(has_ff and has_fp)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

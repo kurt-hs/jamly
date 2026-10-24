@@ -174,7 +174,7 @@ class DetectEngineTests(unittest.TestCase):
         home = os.environ.get("HOME") or (os.environ.get("USERPROFILE") or "")
         prog_apps = os.path.join(_abs(home), "AppData", "Local", "Programs")
         if not os.path.isdir(prog_apps):
-            self.skipTest("no AppData\Local\Programs to scan")
+            self.skipTest(r"no AppData\Local\Programs to scan")
         with mock.patch.dict(os.environ, clear=False):
             roots = core._scan_uvr_roots()
             # explicit env override (if any) is always surfaced; otherwise the bounded walk

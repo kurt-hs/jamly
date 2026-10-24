@@ -180,6 +180,16 @@ def detect_ffmpeg(ffmpeg_dirs: list = None, scope_dir: str = "", additional_dirs
     return ToolStatus("ffmpeg")
 
 
+def find_ffmpeg(scope_dir: str = "") -> Optional[str]:
+    """Return an absolute path to a dir holding BOTH ffmpeg+ffprobe, else None.
+
+    Thin wrapper over :func:`detect_ffmpeg` used by run.py / server mode so the caller
+    can pass that exact directory to yt-dlp's ``--ffmpeg-location`` and to the mix step.
+    """
+    ts = detect_ffmpeg(scope_dir=scope_dir)
+    return ts.path if ts.ok else None
+
+
 # --------------------------------------------------------------------------- #
 # UVR5 presence + Demucs weights
 # --------------------------------------------------------------------------- #
