@@ -1,0 +1,23 @@
+{
+    "python.defaultInterpreterPath": "",
+    "python.analysis.typeCheckingMode": "basic",
+    "python.analysis.diagnosticMode": "openFilesOnly",
+    "python.formatting.provider": "black",
+    "files.trimTrailingWhitespace": true,
+    "editor.tabSize": 4,
+    "files.insertFinalNewline": true,
+    "editor.codeActionsOnSave": {
+        "source.organizeImports.beforeSave": "always",
+        "source.fixAll.beforeSave": "always"
+    },
+    "files.eol": "\n",
+    "files.exclude": {
+        "**/__pycache__": true,
+        "**/*.pyc": true,
+        ".pytest_cache": true,
+        ".venv": true,
+        ".venv-audio-sep": true,
+        "_work/": true,
+        ".portable/": true
+    }
+}

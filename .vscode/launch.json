@@ -1,0 +1,58 @@
+{
+    "version": "0.2.0",
+    // Default active configuration -- F5 runs this directly without prompting.
+    "name": "pytest-debug",
+    "type": "python",
+    "request": "debug",
+    "justMyCode": true,
+    "cwd": "${workspaceFolder}",
+    "env": {
+        "PYTHONPATH": "${workspaceFolder}/src"
+    },
+    "args": [
+        "-s",
+        "-o",
+        "failfast=true"
+    ],
+    "console": "integratedTerminal",
+    "stopOnLine": 0,
+    // Named tasks that show up in the debug dropdown (Select a run and configure its debugger).
+    // Each needs a unique taskSig so it can be launched individually without editing.
+    "tasks": [
+        {
+            "label": "unittest-debug",
+            "type": "python",
+            "request": "debug",
+            "justMyCode": true,
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}/src"
+            },
+            "args": [
+                "-m",
+                "unittest",
+                "discover",
+                "-s",
+                "tests"
+            ],
+            "console": "integratedTerminal",
+            "taskSig": "${1}"
+        },
+        {
+            "label": "run-server",
+            "type": "python",
+            "request": "launch",
+            "justMyCode": false,
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}/src"
+            },
+            "args": [
+                "-m",
+                "auto_convert.server"
+            ],
+            "console": "integratedTerminal",
+            "taskSig": "${2}"
+        }
+    ]
+}
