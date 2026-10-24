@@ -190,3 +190,153 @@ def sanitize_filename(name: str, allowed: Optional[str] = None) -> str:
 def ensure_output_dir(path: str) -> str:
     os.makedirs(_abs(path), exist_ok=True)
     return _abs(path)
+
+
+# --------------------------------------------------------------------------- #
+# separation engines (htdemucs ONNX vs UVR5 audio-separator) + four-stem runner
+# --------------------------------------------------------------------------- #
+ENGINE_AUTO = "auto"
+ENGINE_UVR5 = "uvr5"      # audio-separator using the reused UVR5 `.th` weights
+ENGINE_HTDEMUCS = "htdemucs"  # canonical ONNX Runtime HTDemucs (.onnx model)
+
+
+def _site_packages() -> str:
+    """Return a directory that contains installed packages (no import side effects)."""
+    for p in sys.path:
+        if not p or p == "-":
+            continue
+        cand = os.path.join(_abs(p), "site-packages") if PLATFORM_WINDOWS else \
+               os.path.join(_abs(p))
+        if os.path.isdir(cand):
+            return cand
+    return ""
+
+
+def detect_engine(scope_dir: str = "", uvr_root: str = "") -> Optional[str]:
+    """Pure availability check for a usable four-stem engine (no heavy imports).
+
+    Returns "htdemucs", "uvr5", or None. `scope_dir`/`uvr_root` let callers point at an
+    already-provisioned onnx model dir and/or the UVR5 install that ships `.th` weights.
+    """
+    uvr = os.path.abspath(os.path.expanduser(uvr_root)) if uvr_root else ""
+    repo = os.path.join(uvr, "models", "Demucs_Models", "v3_v4_repo") if uvr else ""
+    weights_present = bool(repo) and os.path.isfile(
+        os.path.join(repo, "955717e8-8726e21a.th"))
+
+    # uvr5 / audio-separator path: package present AND reusable weights available
+    if _dir_has_any(_site_packages(), ("audio_separator",)):
+        if weights_present or os.path.isdir(uvr):
+            return ENGINE_UVR5
+
+    # htdemucs ONNX path: package installed AND a model file provisioned somewhere
+    if _dir_has_any(_site_packages(), ("htdemucs", "onnxruntime")):
+        model_dir = scope_dir if scope_dir else ""
+        for root, _dirs, files in os.walk(model_dir):
+            for f in files:
+                if f.endswith(".onnx"):
+                    return ENGINE_HTDEMUCS
+    return None
+
+
+def _dir_has_any(root: str, names) -> bool:
+    try:
+        return any(n in os.listdir(_abs(root)) for n in names)
+    except OSError:
+        return False
+
+
+def find_python() -> Optional[str]:
+    """Return a usable python interpreter path (shutil.which + sys.executable)."""
+    if sys.executable and _exists_exe(sys.executable):
+        return sys.executable
+    for name in ("python3", "python"):
+        found = which(name)
+        if found:
+            return found
+    return None
+
+
+def build_htdemucs_four_stems_cmd(
+    python_exe: str,
+    input_audio: str,
+    workdir: str,
+    model_name: str = "htdemucs",
+    threads: int = 0,
+) -> List[str]:
+    """Canonical ONNX Runtime HTDemucs four-stems CLI (loads the `.onnx` model).
+
+    Emits <workdir>/separated/<model>/<track>.wav. Requires `pip install htdemucs`.
+    """
+    cmd = [str(python_exe), "-m", "htdemucs", "four-stems", "--model", str(model_name),
+           "--audio", str(input_audio), "--out", str(workdir)]
+    if threads and threads > 0:
+        cmd += ["--threads", str(threads)]
+    return cmd
+
+
+def _locate_stems(workdir: str) -> List[str]:
+    """Return the absolute paths of {drums,bass,other,vocals}.wav under workdir/separated/*/."""
+    found = []
+    for root, _dirs, files in os.walk(os.path.join(_abs(workdir), "separated")):
+        for f in sorted(files):
+            if f.lower().endswith(".wav"):
+                stem = os.path.splitext(f)[0]
+                if stem in ("drums", "bass", "other", "vocals"):
+                    found.append((stem, _abs(os.path.join(root, f))))
+    return [p for _, p in sorted(found)]
+
+
+def separate_stems(
+    audio: str,
+    engine: str = ENGINE_AUTO,
+    workdir: str = "",
+    threads: int = 0,
+    python_exe: Optional[str] = None,
+    uvr_root: str = "",
+) -> dict:
+    """Separate `audio` into four stems; return {track: abs_path} for the WAVs found.
+
+    Raises RuntimeError (with last stderr lines) if separation fails or no usable engine
+    is available. Heavy imports are lazy so importing this module never pulls torch.
+    """
+    py = python_exe or find_python()
+    if not py:
+        raise RuntimeError("no python interpreter found for stem separation")
+    workdir = _abs(workdir) if workdir else os.path.join(_abs(os.getcwd()), "stems", _sanitize(audio))
+    os.makedirs(workdir, exist_ok=True)
+
+    if engine in (ENGINE_AUTO, ENGINE_HTDEMUCS):
+        if not (_dir_has_any(_site_packages(), ("htdemucs", "onnxruntime"))):
+            raise RuntimeError("engine 'htdemucs' selected but the htdemucs package is not installed")
+        cmd = build_htdemucs_four_stems_cmd(py, audio, workdir, threads=threads)
+        res = run(cmd)
+        if not res.ok:
+            _print_tail(res.stderr); raise RuntimeError("htdemucs four-stems failed (exit %d): %s" % (res.returncode, " ".join(cmd[:4])))
+
+    elif engine in (ENGINE_AUTO, ENGINE_UVR5):
+        if not (_dir_has_any(_site_packages(), ("audio_separator",))):
+            raise RuntimeError("engine 'uvr5' selected but the audio-separator package is not installed")
+        r = os.path.abspath(os.path.expanduser(uvr_root)) if uvr_root else ""
+        repo = os.path.join(r, "models", "Demucs_Models", "v3_v4_repo") if r else ""
+        cmd = build_demucs_four_stems_cmd(py, audio, workdir, repo=repo, threads=threads)
+        res = run(cmd)
+        if not res.ok:
+            _print_tail(res.stderr); raise RuntimeError("audio-separator four-stems failed (exit %d): %s" % (res.returncode, " ".join(cmd[:4])))
+    else:
+        raise ValueError("unknown engine: %r" % (engine,))
+
+    stems = _locate_stems(workdir)
+    if len(stems) < 4:
+        raise RuntimeError("expected 4 stems but found %d under %s" % (len(stems), workdir))
+    return {os.path.splitext(os.path.basename(p))[0]: p for p in stems}
+
+
+def _sanitize(audio: str) -> str:
+    # reuse core's own path-safety helper (no cross-module import needed)
+    return sanitize_filename(audio or "audio")
+
+
+# UVR5 install root default is resolved by the caller; expose a helper to build its repo path.
+def uvr_repo_path(uvr_root: str = "") -> str:
+    root = os.path.abspath(os.path.expanduser(uvr_root)) if uvr_root else ""
+    return os.path.join(root, "models", "Demucs_Models", "v3_v4_repo") if root else ""
