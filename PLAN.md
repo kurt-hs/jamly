@@ -46,10 +46,9 @@ stack are already Python-based.
 
 ---
 
----
-
 ## 2. Environment facts discovered on this machine
 
+> These are **findings on THIS box**; the portable design (§10) does not depend on them - `bootstrap.py` self-provisions missing tools into `.portable/`. They remain useful as ground truth for local testing.
 | Item | Finding |
 |------|---------|
 | System Python | `C:\Users\Kurt\anaconda3\python.exe` (v3.13) — no yt-dlp / audio-separator / torch modules installed here |
@@ -103,14 +102,22 @@ Two implementation routes, both using UVR5's models/commands:
 ## 4. Recommended architecture (ROUTE A)
 
 ```
-┌─────────────────────┐     ┌───────────────────────────┐     ┌──────────────────────────────┐
-│  CLI / browser ext  │ --> │   pipeline.py              │ --> │   dedicated Python venv      │
-│  (pass link/watchID)│     │   1. validate + normalize input          audio-separator       │
-│                      │     │   2. yt-dlp --extract-audio -f bestaudio  torch (+ DirectML)    │
-│                      │     │   3. run demucs four-stems (HTDemucs)    installed here         │
-│                      │     │   4. ffmpeg: drums.wav + (bass+other+vocals)=no-drums.wav          │
-└─────────────────────┘     └───────────────────────────┘     │   reuse UVR5's model files      │
-                                                               └──────────────────────────────┘
+┌──────────────┐   ┌────────────┐   ┌───────────────────────┐
+│ User / ext   │-->│ run.py      │-->│ .portable/ scope       │
+│ (paste link) │   │ validate+   │   │ python, yt-dlp,        │
+│              │   │ normalize   │   │ ffmpeg+ffprobe, engine │
+└──────────────┘   └─────┬───────┘   └───────────┬───────────┘
+
+Flow:
+  1. validate + normalize input (watch ID)
+  2. yt-dlp --extract-audio -f bestaudio --audio-quality 0 -> native lossless container
+  3. demucs four-stems (HTDemucs; weights reused/reprovisioned); provider auto-detected (CUDA -> DirectML)
+  4. ffmpeg: drums.wav + mix(bass+other+vocals)=no-drums.wav
+
+Notes:
+  - run.py self-provisions .portable/ on first run and reuses tools already installed.
+  - Engine default = ONNX Runtime htdemucs `.onnx` (auto-downloaded); audio-separator/UVR5 weights as local override.
+
 ```
 
 ### 4.1 Input handling (flexible, extensible to a browser extension)
@@ -118,7 +125,7 @@ Two implementation routes, both using UVR5's models/commands:
   (`youtube.com/watch`, `youtu.be/ID`), or bare watch ID (`dQw4w9WgXcQ`).
 - Normalization: strip query/hash, extract the 11-char `v=` parameter as the watch ID.
 - Design so a browser extension can call it two ways (see §6):
-  - **CLI mode**: `python pipeline.py <url-or-id> [-o OUTDIR]`
+  - **CLI mode**: `python run.py <url-or-id> [-o OUTDIR]`
   - **HTTP mode** (for extensions without CLI access to the host machine): a tiny local Flask/
     http.server endpoint that takes `{youtube_id}` and returns JSON of the two output file paths.
     This is the recommended path for a browser extension, since an extension can't shell out to
@@ -161,7 +168,7 @@ Extensions cannot run arbitrary local processes, so two supported modes:
    once and kept alive while the browser session runs.
 
 2. **CLI mode** — If the extension can trigger a desktop app/command, pass the normalized watch ID:
-   `python pipeline.py <watch_id>`. Simpler, but requires an installed launcher (e.g. a small Electron/
+   `python run.py <watch_id>`. Simpler, but requires an installed launcher (e.g. a small Electron/
    native bridge). Less ideal than the server for in-extension use.
 
 Flow: popup → send `{youtube_id}` to endpoint → stream progress / status JSON → on completion, open
@@ -178,7 +185,6 @@ both files. Add `--headless` so no GUI window is shown; print/stream progress li
 - **Output container**: RESOLVED - let yt-dlp decide the native best lossless container; pass it straight through to separation unchanged. On the ONNX path there is no re-encode at all.
 - **Future work (later, now drafted in §11):** queue-based batching - add/remove/reorder videos from the extension/userscript, bounded concurrency, per-item progress + completion alerts with links; resume/retry on transient download/separation failures.
 
----
 ---
 
 ## 7. Confirmed command shapes
@@ -239,15 +245,6 @@ auto_convert/
 ```
 
 
-```
-auto_convert/
-├── pipeline.py            # main orchestration (yt-dlp -> separation -> ffmpeg)
-├── server.py              # optional HTTP endpoint for the browser extension
-├── requirements.txt       # torch (CUDA build) + DirectML fallback, audio-separator, ffmpeg-python, Flask (dev)
-├── README.md              # setup + usage
-└── tests/                 # input-normalization + CLI smoke tests
-```
-
 ## 9. Build order (portable implementation)
 
 **Bootstrap first (§10):** on a fresh machine the script self-provisions into `.portable/` - Python, yt-dlp, ffmpeg+ffprobe, and the ONNX Runtime + htdemucs model; only downloads what's missing.
@@ -265,11 +262,11 @@ auto_convert/
 
 ### 10.1 Self-provisioning bootstrap (`bootstrap.py`)
 - On first run, detect and provision each dependency inside `<project>/.portable/`:
-- Python: prefer a system Python on PATH; else download the embeddable `python.zip` and create a venv in `.portable/venv`. Pin versions for reproducibility.
-- yt-dlp (auto-obtain): if already present as a python module or an exe on PATH, reuse it; else download the official standalone release for the host OS/arch (`yt-dlp.exe` on Windows 10+, `yt-dlp_linux`, `yt-dlp_macos`; arm64 variants available). Falls back to `pip install yt-dlp` when a python is found.
-- ffmpeg + ffprobe (auto-obtain): download one static build archive for the host OS/arch from BtbN/FFmpeg-Builds (`ffmpeg-master-latest-win64-gpl.zip`, `-linux64-`, `-macosx-arm64-…`) which ships BOTH `ffmpeg` and `ffprobe`; place under `.portable/ffmpeg/`. If UVR5's bundled `ffmpeg.exe` is detected, reuse it (and provide a matching ffprobe shim). Fallback: `ffmpeg-static` npm pkg.
-- Inference engine: install into the scope - ONNX Runtime + `demucs-onnx` (auto-downloads htdemucs `.onnx`) for the portable default; OR audio-separator (+ torch-directml/CUDA) when reusing UVR5 weights. Detect GPU provider automatically (CUDA preferred, DirectML fallback); let the user override.
-- Reuse-first policy: every step checks PATH / existing installs before downloading, so a machine with Python + ffmpeg already installed skips those downloads entirely.
+  - **Python:** prefer a system Python on PATH; else download the embeddable `python.zip` and create a venv in `.portable/venv`. Pin versions.
+  - **yt-dlp:** if already present (python module or PATH exe) reuse it; else download the official standalone release for host OS/arch, falling back to `pip install yt-dlp`.
+  - **ffmpeg + ffprobe:** one static build archive per host OS/arch from BtbN/FFmpeg-Builds (ships both); under `.portable/ffmpeg/`, reusing UVR5's bundled ffmpeg.exe if present.
+  - **Inference engine:** install into scope - ONNX Runtime + an htdemucs `.onnx` export (auto-downloaded from HuggingFace; e.g. via a thin `demucs-onnx`-style wrapper) for the portable default; or audio-separator (+ torch-directml/CUDA) when reusing UVR5 weights. Provider auto-detected.
+  - **Reuse-first:** every dependency check hits PATH/existing-installs first; only missing pieces self-provision into `.portable/`.
 
 ### 10.2 Isolated scope and safe execution
 - Everything the script needs lives under `.portable/` (gitignored) - no pollution of the system or UVR5 install.
