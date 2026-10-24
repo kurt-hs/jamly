@@ -38,7 +38,7 @@ class DemucsCmdTests(unittest.TestCase):
         cmd = build_demucs_four_stems_cmd(
             python_exe="python.exe", input_audio=r"C:\in.wav",
             workdir=r"C:\work\separated", repo=r"C:\repo",
-            weights_name="95571e8-8726e21a", device=None, threads=0)
+            weights_name="955717e8-8726e21a", device=None, threads=0)
         self.assertIn("htdemucs", cmd)
         self.assertIn("--four-stems", cmd)
         self.assertIn("--input", cmd)
@@ -48,14 +48,14 @@ class DemucsCmdTests(unittest.TestCase):
 
     def test_device_override(self):
         cmd = build_demucs_four_stems_cmd(python_exe="python.exe", input_audio="in.wav",
-                                           workdir="w", repo="", weights_name="95571e8-8726e21a",
+                                           workdir="w", repo="", weights_name="955717e8-8726e21a",
                                            device="cuda", threads=0)
         self.assertIn("--device", cmd)
         self.assertEqual(cmd[cmd.index("--device") + 1], "cuda")
 
     def test_threads_override(self):
         cmd = build_demucs_four_stems_cmd(python_exe="python.exe", input_audio="in.wav",
-                                           workdir="w", repo="", weights_name="95571e8-8726e21a",
+                                           workdir="w", repo="", weights_name="955717e8-8726e21a",
                                            device=None, threads=4)
         self.assertEqual(cmd[cmd.index("--threads") + 1], "4")
 

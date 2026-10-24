@@ -137,7 +137,7 @@ def build_demucs_four_stems_cmd(
     input_audio: str,
     workdir: str,
     repo: str,
-    weights_name: str = "95571e8-8726e21a",
+    weights_name: str = "955717e8-8726e21a",
     device: Optional[str] = None,
     threads: int = 0,
 ) -> List[str]:
