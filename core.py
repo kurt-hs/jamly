@@ -199,6 +199,10 @@ ENGINE_AUTO = "auto"
 ENGINE_UVR5 = "uvr5"      # audio-separator using the reused UVR5 `.th` weights
 ENGINE_HTDEMUCS = "htdemucs"  # canonical ONNX Runtime HTDemucs (.onnx model)
 
+# Demucs four-stem weight repo shipped inside the UVR5 GUI (audio-separator maps these .th files).
+DEMUCS_REPO_SUBDIR = os.path.join("models", "Demucs_Models", "v3_v4_repo")
+DEMUCS_WEIGHT_FILE = "955717e8-8726e21a.th"  # HTDemucs weight file inside that repo
+
 
 def _site_packages() -> str:
     """Return a directory that contains installed packages (no import side effects)."""
@@ -212,21 +216,104 @@ def _site_packages() -> str:
     return ""
 
 
+def _env_roots() -> list:
+    """Return explicit install-root overrides from env, if any."""
+    out = []
+    for key in ("AUTOCV_UVR_ROOT", "UVR5_ROOT", "UVR5_PATH"):
+        val = os.environ.get(key)
+        if val and os.path.isdir(os.path.expanduser(val)):
+            out.append(os.path.abspath(os.path.expanduser(val)))
+    return out
+
+
+def _scan_uvr_roots() -> list:
+    """Best-effort discovery of UVR5 / audio-separator install roots (no heavy imports).
+
+    A usable local engine is signalled by the Demucs ``.th`` weight repo shipped inside the
+    UVR5 GUI, or an importable ``audio_separator`` package in Python site-packages. Returns a
+    de-duplicated, ordered list of candidate directories. Pure file checks at bounded depth.
+    """
+    markers = DEMUCS_REPO_SUBDIR
+    weight_file = os.path.join(markers, DEMUCS_WEIGHT_FILE)
+    found = []  # unique abspaths
+    seen = set()
+
+    def _add(path):
+        ap = os.path.abspath(os.path.expanduser(path))
+        if not os.path.isdir(ap) or ap in seen:
+            return
+        seen.add(ap)
+        found.append(ap)
+
+    uvr_names = ("Ultimate Vocal Remover", "Ultimate-Vocal-Remover")
+    home = os.environ.get("HOME", "") or os.path.join(os.Getenv("USERPROFILE"), "")
+
+    def _has_weights(root):
+        return bool(
+            os.path.join(_abs(root), markers) and
+            os.path.isfile(os.path.join(_abs(root), weight_file))
+        )
+
+    # 1. explicit env overrides (highest priority)
+    for r in _env_roots():
+        _add(r)
+
+    # 2. the UVR5 app name as a direct marker under common install roots
+    scan_dirs = []
+    if os.path.isdir(_abs(home)):
+        for d in (
+            os.path.join(_abs(home), "AppData", "Local"),
+            os.path.join(_abs(home), "AppData", "Roaming"),
+            os.environ.get("ProgramFiles", ""),
+            os.environ.get("ProgramFiles(x86)", ""),
+        ):
+            if os.path.isdir(d):
+                scan_dirs.append(d)
+    prog_apps = os.path.join(_abs(home), "AppData", "Local", "Programs")
+
+    # 3. AppData\Local\Programs subtree (where UVR5 GUI typically installs)
+    for name in uvr_names:
+        _add(os.path.join(prog_apps, name))
+
+    # 4. bounded walk of scan_dirs (depth <= 2) for the weight repo or package marker
+    def _bounded(root):
+        try:
+            for dp, dn, fn in os.walk(os.path.join(_abs(root)), topdown=True):
+                if len(dp.split(os.sep)) > 3:  # depth guard
+                    continue
+                if _has_weights(dp) or any(n in dn for n in uvr_names):
+                    _add(dp)
+        except OSError:
+            pass
+    for d in scan_dirs + ([prog_apps] if os.path.isdir(prog_apps) else []):
+        try:
+            _bounded(d)
+        except OSError:
+            pass
+    return found
+
+
 def detect_engine(scope_dir: str = "", uvr_root: str = "") -> Optional[str]:
     """Pure availability check for a usable four-stem engine (no heavy imports).
 
     Returns "htdemucs", "uvr5", or None. `scope_dir`/`uvr_root` let callers point at an
     already-provisioned onnx model dir and/or the UVR5 install that ships `.th` weights.
     """
-    uvr = os.path.abspath(os.path.expanduser(uvr_root)) if uvr_root else ""
-    repo = os.path.join(uvr, "models", "Demucs_Models", "v3_v4_repo") if uvr else ""
-    weights_present = bool(repo) and os.path.isfile(
-        os.path.join(repo, "955717e8-8726e21a.th"))
+    # reusable Demucs weights: explicit root, env roots, or discovered install roots
+    weight_file = os.path.join(DEMUCS_REPO_SUBDIR, DEMUCS_WEIGHT_FILE)
+    if uvr_root:
+        uvr_roots = [os.path.abspath(os.path.expanduser(uvr_root))]
+    else:
+        uvr_roots = _scan_uvr_roots() or []
 
-    # uvr5 / audio-separator path: package present AND reusable weights available
-    if _dir_has_any(_site_packages(), ("audio_separator",)):
-        if weights_present or os.path.isdir(uvr):
-            return ENGINE_UVR5
+    weights_present = any(
+        os.path.isfile(os.path.join(_abs(b), weight_file)) for b in uvr_roots
+    )
+    sep_pkg = _dir_has_any(_site_packages(), ("audio_separator",))
+
+    # uvr5 / audio-separator path: reusable Demucs weights present, or the importable package exists
+    if weights_present or sep_pkg:
+        return ENGINE_UVR5
 
     # htdemucs ONNX path: package installed AND a model file provisioned somewhere
     if _dir_has_any(_site_packages(), ("htdemucs", "onnxruntime")):

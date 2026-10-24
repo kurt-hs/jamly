@@ -1,8 +1,10 @@
 """Unit tests for core.py command builders + pure helpers (no network/subprocess)."""
 import os
 import sys
+import tempfile
 import unittest
 
+import core  # noqa: E402 (bare module import so `core.<attr>` resolves in tests)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from core import (  # noqa: E402
     PLATFORM_WINDOWS, RunResult, build_demucs_four_stems_cmd,
@@ -127,3 +129,59 @@ class RunTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class DetectEngineTests(unittest.TestCase):
+    """detect_engine() / _scan_uvr_roots() availability checks (no heavy imports)."""
+
+    WEIGHT = "955717e8-8726e21a.th"       # filename only
+    MARKER_DIR = os.path.join("models", "Demucs_Models", "v3_v4_repo")
+
+    def _make_weight_root(self):
+        base = tempfile.mkdtemp(prefix="uvr5_")
+        repo = os.path.join(base, self.MARKER_DIR)
+        os.makedirs(repo, exist_ok=True)
+        with open(os.path.join(repo, self.WEIGHT), "wb") as fh:
+            fh.write(b"fake-weights")
+        return base
+
+    def test_env_root_marker_detected_as_uvr5(self):
+        import unittest.mock as mock
+        root = self._make_weight_root()
+        with mock.patch.dict(os.environ, {"AUTOCV_UVR_ROOT": root}, clear=False), \
+             mock.patch("core._scan_uvr_roots", return_value=[root]):
+            self.assertEqual(core.detect_engine(), core.ENGINE_UVR5)
+
+    def test_scan_includes_explicit_env_root(self):
+        import unittest.mock as mock
+        root = self._make_weight_root()
+        with mock.patch.dict(os.environ, {"AUTOCV_UVR_ROOT": root}, clear=False), \
+             mock.patch("core._dir_has_any", return_value=False) as dh:
+            # _scan must surface the explicit env override regardless of weights
+            roots = core._scan_uvr_roots()
+            self.assertIn(os.path.abspath(root), roots)
+
+    def test_no_weights_or_pkg_is_not_uv5(self):
+        import unittest.mock as mock
+        with mock.patch("core._scan_uvr_roots", return_value=[]), \
+             mock.patch("core._dir_has_any", return_value=False):
+            res = core.detect_engine()
+            self.assertNotEqual(res, core.ENGINE_UVR5)
+
+    def test_discovery_finds_appdata_programs_root(self):
+        # On this box the UVR5 GUI ships at AppData\Local\Programs<name> with weights present.
+        import unittest.mock as mock
+        home = os.environ.get("HOME") or (os.environ.get("USERPROFILE") or "")
+        prog_apps = os.path.join(_abs(home), "AppData", "Local", "Programs")
+        if not os.path.isdir(prog_apps):
+            self.skipTest("no AppData\Local\Programs to scan")
+        with mock.patch.dict(os.environ, clear=False):
+            roots = core._scan_uvr_roots()
+            # explicit env override (if any) is always surfaced; otherwise the bounded walk
+            # of AppData\Local\Programs should surface the UVR5 GUI dir when weights are present
+            if not os.environ.get("AUTOCV_UVR_ROOT"):
+                expected = os.path.join(prog_apps, "Ultimate Vocal Remover")
+                self.assertIn(expected, roots)
+                self.assertTrue(any(
+                    os.path.isfile(os.path.join(_abs(r), core.DEMUCS_REPO_SUBDIR,
+                                                core.DEMUCS_WEIGHT_FILE)) for r in roots))
