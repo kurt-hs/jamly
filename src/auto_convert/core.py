@@ -38,6 +38,55 @@ def _exists_exe(path: str) -> bool:
     return bool(os.access(p, os.X_OK))
 
 
+# Friendly labels for where a tool binary was found -- used by run.py to report install type.
+# Pure path inspection (no subprocess), so it stays unit-testable. kind: portable|app|path.
+_APP_DIRS = (
+    "Shotcut", "Blender", "DaVinci Resolve", "OBS Studio", "Kdenlive", "Avidemux",
+    "HandBrake", "PotPlayer", "VLC media player", "Audacity", "FFmpeg-Builds",
+)
+_PATH_LOC_HINTS = {
+    r"AppData\Local\Microsoft\Winget": "winget",
+    r"Program Files\ffmpeg": "install",
+    r"yt-dlp_win_x86": "AppData",
+}
+
+
+def _classify_path(path: str) -> dict:
+    """Return {kind, label} for a tool binary path.
+
+    ``kind`` is one of ``portable`` (under the scope's ``.portable/``), ``app`` (inside a known
+    editor/muxer app dir that bundles ffmpeg/yt-dlp), or ``path`` (PATH / winget / npm). ``label``
+    is a short human tag: an app name, ``portable``, or the PATH/winget/AppData location.
+    """
+    ap = _abs(os.path.normpath(path))
+    parts = [p.lower() for p in ap.split(os.sep) if p]
+
+    # portable scope: anything under <scope>/.portable/...
+    if ".portable" in parts:
+        return {"kind": "portable", "label": "portable"}
+
+    # known app install dirs (ffmpeg-carrying editors / muxers)
+    for name in _APP_DIRS:
+        if any(name.lower() == p or name.lower().replace(" ", "_") == p for p in parts):
+            return {"kind": "app", "label": name}
+
+    # path-based installs: winget, npm, AppData tool folders, etc.
+    label = "PATH"
+    for hint, tag in _PATH_LOC_HINTS.items():
+        if any(h.lower() == p or h.replace(" ", "_").lower() == p for p in parts):
+            return {"kind": "path", "label": tag}
+        if any(h.lower() in p for p in parts):
+            label = tag
+    if "npm" in parts:
+        return {"kind": "path", "label": "AppData"}  # AppData\Roaming\npm (winget/npm)
+    return {"kind": "path", "label": label}
+
+
+def tool_source(path: str) -> dict:
+    """Public wrapper over :func:`_classify_path` for a resolved tool binary path."""
+    return _classify_path(path or "")
+
+
 def which(program: str) -> Optional[str]:
     """Return the first path on PATH that matches `program`, else None.
 
@@ -78,19 +127,37 @@ class RunResult:
         return self.returncode == 0
 
 
-def run(args: List[str], check: bool = False, capture: bool = True) -> RunResult:
+def run(args: List[str], check: bool = False, capture: bool = True,
+        stream: bool = False, on_line=None) -> RunResult:
     """Run `args` as a list (no shell). Returns the completed process.
 
-    On failure prints the last ~20 lines of stderr for debugging but does not raise,
-    so callers can inspect returncode and continue (e.g. across a queue).
+    Default behaviour is unchanged. Two optional flags add friendly output for long steps:
+      * ``stream=True`` writes subprocess stdout/stderr live to the terminal so yt-dlp's own
+        ``[download] 95% ...`` progress shows in real time (output is still captured and returned).
+      * ``on_line(line)`` is called with each decoded line during streaming; callers can react
+        (e.g. render a download bar). Never raises -- tool-not-found and read errors are surfaced as
+        the process result so callers can inspect returncode and continue (e.g. across a queue).
     """
     cmd = [str(a) for a in args]
     try:
-        proc = subprocess.run(
-            cmd,
-            capture_output=capture,
-            text=True,
-        )
+        if stream and not capture:
+            proc = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+
+            def _pump():
+                while True:
+                    line = proc.stdout.readline()
+                    if line == "":  # EOF
+                        break
+                    sys.stdout.write(line.rstrip("\n") + "\n")
+                    sys.stdout.flush()
+                    if on_line:
+                        on_line(line)
+
+            _pump()
+            returncode = proc.wait()
+        else:
+            proc = subprocess.run(cmd, capture_output=capture, text=True)
     except FileNotFoundError as exc:  # tool path is wrong / not found
         return RunResult(args=cmd, returncode=-1, stdout="", stderr="NOT FOUND: %s" % " ".join(cmd[:3]))
     if check and proc.returncode != 0:

@@ -23,15 +23,59 @@ import sys
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
-from .normalize import normalize_inputs
+from .normalize import normalize_inputs, extract_watch_id
 from .core import (
     ENGINE_UVR5, ENGINE_HTDEMUCS,
     _abs, ensure_output_dir, PLATFORM_WINDOWS, run as _run, sanitize_filename,
+    tool_source,
 )
 from .bootstrap import find_ffmpeg
+from .logging import Logger
 from auto_convert._input_queue import WatchQueue, default_queue_path
 
 ENGINE_CHOICES = ("auto", "uvr5", "htdemucs")
+
+
+# module-level logger; quiet by default so importing this module never prints (tests/callers opt in).
+# Tests replace it via ``monkeypatch.setattr("auto_convert.run._log", ...)`` to capture output.
+_log = Logger()
+
+
+def get_logger() -> Logger:
+    """Return the process logger. Callers may swap it for a capturing instance (see :func:`main`)."""
+    return _log
+
+
+def ensure_utf8_output(streams=None):
+    """Force UTF-8 on stdout/stderr when they can't already encode Unicode.
+
+    Windows defaults to the console code page (often cp1252), which cannot render block-glyph
+    output such as the download bar. Reconfiguring to UTF-8 keeps friendly symbols intact for any
+    terminal that is not forced to a legacy 8-bit code page; failures are swallowed so redirections
+    and non-interactive captures keep working.
+    """
+    for s in (streams or (sys.stdout, sys.stderr)):
+        if hasattr(s, "reconfigure"):
+            try:
+                s.reconfigure(encoding="utf-8")
+            except Exception:  # noqa: BLE001 - never let encoding setup break the run
+                pass
+
+
+def _stream_download(cmd: List[str]) -> 'RunResult':
+    """Run the yt-dlp extraction live so its ``[download]`` progress streams to the terminal.
+
+    Returns the :class:`core.RunResult`. Any final ``[download] X% (a/b)`` telemetry is parsed into a
+    compact bar printed via the logger. Never raises -- callers inspect ``res.ok`` / the audio path."""
+    from .core import run as _run_streamed
+    res = _run_streamed(cmd, stream=True)
+    if not res.ok or not (res.stdout or "").strip():
+        raise RuntimeError("yt-dlp produced no output")
+    prog = Logger.parse_download_progress(res.stdout)
+    if prog and prog.get("pct"):
+        bar = Logger.render_bar(prog["pct"], prog.get("dl"), prog.get("total"))
+        _log.note(bar + "   (extracted to audio.<ext>)")
+    return res
 
 
 # --------------------------------------------------------------------------- #
@@ -175,7 +219,7 @@ def process_one(wid: str, args, progress=None) -> ItemResult:
         ytdlp_exe = _find_ytdlp(scope)
         cmd = build_download_cmd(ytdlp_exe, wid, workdir, ffmpeg_dir=ffmpeg_dir or "")
         res.status, res.stage = "download", "download"
-        audio_path = _run(cmd).ok and locate_extracted(workdir)
+        audio_path = _stream_download(cmd).ok and locate_extracted(workdir)
         if not audio_path:
             raise RuntimeError("yt-dlp extract produced no audio file")
 
@@ -262,15 +306,79 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
-def _print_progress(wid: str, res: ItemResult) -> None:
-    """One-line status per item (kept separate so it stays testable / easy to swap)."""
-    if res.ok:
-        print("OK   %s -> drums=%s no_drums=%s" % (res.watch_id, res.drums_path, res.nodrums_path))
+# --------------------------------------------------------------------------- #
+# friendly CLI output helpers (all route through the module logger; quiet by default)
+# --------------------------------------------------------------------------- #
+def _blank_count(items):
+    return sum(1 for i in items if not str(i).strip())
+
+
+def _colored(text: str, kind) -> str:
+    """Colour a string via the module logger's colour flag; plain text when disabled."""
+    return _log._c(text, kind) if _log.color_enabled else text
+
+
+def echo_inputs(raw, titles):
+    """Show how each raw input parsed -> normalized watch id (+ best-effort title hint).
+
+    Computes each input's own normalized id (via ``extract_watch_id``) so blank / invalid /
+    duplicate entries are all shown and flagged -- giving a transparent view of the dedup result.
+    """
+    kept = dropped = 0
+    for i, w in enumerate(raw, 1):
+        hint = titles[i - 1] if i - 1 < len(titles) else None
+        tag = ""
+        if not isinstance(w, str) or not w.strip():
+            wid = ""
+            tag = "  (blank)" if isinstance(w, str) and w.strip() == "" else "  (non-string)"
+        else:
+            try:
+                wid = extract_watch_id(w)
+            except Exception:
+                wid = ""
+                tag = "  (invalid)"
+        kept += bool(wid)
+        dropped += not kept
+        line = "%2d. %s -> %s%s" % (i, w, wid, tag)
+        hint = '   "%s"' % hint if hint else ""
+        _log.note(line + hint)
+    tail = "; dropped %d (%d blank / invalid / duplicate)" % (len(raw) - kept, dropped) if dropped else ""
+    _log.step("%d raw input(s) -> %d watch id(s) after normalize+dedup%s" % (len(raw), kept, tail))
+
+
+def describe_tools(ytdlp_path: str = "", ffmpeg_dir: str = "") -> None:
+    """Report which yt-dlp + ffmpeg binaries are in use (name/version/install-type/location).
+
+    ``tool_source`` classifies each path into a kind (portable/app/path) and a short label (app name,
+    ``portable``, winget/AppData location); :meth:`Logger.tool` renders them as
+    ``yt-dlp 2024.7.9 [portable] portable``.
+    """
+    _log.step("tools")
+    if ytdlp_path:
+        src = tool_source(ytdlp_path)
+        ver = _log.version_of(ytdlp_path, ("-V",)) or "?"
+        _log.tool("yt-dlp", ver, kind=src["kind"], loc=_colored(src["label"], "grey"))
     else:
-        print("FAILED %s: %s" % (res.watch_id, res.error or "unknown error"))
+        _log.warn("no yt-dlp found on PATH / scope -- download step will fail")
+    if ffmpeg_dir:
+        src = tool_source(ffmpeg_dir)
+        _log.tool("ffmpeg", "", kind=src["kind"], loc=_colored(src["label"], "grey"))
+    else:
+        _log.warn("no ffmpeg found -- mux step will fail")
+
+
+def link_outputs(res: ItemResult) -> None:
+    """Print the finished output files as clickable links (drums / no-drums / .meta.json)."""
+    if res.ok and (res.drums_path or res.nodrums_path):
+        for p in (res.drums_path, res.nodrums_path, res.meta_path):
+            if p:
+                _log.link(p)
 
 
 def main(argv=None) -> int:
+    # Make Unicode output (block-bar glyphs, etc.) safe even on a legacy cp1252 console.
+    ensure_utf8_output()
+
     args = build_parser().parse_args(argv)
     scope_dir = os.environ.get("AUTOCV_SCOPE") or os.getcwd()
     qpath = getattr(args, "queue", None) or os.environ.get("AUTOCV_QUEUE") \
@@ -279,32 +387,44 @@ def main(argv=None) -> int:
     queue = WatchQueue.from_path(qpath)
     raw_inputs = gather_inputs(args)
     if not raw_inputs:
-        print("no input provided (pass -i URL or pipe URLs via stdin, or seed the queue file)",
-              file=sys.stderr)
+        _log.warn("no input provided (pass -i URL, pipe URLs via stdin, or seed the queue file)")
         return 2
 
-    # seed new ids into the persistent queue (dedup), carrying best-effort title hints
+    # show how each input parsed -> normalized id (+ title hint), then dedup into the queue
     titles = [extract_title_hint(w) for w in raw_inputs]
+    echo_inputs(raw_inputs, titles)
     newly = queue.add_all(raw_inputs, titles)
-    print("auto_convert: seeded %d item(s) into %s" % (newly, qpath))
+    _log.note("seeded %d new item(s) into %s" % (newly, qpath))
 
     if args.dry_run:
         pending = queue.pending_ids()
-        print("[dry-run] would process %d pending item(s):"
-              % len(pending), ", ".join(w[:12] for w in pending) or "(none)")
+        _log.step("dry-run")
+        _log.note("[dry-run] would process %d pending item(s): %s"
+                  % (len(pending), ", ".join(w[:12] for w in pending) or "(none)"))
         return 0
+
+    # resolve tools once, report install types/locations/version + engine
+    ytdlp_path = _find_ytdlp(scope_dir)
+    ffmpeg_dir = find_ffmpeg(scope_dir)
+    describe_tools(ytdlp_path, ffmpeg_dir)
+    engine = resolve_engine(args, scope_dir, os.environ.get("AUTOCV_UVR_ROOT") or "")
+    _log.step("engine=%s" % (engine or "none available"))
 
     # drive the queue one item at a time: mark done + save after each (resumable)
     remaining = list(queue.pending_ids())
     if not remaining:
-        print("nothing to do (%d queued, all complete)" % len(remaining))
+        _log.note("nothing to do (%d queued, all complete)" % len(remaining))
         return 0
-    print("processing %d pending item(s); queue=%s" % (len(remaining), qpath))
+    _log.step("processing %d pending item(s); queue=%s" % (len(remaining), qpath))
 
     ok = err = done = 0
     for i, wid in enumerate(remaining):
         res = process_one(wid, args)
-        _print_progress(wid, res)
+        hint = (' "%s"' % res.title) if res.title else ""
+        _log.step("%2d/%d  %s%s" % (i + 1, len(remaining), wid[:16], hint))
+        link_outputs(res)
+        if not res.ok:
+            _log.fail("%s: %s" % (res.watch_id[:16], res.error or "unknown error"))
         if res.ok:
             ok += 1
         else:
@@ -314,8 +434,8 @@ def main(argv=None) -> int:
         try:
             queue.save()
         except OSError as exc:
-            print("WARN could not persist queue (%s): %s" % (qpath, exc), file=sys.stderr)
-    print("%d/%d complete" % (ok, len(remaining)))
+            _log.warn("could not persist queue (%s): %s" % (qpath, exc))
+    _log.summary(ok, len(remaining), ok, err)
     return 0 if err == 0 else 1
 
 
