@@ -1,8 +1,5 @@
 {
     "python.defaultInterpreterPath": "",
-    "python.analysis.typeCheckingMode": "basic",
-    "python.analysis.diagnosticMode": "openFilesOnly",
-    "python.formatting.provider": "black",
     "files.trimTrailingWhitespace": true,
     "editor.tabSize": 4,
     "files.insertFinalNewline": true,
