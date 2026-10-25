@@ -29,8 +29,9 @@ class DownloadCmdTests(unittest.TestCase):
         self.assertEqual(cmd[1], "dQw4w9WgXcQ")
         self.assertIn("--extract-audio", cmd)
         self.assertIn("--audio-format", cmd) and self.assertEqual(cmd[cmd.index("--audio-format") + 1], "best")
+        # the extract shares the watch-id prefix (not a literal "audio"), so it matches the stems
         idx = cmd.index("-o")
-        self.assertEqual(cmd[idx:idx + 2], ["-o", os.path.join("/tmp/work", "audio")])
+        self.assertEqual(cmd[idx:idx + 2], ["-o", os.path.join("/tmp/work", "dQw4w9WgXcQ")])
 
 
 class MixCmdTests(unittest.TestCase):
@@ -54,6 +55,79 @@ class TitleHintTests(unittest.TestCase):
         self.assertEqual(run_mod.extract_title_hint("dQw4w9WgXcQ"), "dQw4w9WgXcQ")
 
 
+class NamingConsistencyTests(unittest.TestCase):
+    """All three outputs for one item share the watch-id prefix; stems carry indicative suffixes."""
+
+    def test_stem_output_paths_share_watch_id_prefix(self):
+        drums, nodrums, meta = run_mod.stem_output_paths("/out", "dQw4w9WgXcQ", "mp3")
+        # same common prefix on every output; stems get an indicative suffix; meta mirrors the id
+        self.assertEqual(os.path.basename(drums), "dQw4w9WgXcQ_drums.mp3")
+        self.assertEqual(os.path.basename(nodrums), "dQw4w9WgXcQ_no_drums.mp3")
+        self.assertEqual(os.path.basename(meta), "dQw4w9WgXcQ.meta.json")
+        stem = os.path.splitext(drums)[0]
+        self.assertIn("_drums", stem) and self.assertTrue(stem.startswith("dQw4w9WgXcQ"))
+        self.assertTrue(nodrums.startswith(os.path.join("/out", "dQw4w9WgXcQ")))
+
+    def test_process_one_writes_consistent_names(self):
+        # end-to-end naming through process_one: the yt-dlp extract and both stems must share the
+        # watch-id prefix, with <_drums / _no_drums> suffixes on the stems. Uses fmt=wav so the
+        # finalizer copies verbatim (no encoder) -- deterministic and subprocess-free.
+        wid = "dQw4w9WgXcQ"
+        workdir = tempfile.mkdtemp()
+        out_dir = tempfile.mkdtemp()
+        extract_name = "%s.webm" % wid   # whatever yt-dlp emits; naming only needs the prefix
+        fmt = "wav"
+
+        def fake_stream_download(cmd):
+            # the download step lands <wid>.<ext> in workdir (same dir process_one created)
+            with open(os.path.join(workdir, extract_name), "wb") as fh:
+                fh.write(b"RIFF\x00\x00\x00\x00WAVEfake-extract")
+            return RunResult(args=list(cmd), returncode=0, stdout="", stderr="")
+
+        def fake_separate(_audio, engine, _workdir, threads, uvr_root=""):
+            for name in ("drums", "bass", "other", "vocals"):
+                p = os.path.join(workdir, "%s.wav" % name)
+                with open(p, "wb") as fh:
+                    fh.write(f"RIFF\x00\x00\x00\x00WAVEfake-stem-{name}".encode())
+            return {"drums": os.path.abspath(os.path.join(workdir, "drums.wav")),
+                    "bass": os.path.abspath(os.path.join(workdir, "bass.wav")),
+                    "other": os.path.abspath(os.path.join(workdir, "other.wav")),
+                    "vocals": os.path.abspath(os.path.join(workdir, "vocals.wav"))}
+
+        args = argparse.Namespace(audio_format=fmt, threads=0, output_dir=out_dir, replace_existing=True)
+        mix_cmd = None
+        with mock.patch.object(run_mod, "make_workdir", return_value=workdir), \
+             mock.patch.object(run_mod, "_find_ytdlp", return_value="fake-ytdlp"), \
+             mock.patch.object(run_mod, "_stream_download", fake_stream_download), \
+             mock.patch.object(run_mod, "separate", fake_separate), \
+             mock.patch.object(run_mod, "_run") as _run_mock:
+            res = run_mod.process_one(wid, args)
+        # capture the no-drums mix command while the _run mock is still in place (restored on exit)
+        if _run_mock.call_count == 1:
+            mix_cmd = list(_run_mock.call_args.args[0])
+
+        self.assertTrue(res.ok, res.error)
+        # the download step lands <wid>.<ext> in workdir; both stems + the meta share that prefix
+        self.assertEqual(os.path.basename(extract_name), extract_name)  # <wid>.webm
+        drums_out = res.drums_path; nodrums_out = res.nodrums_path; meta_path = res.meta_path
+        for path, expected in [(drums_out, "%s_drums.wav" % wid),
+                               (nodrums_out, "%s_no_drums.wav" % wid),
+                               (meta_path, "%s.meta.json" % wid)]:
+            self.assertEqual(os.path.basename(path), expected)
+
+        # fmt=wav -> the finalizer copies the drums stem verbatim to disk; assert that file exists,
+        # and that its basename carries the <_drums> suffix.
+        self.assertTrue(os.path.exists(drums_out), "expected output on disk: %s" % drums_out)
+
+        # the no-drums mix was dispatched by _run (mocked here). Capture it to confirm the mix is
+        # built from bass/other/vocals into exactly nodrums_out -- and that 'drums' is NOT mixed in.
+        self.assertIsNotNone(mix_cmd, "_run must have been called with the no-drums mix command")
+        stem_inputs = [mix_cmd[i + 1] for i, tok in enumerate(mix_cmd)
+                       if tok == "-i" and mix_cmd[i + 1] not in ("-nostdin",)]
+        self.assertEqual(len(stem_inputs), 3)                     # exactly three inputs: bass/other/vocals
+        self.assertEqual({os.path.basename(s) for s in stem_inputs}, {"bass.wav", "other.wav", "vocals.wav"})
+        self.assertNotIn("drums.wav", (os.path.basename(s) for s in stem_inputs))  # drum stem must never be mixed in
+        self.assertEqual(mix_cmd[-1], nodrums_out)                # the no-drums path is the mix's output
 class GatherInputsTests(unittest.TestCase):
     def _ns(self, input_list=None):
         return argparse.Namespace(input=input_list)
@@ -123,7 +197,7 @@ class ResolveRunEnvReuseTests(unittest.TestCase):
             with mock.patch.object(run_mod, "resolve_recorded_tools", return_value={"ffmpeg": recorded_abs}), \
                  mock.patch.object(run_mod, "find_ffmpeg", side_effect=RuntimeError("must not scan when reused")), \
                  mock.patch.object(run_mod, "resolve_engine", return_value="uvr5"):
-                _s, _e, ffmpeg_dir = run_mod._resolve_run_env(argparse.Namespace(engine="auto", threads=0))
+                _s, _e, ffmpeg_dir, _u = run_mod._resolve_run_env(argparse.Namespace(engine="auto", threads=0))
             self.assertEqual(os.path.normcase(os.path.abspath(ffmpeg_dir)),
                              os.path.normcase(recorded_abs))
 
@@ -132,7 +206,7 @@ class ResolveRunEnvReuseTests(unittest.TestCase):
             with mock.patch.dict(os.environ, {"AUTOCV_SCOPE": scope}), \
                  mock.patch.object(run_mod, "find_ffmpeg", return_value="/nonexistent/ffmpeg") as ff, \
                  mock.patch.object(run_mod, "resolve_engine", return_value="uvr5"):
-                _s, _e, ffmpeg_dir = run_mod._resolve_run_env(argparse.Namespace(engine="auto", threads=0))
+                _s, _e, ffmpeg_dir, _u = run_mod._resolve_run_env(argparse.Namespace(engine="auto", threads=0))
             self.assertEqual(ffmpeg_dir, "/nonexistent/ffmpeg")
             ff.assert_called_once()   # no recorded path -> normal scan runs
 

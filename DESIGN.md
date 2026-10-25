@@ -92,6 +92,22 @@ python -m audio_separator.demucs.separate \
 ffmpeg -i bass.wav -i other.wav -i vocals.wav -shortest -mixer_channels 2 <workdir>/no_drums.wav
 ```
 
+### Output naming (§7)
+
+All three outputs for one item share the **watch id** as their common prefix, matching the yt-dlp
+extract (`<wid>.<ext>`) so every file for an item is traceable to a single name:
+
+- extract:  `<workdir>/<wid>.<ext>`           (build_download_cmd)
+- drums:    `<output_dir>/<wid>_drums.<fmt>`   (+ `.meta.json` sidecar, named but not written by code)
+- no-drums: `<output_dir>/<wid>_no_drums.<fmt>`
+
+The id is URL-safe, unique per video, and known before extraction -- a stable filename basis on every
+platform (no title to rely on yet; no unicode/special chars; no truncation). `res.title` stays a display/logging name only.
+
+The **no-drums mix excludes the drum stem by construction**: ffmpeg blends bass+other+vocals into
+`nodrums_out`, never mixing in `<wid>_drums.<fmt>`. Output format (`--audio-format`) defaults to lossy MP3;
+raw WAV is verbatim (copy, no encoder).
+
 ## Environment findings on this machine (§2)
 
 > Findings for **this box**; the portable design (`§10`) does not depend on them — `bootstrap.py`

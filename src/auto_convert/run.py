@@ -122,8 +122,11 @@ class Plan:
 # stage command builders (pure; paths already resolved to absolute)
 # --------------------------------------------------------------------------- #
 def build_download_cmd(ytdlp_exe: str, watch_id: str, workdir: str, ffmpeg_dir: str = "") -> List[str]:
-    """Extract best audio into <workdir>/audio.<ext>; container decided by yt-dlp."""
-    out = os.path.join(workdir, "audio")
+    """Extract best audio into <workdir>/<watch_id>.<ext>; container decided by yt-dlp.
+
+    The extract shares the watch-id prefix with every stem produced later, so all outputs for one
+    item are traceable to a single name (see process_one's stem naming)."""
+    out = os.path.join(workdir, watch_id)
     from .core import build_ytdlp_extract_cmd as b
     return b(ytdlp_exe, watch_id, output_template=out, ffmpeg_dir=ffmpeg_dir)
 
@@ -181,11 +184,17 @@ def make_workdir() -> str:
 
 
 def locate_extracted(workdir: str) -> Optional[str]:
-    """Return the extracted audio file path from yt-dlp's output template."""
+    """Return the extracted audio file path from yt-dlp's output template.
+
+    Prefers an explicitly-named ``audio.*`` extract (legacy templates); otherwise falls back to
+    the single regular file present -- which is enough because extraction runs before any stem
+    files exist, so workdir holds exactly one file at this point. Note: only a full path is passed
+    to os.path.isfile; passing the bare name would test the wrong thing and always return None."""
     for n in sorted(os.listdir(workdir)):
-        if n.startswith("audio") and (n.endswith((".wav", ".flac", ".alac")) or "." in n):
+        if (n.startswith("audio") and (n.endswith((".wav", ".flac", ".alac")) or "." in n)) or os.path.isfile(os.path.join(workdir, n)):
             return _abs(os.path.join(workdir, n))
-    files = [os.path.join(workdir, f) for f in os.listdir(workdir) if os.path.isfile(f)]
+    files = [os.path.join(workdir, f) for f in os.listdir(workdir)
+             if os.path.isfile(os.path.join(workdir, f))]
     return files[0] if len(files) == 1 else None
 
 
@@ -207,7 +216,21 @@ def _resolve_run_env(args) -> tuple:
     # prefer it here so we skip the broader PATH/app scan (resolve_recorded_tools returns {} when
     # nothing usable is recorded -> find_ffmpeg(scope) runs unchanged).
     ffmpeg_dir = resolve_recorded_tools(scope).get("ffmpeg") or find_ffmpeg(scope)
-    return scope, engine, ffmpeg_dir
+    # uvr_root is returned (not just used locally) so process_one can pass it straight to core.separate_stems
+    return scope, engine, ffmpeg_dir, uvr_root
+
+
+def stem_output_paths(output_dir: str, watch_id: str, fmt: str) -> tuple:
+    """Consistent output paths for one item's stems + sidecar.
+
+    All three share the watch id as their common prefix (so they are traceable to a single name
+    and match the yt-dlp extract <wid>.<ext>); each stem then carries an indicative suffix
+    (<_drums / _no_drums>) and the meta file mirrors the bare id. Pure -- no filesystem access.
+    """
+    nodrums = os.path.join(output_dir, "%s_no_drums.%s" % (watch_id, fmt))
+    drums = os.path.join(output_dir, "%s_drums.%s" % (watch_id, fmt))
+    meta = os.path.join(output_dir, "%s.meta.json" % watch_id)
+    return drums, nodrums, meta
 
 
 def process_one(wid: str, args, progress=None) -> ItemResult:
@@ -222,7 +245,7 @@ def process_one(wid: str, args, progress=None) -> ItemResult:
     audio_path = None
     stems: Dict[str, str] = {}
     try:
-        scope, engine, ffmpeg_dir = _resolve_run_env(args)
+        scope, engine, ffmpeg_dir, uvr_root = _resolve_run_env(args)
         if progress:
             progress(wid, "pending", 0, 0)
         ytdlp_exe = _find_ytdlp(scope)
@@ -239,11 +262,17 @@ def process_one(wid: str, args, progress=None) -> ItemResult:
             raise RuntimeError("no 'drums' stem produced by separation")
 
         res.status, res.stage = "mix", "mix"
-        base = sanitize_filename("%s %s" % (res.title or "audio", wid))[:80]
+        # All three outputs share the watch id as their common prefix: the yt-dlp extract is
+        # <wid>.<ext>, and each stem adds an indicative suffix (<_drums / _no_drums>). The id is
+        # URL-safe, unique per video, and known before extraction -- so it's a stable filename basis
+        # on every platform (no title to rely on yet, no unicode/special chars, no truncation).
         fmt = getattr(args, "audio_format", DEFAULT_OUTPUT_FORMAT) or DEFAULT_OUTPUT_FORMAT
-        nodrums_out = os.path.join(args.output_dir, "%s_no_drums.%s" % (base, fmt))
-        drums_out = os.path.join(args.output_dir, "%s_drums.%s" % (base, fmt))
-        mix_cmd = build_mix_cmd(ffmpeg_exe_for(ffmpeg_dir), drums, stems["bass"],
+        drums_out, nodrums_out, meta_path = stem_output_paths(args.output_dir, wid, fmt)
+        # No-drums mix: ffmpeg blends bass+other+vocals (drums excluded by construction) into
+        # nodrums_out. build_mix_cmd takes the established 5-arg form -- (ffmpeg, bass, other,
+        # vocals, output) -- matching core.build_ffmpeg_mix_cmd and its tests; 'drums' is intentionally
+        # omitted so it never lands in the mix.
+        mix_cmd = build_mix_cmd(ffmpeg_exe_for(ffmpeg_dir), stems["bass"],
                                 stems["other"], stems["vocals"], nodrums_out)
         _run(mix_cmd)
 
@@ -252,10 +281,10 @@ def process_one(wid: str, args, progress=None) -> ItemResult:
         finalize_output(ffmpeg_exe_for(ffmpeg_dir), drums, drums_out, fmt)
 
         res.status, res.stage = "done", ""
-        res.title = base
+        res.title = wid
         res.drums_path = drums_out
         res.nodrums_path = nodrums_out
-        res.meta_path = os.path.join(args.output_dir, "%s.meta.json" % base)
+        res.meta_path = meta_path
     except Exception as exc:  # noqa: BLE001 - record and continue across the queue
         res.status, res.stage, res.error = "error", "", str(exc)
     finally:
