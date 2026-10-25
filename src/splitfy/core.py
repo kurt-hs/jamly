@@ -353,7 +353,10 @@ def _scan_uvr_roots() -> list:
         found.append(ap)
 
     uvr_names = ("Ultimate Vocal Remover", "Ultimate-Vocal-Remover")
-    home = os.environ.get("HOME", "") or os.path.join(os.Getenv("USERPROFILE"), "")
+    # Portability: both lookups use os.environ. os.Getenv exists only on POSIX, so calling it here
+    # raises AttributeError under Windows -- and the HOME short-circuit below can hide that when HOME
+    # is set (interactive shells) but not under a debugger launch that omits it.
+    home = os.environ.get("HOME", "") or os.path.join(os.environ.get("USERPROFILE", ""), "")
 
     def _has_weights(root):
         return bool(

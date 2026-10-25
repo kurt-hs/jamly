@@ -94,7 +94,8 @@ class ScanKnownRootsTests(unittest.TestCase):
     def test_curated_app_bundles_both_binaries(self):
         lp = tempfile.mkdtemp()
         _bin_dir_with_both(lp)  # a curated app dir shipping BOTH binaries -> reusable
-        with mock.patch.object(b, "_curated_app_roots", return_value=[lp]):
+        with mock.patch.object(b, "_curated_app_roots", return_value=[lp]), \
+             mock.patch.object(b, "which", return_value=None):   # isolate PATH-first probe too
             r = b._scan_known_roots(uvr_scan=False)  # isolate the curated probe from real-box installs
         self.assertEqual(r["ffmpeg"], [lp])  # a dir shipping BOTH binaries is reported as reusable
         self.assertTrue(os.path.isdir(lp))
@@ -102,7 +103,8 @@ class ScanKnownRootsTests(unittest.TestCase):
     def test_curated_app_ffmpeg_only_is_not_reported(self):
         lp = tempfile.mkdtemp()
         _bin_dir_with_ffmpeg_only(lp)  # ffmpeg only -> not reusable for our yt-dlp build
-        with mock.patch.object(b, "_curated_app_roots", return_value=[lp]):
+        with mock.patch.object(b, "_curated_app_roots", return_value=[lp]), \
+             mock.patch.object(b, "which", return_value=None):   # isolate PATH-first probe too
             r = b._scan_known_roots(uvr_scan=False)  # isolate the curated probe from real-box installs
         self.assertEqual(r["ffmpeg"], [])  # a dir with only ffmpeg is NOT reported as reusable
 
