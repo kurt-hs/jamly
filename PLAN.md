@@ -19,6 +19,16 @@ probe is made robust on hosts where a git-bash-style env can make `os.walk` yiel
 Test suite is green under **both** runners — `python -m unittest discover -s tests` → **120** OK,
 `pytest` → **120** passed (added `tests/test_bootstrap_extra.py`).
 
+### Implemented: VSCode dev-config (§12, done)
+
+Added `.vscode/` so contributors get linting + type-checking + pytest-debug out of the box:
+`.vscode/extensions.json` (Python, Pylance, pytest-test-selector, black/ruff formatter, code-spell-checker,
+remote-ssh), `.vscode/settings.json` (pyright `basic`, format-on-save via black, ASCII-only source),
+and `.vscode/launch.json` (modern schema: top-level object with default `pytest-debug` task + named
+per-task tasks each tagged with a unique `taskSig`; debug tasks set `PYTHONPATH=<root>/src` so no editable
+install is needed). Dropped the interpreter-pinned `.code-workspace` at user request. Remaining §12 work:
+wire linting/type-check into CI (GitHub Actions) and reference it from `AGENTS.md`/`README.md`.
+
 ### Implemented: friendly run-time output (§14, done)
 
 A terse/friendly per-stage log was added and unit-tested (`src/auto_convert/logging.py`, `core.py`,
@@ -122,6 +132,13 @@ into its own private `.portable/` scope so it "just works" anywhere (Windows pri
 3. **Reuse-first provisioning**: `bootstrap.py` checks config + known roots first; only when absent (or `--provision`) does it download into `.portable/<os>/`: official yt-dlp standalone, a static ffmpeg+ffprobe build, and the ONNX Runtime HTDemucs export. The script then points yt-dlp's `--ffmpeg-location` at the discovered dir.
 4. **FFmpeg nuance**: a directory with only `ffmpeg.exe` (no ffprobe) is usable for some yt-dlp builds but not this one — keep the "needs BOTH" rule, and treat third-party shared ffmpeg as *local-reuse-only* (not portable). Open question: whether to also detect a system-wide ffmpeg/ffprobe via `%PATH%` on Windows.
 
+> §11 discovery is implemented (`b0d2603`) with 16 tests; the remaining piece — wiring `ConfigStore`
+> into `provision.py` so future runs reuse recorded paths without rescanning and report *reused vs*
+> downloaded (reuse-first provisioning, §4 item 3) — is now done (`f6f949e`): `record_provision()`
+> stores freshly-extracted ffmpeg/ffprobe paths relative to scope; `resolve_recorded_tools()`
+> returns recorded locations still on disk as a reuse fast-path in `run._resolve_run_env()`, falling
+> back to the PATH/app scan when nothing is recorded. Now 126 tests total.
+
 ## §12 — Developer experience: VSCode config / extensions (§ next step 1)
 
 No `.vscode/` scaffolding exists yet. Add, so contributors get linting + type-checking + pytest-debug out of the box:
@@ -131,7 +148,11 @@ No `.vscode/` scaffolding exists yet. Add, so contributors get linting + type-ch
 - **`.vscode/launch.json`** — commented-out pytest-debug task (`python -m pytest tests`) plus `test_server.py` live-server run; a single `run` task for the CLI.
 - Wire linting/type-check into CI (GitHub Actions) so both runners stay green. Reference from `AGENTS.md`/`README.md`.
 
-## §13 — Browser userscript & background-extension (§ next step 3)
+## §13 — Browser userscript & background-extension (next step)
+
+§11 discovery + §12 VSCode dev-config are implemented; this is the next deliverable. The server already
+emits a `/status` SSE stream with per-item terminal records (`last_completed`) and `pending`/`done`
+counts, plus a queue-file schema (`_input_queue`) — both clients below build on that shared contract.
 
 Implement the browser UI described in the original UX plan: a local server streams `/status` SSE progress to a popup; the client reads/writes a queue file and posts to `POST /add`.
 

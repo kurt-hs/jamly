@@ -85,6 +85,46 @@ class ProvisionTests(unittest.TestCase):
             res = p.provision(scope)  # reused before any fetch -> no opener needed
             self.assertTrue(res["provisioned"])
             self.assertFalse(res["downloaded"])
+            self.assertEqual(res["sources"], {"ffmpeg": "reused", "ffprobe": "reused"})
+
+    def test_origin_of_existing_install(self):
+        with tempfile.TemporaryDirectory() as d:
+            names = ("ffmpeg.exe", "ffprobe.exe") if b.PLATFORM_WINDOWS else ("ffmpeg", "ffprobe")
+            for n in names:
+                open(os.path.join(d, n), "w").close()
+            self.assertEqual(p._origin_of("ffmpeg", [d]), "reused")
+            # a dir with only one binary is NOT a reusable install root -> falls through to download
+            only = os.path.join(tempfile.mkdtemp(), names[0])
+            open(only, "w").close()
+            self.assertEqual(p._origin_of("ffmpeg", [os.path.dirname(only)]), "")
+
+    def test_downloaded_origin_when_no_existing(self):
+        with tempfile.TemporaryDirectory() as scope:
+            # fake opener returns the crafted zip; no existing install -> both marked 'downloaded'
+            p.fetch_to_bytes = lambda url, opener=None, timeout=30: _zip_bytes(["bin/ffmpeg.exe", "bin/ffprobe.exe"])
+            res = p.provision(scope, existing_dirs=[])
+            self.assertTrue(res["provisioned"] and res["downloaded"])
+            self.assertEqual(res["sources"], {"ffmpeg": "downloaded", "ffprobe": "downloaded"})
+
+    def test_missing_binary_downgraded_to_missing(self):
+        with tempfile.TemporaryDirectory() as scope:
+            # a fake opener 'downloads' so we never touch the network; extract_build is a no-op
+            # (we staged ffmpeg manually) leaving ffprobe absent -> its origin downgrades to missing
+            p.fetch_to_bytes = lambda url, opener=None, timeout=30: _zip_bytes(["bin/ffmpeg.exe"])
+            dest = p.ffmpeg_bin_dir(scope)
+            os.makedirs(dest, exist_ok=True)
+            names = ("ffmpeg.exe", "ffprobe.exe") if b.PLATFORM_WINDOWS else ("ffmpeg", "ffprobe")
+            open(os.path.join(dest, names[0]), "w").close()
+            real_extract = p.extract_build
+            p.extract_build = lambda zip_path, dest_dir: None  # no-op; dir staged manually
+            try:
+                res = p.provision(scope)
+            finally:
+                p.extract_build = real_extract
+            # ffprobe is absent on disk -> the pair isn't fully provisioned, and its origin is 'missing'
+            self.assertFalse(res["provisioned"])
+            self.assertEqual(res["sources"]["ffmpeg"], "downloaded")   # present -> keeps download origin
+            self.assertEqual(res["sources"]["ffprobe"], "missing")    # absent -> downgraded
 
 
 class ConfigStoreReuseTests(unittest.TestCase):

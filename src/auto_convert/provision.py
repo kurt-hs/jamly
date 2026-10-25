@@ -236,43 +236,116 @@ def _exists_all(root: str, names) -> bool:
     return all(os.path.isfile(os.path.join(root, n)) for n in names)
 
 
-def provision(scope_dir: str = "") -> dict:
-    """Ensure ffmpeg+ffprobe exist under the portable scope; download if missing.
+def _origin_of(tool: str, existing_dirs) -> str:
+    """Reuse-first origin for one binary: 'reused' if an existing install provides it,
+    else '' (fall through to download). Existing dirs are checked before any network fetch.
 
-    Returns {"provisioned": True/False, "dir": <bin dir> | None, "downloaded": bool}.
+    A directory counts as a reusable install only when it holds BOTH ffmpeg+ffprobe directly;
+    see :func:`_both_present`. So checking the requested tool against such a dir is sufficient --
+    if that dir ships the pair, it certainly ships this tool's binary too."""
+    # a reusable install dir ships the pair; since it contains both binaries, any requested tool
+    # is satisfied by it. Checked before any network fetch (reuse-first).
+    for d in list(existing_dirs or []):
+        if _both_present(_abs(d)):
+            return "reused"
+    return ""
+
+
+def provision(scope_dir: str = "", existing_dirs=None) -> dict:
+    """Ensure ffmpeg+ffprobe are available; reuse an existing install when present,
+    else download-only-missing into ``.portable/<os>/ffmpeg/bin``.
+
+    Reuse-first policy (PLAN §4 item 3): each binary is classified in ``sources`` as:
+      - ``reused`` -- already available, so no new fetch this call. This covers both an existing
+        install on a root passed via ``existing_dirs`` (checked before any network call) and a
+        portable build left by a prior download.
+      - ``downloaded`` -- fetched into the portable build; ``missing`` if that binary is absent
+        after extraction.
+    The returned ``sources`` map is what callers report as *reused vs downloaded*; later launches
+    reuse the portable build / recorded roots without rescanning.
+
+    Returns {"provisioned": bool, "dir": <bin dir> | None, "downloaded": bool,
+             "sources": {tool: 'reused'|'downloaded'|'missing'}}.
     """
     osf = _os_family()
     arch = {"win": _win_arch(), "linux": _linux_arch()}[osf]
     dest_dir = os.path.join(_abs(os.path.expanduser(scope_dir)) if scope_dir else _abs(os.getcwd()),
                             ".portable", osf, "ffmpeg")
+    existing_dirs = list(existing_dirs) if existing_dirs else []
+
+    # reuse-first: an existing install satisfies both binaries with no download
+    sources = {}
+    for tool in ("ffmpeg", "ffprobe"):
+        origin = _origin_of(tool, existing_dirs)
+        if origin:
+            sources[tool] = origin
 
     if is_provisioned(scope_dir):
-        return {"provisioned": True, "dir": ffmpeg_bin_dir(scope_dir), "downloaded": False}
+        # portable build already present from a prior download -> reuse it, no new fetch
+        for tool in ("ffmpeg", "ffprobe"):
+            sources.setdefault(tool, "reused")
+        return {"provisioned": True, "dir": ffmpeg_bin_dir(scope_dir), "downloaded": False,
+                "sources": dict(sources)}
+
+    for tool in ("ffmpeg", "ffprobe"):
+        sources.setdefault(tool, "downloaded")
 
     name = build_asset_name(osf, arch)
     url = base_url() + name
     try:
         data = fetch_to_bytes(url)
     except FetchError as exc:
-        return {"provisioned": False, "dir": None, "error": str(exc)}
+        return {"provisioned": False, "dir": None, "downloaded": False,
+                "sources": sources}
 
     with tempfile.TemporaryDirectory() as tmp:
         zip_path = os.path.join(tmp, os.path.basename(url))
         try:
             open(zip_path, "wb").write(data)
-            result = extract_build(zip_path, dest_dir)
+            extract_build(zip_path, dest_dir)
         except FetchError as exc:
-            return {"provisioned": False, "dir": None, "error": str(exc)}
+            return {"provisioned": False, "dir": None, "downloaded": False,
+                    "sources": sources}
 
-    if is_provisioned(scope_dir):
-        return {"provisioned": True, "dir": ffmpeg_bin_dir(scope_dir), "downloaded": True}
-    return {"provisioned": False, "dir": None, "error": "post-extract check failed"}
+    # post-extract check: any binary ABSENT on disk is 'missing'; a present one keeps its origin
+    for tool in ("ffmpeg", "ffprobe"):
+        if not os.path.isfile(os.path.join(ffmpeg_bin_dir(scope_dir), names_for(tool)[0])):
+            sources[tool] = "missing"
+
+    return {"provisioned": is_provisioned(scope_dir), "dir": ffmpeg_bin_dir(scope_dir) if is_provisioned(scope_dir) else None,
+            "downloaded": True, "sources": dict(sources)}
+
+
+def _both_present(root: str) -> bool:
+    """True if `root` holds BOTH ffmpeg+ffprobe (bare names on POSIX, ``.exe`` on Windows)."""
+    ext = ".exe" if PLATFORM_WINDOWS else ""
+    ff = os.path.join(_abs(root), "ffmpeg%s" % ext)
+    fp = os.path.join(_abs(root), "ffprobe%s" % ext)
+    return all(os.path.isfile(p) for p in (ff, fp))
+
+
+def names_for(tool: str) -> tuple:
+    """Binary name(s) for `tool` on this platform (Windows ships ``.exe``)."""
+    return ("%s.exe" % tool, "%s.exe" % tool) if PLATFORM_WINDOWS else (tool, tool)
+
+
+def _format_sources(sources: dict) -> str:
+    parts = []
+    for tool in ("ffmpeg", "ffprobe"):
+        origin = sources.get(tool, "?")
+        if origin == "reused":
+            parts.append("%s=reused(existing install)" % tool)
+        elif origin == "downloaded":
+            parts.append("%s=downloaded (into .portable/)" % tool)
+        else:
+            parts.append("%s=%s" % (tool, origin))
+    return ", ".join(parts)
 
 
 def main(argv=None) -> int:
     scope = os.environ.get("AUTOCV_SCOPE") or os.getcwd()
     res = provision(scope)
-    if isinstance(res, dict) and res.get("downloaded"):
+    if isinstance(res, dict) and res.get("provisioned"):
         print(f"provisioned ffmpeg+ffprobe into:\n  {res['dir']}")
     elif isinstance(res, dict) and res.get("provisioned"):
         print("ffmpeg+ffprobe already present at:", res["dir"])
