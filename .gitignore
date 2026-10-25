@@ -10,8 +10,4 @@ Thumbs.db
 .venv-audio-sep/
 .venv/
 *.log
-queue.json
 auto_convert_queue.json
-
-# scratch
-.split_extra_tmp.py
