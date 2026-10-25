@@ -26,7 +26,7 @@ import sys
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
-from .normalize import normalize_inputs, extract_watch_id
+from .normalize import normalize_inputs_full, extract_watch_id, Input
 from .core import (
     AUDIO_FORMATS, DEFAULT_OUTPUT_FORMAT, FORMAT_MP3, FORMAT_WAV,
     build_stem_encode_cmd,
@@ -121,14 +121,24 @@ class Plan:
 # --------------------------------------------------------------------------- #
 # stage command builders (pure; paths already resolved to absolute)
 # --------------------------------------------------------------------------- #
-def build_download_cmd(ytdlp_exe: str, watch_id: str, workdir: str, ffmpeg_dir: str = "") -> List[str]:
+def build_download_cmd(
+    ytdlp_exe: str,
+    watch_id: str,
+    workdir: str,
+    source_url: Optional[str] = None,
+    ffmpeg_dir: str = "",
+) -> List[str]:
     """Extract best audio into <workdir>/<watch_id>.<ext>; container decided by yt-dlp.
 
-    The extract shares the watch-id prefix with every stem produced later, so all outputs for one
-    item are traceable to a single name (see process_one's stem naming)."""
+    The extract passes the *source url* (full URL / partial path, or a bare id if that is all we
+    have) to yt-dlp so any host it understands resolves -- not just YouTube. The watch-id prefix is
+    kept for output filenames only, so every stem produced later stays traceable to one name.
+    When ``source_url`` is None (e.g. a bare id was fed in), the bare id itself is used as yt-dlp's
+    URL argument -- matching the historical YouTube-only behaviour."""
+    url = source_url if source_url else watch_id
     out = os.path.join(workdir, watch_id)
     from .core import build_ytdlp_extract_cmd as b
-    return b(ytdlp_exe, watch_id, output_template=out, ffmpeg_dir=ffmpeg_dir)
+    return b(ytdlp_exe, url, output_template=out, ffmpeg_dir=ffmpeg_dir)
 
 
 def build_mix_cmd(ffmpeg_exe: str, bass: str, other: str, vocals: str, output: str) -> List[str]:
@@ -154,8 +164,12 @@ def extract_title_hint(wid: str) -> Optional[str]:
 # --------------------------------------------------------------------------- #
 # input gathering + planning (pure; no subprocesses)
 # --------------------------------------------------------------------------- #
-def gather_inputs(args) -> List[str]:
-    """Combine --input/-i values and stdin (if piped), then normalize/dedupe to watch ids."""
+def gather_inputs(args) -> List[Input]:
+    """Combine --input/-i values and stdin (if piped), then normalize/dedupe into :class:`Input`\nobjects.
+
+    Each item carries the extracted watch id *and* the original source text, so yt-dlp receives a
+    full URL / partial path (not just a bare id) for any host it understands -- while output names
+    stay rooted on the short watch id. The resumable queue keys only on ``watch_id``."""
     # argparse dest for -i/--input is 'input'; gather_inputs accepts any iterable of strings
     sources = list(getattr(args, "input", []) or [])
     if sys.stdin.isatty() is False:
@@ -165,7 +179,7 @@ def gather_inputs(args) -> List[str]:
                 sources.extend(data.splitlines())
         except (ValueError, OSError):
             pass
-    return normalize_inputs(sources)
+    return normalize_inputs_full(sources)
 
 
 def resolve_engine(args, scope_dir: str, uvr_root: str) -> Optional[str]:
@@ -233,13 +247,16 @@ def stem_output_paths(output_dir: str, watch_id: str, fmt: str) -> tuple:
     return drums, nodrums, meta
 
 
-def process_one(wid: str, args, progress=None) -> ItemResult:
+def process_one(wid: str, args, progress=None, source_url: Optional[str] = None) -> ItemResult:
     """Run the full pipeline for ONE watch id; returns an ItemResult.
 
     Kept separate from run_pipeline so a persistent queue can drive one item at a time,
     mark it done in the queue file, and resume later. Heavy steps are delegated to
     core.separate_stems / provision / subprocesses (yt-dlp + ffmpeg required on PATH/scope).
-    """
+
+    ``source_url`` is the original input text (full URL / partial path / bare id) kept from
+    normalization; it is passed straight to yt-dlp so any host it understands resolves -- not just
+    YouTube. When None, only a bare id was fed in and that same id is used as yt-dlp's URL arg."""
     res = ItemResult(watch_id=wid)
     workdir = make_workdir()
     audio_path = None
@@ -249,7 +266,8 @@ def process_one(wid: str, args, progress=None) -> ItemResult:
         if progress:
             progress(wid, "pending", 0, 0)
         ytdlp_exe = _find_ytdlp(scope)
-        cmd = build_download_cmd(ytdlp_exe, wid, workdir, ffmpeg_dir=ffmpeg_dir or "")
+        cmd = build_download_cmd(
+            ytdlp_exe, wid, workdir, source_url=source_url, ffmpeg_dir=ffmpeg_dir or "")
         res.status, res.stage = "download", "download"
         audio_path = _stream_download(cmd).ok and locate_extracted(workdir)
         if not audio_path:
@@ -294,7 +312,7 @@ def process_one(wid: str, args, progress=None) -> ItemResult:
     return res
 
 
-def run_pipeline(inputs: List[str], args, progress=None) -> List[ItemResult]:
+def run_pipeline(inputs: List[Input], args, progress=None) -> List[ItemResult]:
     """Execute the full pipeline for each normalized input; return per-item results.
 
     Thin wrapper over process_one so a persistent queue (#15/#16) can drive one item at a
@@ -305,10 +323,11 @@ def run_pipeline(inputs: List[str], args, progress=None) -> List[ItemResult]:
     print("splitfy: %d input(s), engine=%s" % (len(inputs), engine or "n/a"))
 
     results = []
-    for i, wid in enumerate(inputs):
-        res = process_one(wid, args)
+    for i, item in enumerate(inputs):
+        res = process_one(item.watch_id, args, source_url=item.source_url)
         if progress and len(inputs) > 1:
-            progress(wid, res.stage, i + 1, len(inputs))
+            # label on the stable watch id (the queue keys on it); res.title mirrors that
+            progress(item.watch_id, res.stage, i + 1, len(inputs))
         results.append(res)
     return results
 
@@ -383,18 +402,21 @@ def _colored(text: str, kind) -> str:
 
 
 def echo_inputs(raw, titles):
-    """Show how each raw input parsed -> normalized watch id (+ best-effort title hint).
+    """Show how each input parsed -> normalized watch id (+ best-effort title hint).
 
-    Computes each input's own normalized id (via ``extract_watch_id``) so blank / invalid /
-    duplicate entries are all shown and flagged -- giving a transparent view of the dedup result.
-    """
+    ``raw`` may be bare-id strings or the :class:`Input` objects returned by gather_inputs; either
+    way this computes each item's own normalized id (via ``extract_watch_id``) so blank / invalid /
+    duplicate entries are all shown and flagged -- giving a transparent view of the dedup result."""
     kept = dropped = 0
     for i, w in enumerate(raw, 1):
+        # accept bare-id strings or Input objects (gather_inputs returns the latter); either way
+        # echo its own normalized id so blank / invalid / duplicate entries are all flagged.
+        source = getattr(w, "source_url", w)
         hint = titles[i - 1] if i - 1 < len(titles) else None
         tag = ""
-        if not isinstance(w, str) or not w.strip():
+        if not isinstance(source, str) or not source.strip():
             wid = ""
-            tag = "  (blank)" if isinstance(w, str) and w.strip() == "" else "  (non-string)"
+            tag = "  (blank)" if isinstance(source, str) and source.strip() == "" else "  (non-string)"
         else:
             try:
                 wid = extract_watch_id(w)
@@ -454,10 +476,11 @@ def main(argv=None) -> int:
         _log.warn("no input provided (pass -i URL, pipe URLs via stdin, or seed the queue file)")
         return 2
 
-    # show how each input parsed -> normalized id (+ title hint), then dedup into the queue
-    titles = [extract_title_hint(w) for w in raw_inputs]
+    # show how each input parsed -> normalized id (+ title hint), then dedup by watch_id into the
+    # queue (the queue keys on ids; original sources are used for yt-dlp resolution only).
+    titles = [extract_title_hint(getattr(i, "source_url", i)) for i in raw_inputs]
     echo_inputs(raw_inputs, titles)
-    newly = queue.add_all(raw_inputs, titles)
+    newly = queue.add_all([i.watch_id for i in raw_inputs], titles)
     _log.note("seeded %d new item(s) into %s" % (newly, qpath))
 
     if args.dry_run:

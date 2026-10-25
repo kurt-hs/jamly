@@ -11,7 +11,7 @@ import sys as _shim_sys  # noqa: E402
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 from splitfy.normalize import (  # noqa: E402
     InputError, WATCH_ID_RE, YT_URL_RE, extract_watch_id, is_valid_watch_id,
-    normalize_inputs,
+    make_input, normalize_inputs, normalize_inputs_full, Input,
 )
 
 
@@ -83,6 +83,65 @@ class NormalizeInputsTests(unittest.TestCase):
     def test_non_string_raises(self):
         with self.assertRaises(InputError):
             normalize_inputs([123])
+
+
+class MultiHostExtractionTests(unittest.TestCase):
+    """Broader input support: any host yt-dlp understands, plus partial paths without a scheme."""
+
+    def _ok(self, text, expected):
+        self.assertEqual(extract_watch_id(text), expected)
+
+    def test_other_hosts_resolve_any_11_char_id(self):
+        # the id is host-agnostic -- Vimeo/Bandcamp/any yt-dlp-supported site resolves.
+        # 11-char tokens (a real Vimeo id is exactly 11 chars; '123456789' alone would be only 9).
+        self._ok("https://vimeo.com/12345678901", "12345678901")
+        self._ok("https://bandcamp.com/abcDEF12345", "abcDEF12345")
+
+    def test_partial_path_without_scheme(self):
+        # a bare host+path (no http) is accepted, matching how tools are often pasted as plain links.
+        # a bare host+path (no http) is accepted, matching how tools are often pasted as plain links.
+        self._ok("vimeo.com/12345678901", "12345678901")
+        self._ok("bandcamp.com/abcDEF12345", "abcDEF12345")
+
+    def test_no_scheme_still_needs_11_char_id(self):
+        # without a recognizable id in the path, an arbitrary host URL is rejected.
+        with self.assertRaises(InputError):
+            extract_watch_id("https://example.com/some/short/path")
+
+    def test_full_url_passthrough_source(self):
+        inp = make_input("  https://vimeo.com/12345678901  ")
+        self.assertEqual(inp.watch_id, "12345678901")
+        # source keeps the cleaned original so yt-dlp receives a full URL for any host
+        self.assertEqual(inp.source_url, "https://vimeo.com/12345678901")
+
+    def test_bare_id_source_passthrough(self):
+        inp = make_input("dQw4w9WgXcQ")
+        self.assertEqual((inp.watch_id, inp.source_url), ("dQw4w9WgXcQ", "dQw4w9WgXcQ"))
+
+    def test_normalize_inputs_full_carries_source(self):
+        full = normalize_inputs_full([
+            "https://vimeo.com/12345678901",
+            "youtube.com/watch?v=dQw4w9WgXcQ",
+            None,                                       # skipped
+            "aBcDeFg1234",                              # distinct bare id (dQw4w9WgXcQ would dedup)
+        ])
+        self.assertEqual(
+            [(i.watch_id, i.source_url) for i in full],
+            [
+                ("12345678901", "https://vimeo.com/12345678901"),
+                ("dQw4w9WgXcQ", "youtube.com/watch?v=dQw4w9WgXcQ"),
+                ("aBcDeFg1234", "aBcDeFg1234"),
+            ],
+        )
+
+    def test_normalize_inputs_full_dedupe(self):
+        full = normalize_inputs_full([
+            "https://youtu.be/dQw4w9WgXcQ",
+            "youtube.com/watch?v=dQw4w9WgXcQ",         # same id, dropped
+        ])
+        self.assertEqual(len(full), 1)
+        self.assertEqual(full[0].watch_id, "dQw4w9WgXcQ")
+        self.assertEqual(full[0].source_url, "https://youtu.be/dQw4w9WgXcQ")
 
 
 if __name__ == "__main__":

@@ -135,11 +135,37 @@ class GatherInputsTests(unittest.TestCase):
     def test_dedup_across_url_and_bare_forms(self):
         ns = self._ns(["https://youtu.be/dQw4w9WgXcQ", "dQw4w9WgXcQ"])
         got = run_mod.gather_inputs(ns)  # stdin isatty True in test -> no stdin read
-        self.assertEqual(got, ["dQw4w9WgXcQ"])
+        # gather_inputs now returns Input objects (watch_id + original source); dedup is on watch_id.
+        self.assertEqual([i.watch_id for i in got], ["dQw4w9WgXcQ"])
+        self.assertEqual(got[0].source_url, "https://youtu.be/dQw4w9WgXcQ")
 
     def test_keeps_distinct_ids_in_order(self):
         ns = self._ns(["aBcDeFg1234", "zYxWvUt5678"])
-        self.assertEqual(run_mod.gather_inputs(ns), ["aBcDeFg1234", "zYxWvUt5678"])
+        got = run_mod.gather_inputs(ns)
+        self.assertEqual([i.watch_id for i in got], ["aBcDeFg1234", "zYxWvUt5678"])
+
+    def test_carries_source_url_for_any_host(self):
+        # broader input support: a full URL keeps its host so yt-dlp can resolve non-YouTube sites;
+        # a bare id passes through unchanged as both watch_id and source.
+        ns = self._ns([
+            "https://vimeo.com/12345678901",
+            "youtube.com/watch?v=dQw4w9WgXcQ",
+            "aBcDeFg1234",  # distinct bare id (dQw4w9WgXcQ would dedup against the youtu.be entry)
+        ])
+        got = run_mod.gather_inputs(ns)
+        self.assertEqual(
+            [i.watch_id for i in got],
+            ["12345678901", "dQw4w9WgXcQ", "aBcDeFg1234"],
+        )
+        # each item keeps its original source so yt-dlp can resolve any host, not just YouTube
+        self.assertEqual(
+            [(i.watch_id, i.source_url) for i in got],
+            [
+                ("12345678901", "https://vimeo.com/12345678901"),
+                ("dQw4w9WgXcQ", "youtube.com/watch?v=dQw4w9WgXcQ"),
+                ("aBcDeFg1234", "aBcDeFg1234"),
+            ],
+        )
 
 
 class ResolveEngineTests(unittest.TestCase):

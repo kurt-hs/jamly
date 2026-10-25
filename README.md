@@ -1,7 +1,8 @@
 # splitfy
 
-A small, portable **four-stem audio-separation** tool. Given a YouTube link it downloads the
-highest-quality available audio and splits it into two WAV stems:
+A small, portable **four-stem audio-separation** tool. Give it anything `yt-dlp` can fetch —
+a full URL, partial path, or bare id from any supported host (YouTube included) — and it
+downloads the highest-quality available audio and splits it into two WAV stems:
 
 ```
 drums.wav      – drums only
@@ -14,7 +15,8 @@ the machine its bundled models are reused automatically instead.
 
 ## How it works
 
-1. Normalize the input to a YouTube watch ID (full URL, partial path, or bare ID).
+1. Normalize each input (`normalize.py`) to a short, stable id and keep the original source text,
+   so any host `yt-dlp` understands resolves.
 2. `yt-dlp` extracts the highest-quality audio in its native lossless container — passed straight
    through to separation with no re-encode.
 3. Demucs v4 four-stems (`htdemucs`) split it; the **drums** stem and the mix of the remaining three
@@ -24,7 +26,7 @@ the machine its bundled models are reused automatically instead.
 
 ```
 src/splitfy/
-  normalize.py    URL -> YouTube watch-id extraction/validation + dedup
+  normalize.py    any-source input normalization: extract a stable id, validate + dedup
   core.py         engine auto-detection (htdemucs ONNX vs UVR5), command builders, stem run
   bootstrap.py    dependency/tool detection (python, yt-dlp, ffmpeg, UVR5)
   provision.py    self-provision missing tools into .portable/<os>/ (reuse-first)
@@ -44,8 +46,8 @@ AGENTS.md         contributing & coding conventions
 From a checkout:
 
 ```bash
-python src/splitfy/run.py -i <youtube-url> [-i <more>] [--engine auto|uvr5|htdemucs]
-# or, if installed via pip install -e . :  splitfy -i <youtube-url>
+python src/splitfy/run.py -i <source-url-or-id> [-i <more>] [--engine auto|uvr5|htdemucs]
+# or, if installed via pip install -e . :  splitfy -i <source-url-or-id>
 ```
 
 Run the test suite (pytest OR unittest):
