@@ -25,7 +25,7 @@ Legend: **[RESOLVED]** = fixed/verified-closed since Pass 1 · **[OPEN]** = stil
 
 - **A1** `provision.main()` dead-elif printing "provisioned into" when already present → **[RESOLVED]**
   branch removed; correct message restored (`d87bcaf`). No regression: `test_provision` unchanged, still green.
-- **A2** hardcoded `C:/Users/Kurt/AppData/...` UVR default root (non-portable) → **[RESOLVED]** `main()` now
+- **A2** hardcoded `<user>/AppData/...` Windows path for the UVR default root (non-portable) → **[RESOLVED]** `main()` now
   uses env-only `"${AUTOCV_UVR_ROOT}"` with empty default; docstring + config example updated. No test asserted the literal path.
 - **A3** duplicate `weights = demucs_weights(...)` in `bootstrap.summarize()` → **[RESOLVED]** dead second assignment deleted.
 - **A4** `.zip` members extracted without a Zip-Slip guard (guarded tar.xz branch did) → **[RESOLVED]** `_extract_archive` now checks `os.path.normpath(os.path.join(abspath(dest), name))` containment, creates parent dirs, and writes member-by-member (`d87bcaf`). Covered by `tests/test_provision.py::TestExtractArchive`.

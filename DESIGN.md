@@ -115,13 +115,13 @@ raw WAV is verbatim (copy, no encoder).
 
 | Item | Finding |
 |------|---------|
-| System Python | `C:\Users\Kurt\anaconda3\python.exe` (v3.13) — no yt-dlp / audio-separator / torch here |
-| yt-dlp binary | Standalone exe at `C:\Users\Kurt\AppData\Roaming\yt-dlp_win_x86\yt-dlp`. Custom-build quirks: `--no-subs` is invalid → omit it; `-x/--extract-audio` needs an ffmpeg/ffprobe location and this build is intermittent about detecting them (only `ffmpeg.exe` present). Verify success exit code + output path before relying on it. |
+| System Python | `%USERPROFILE%\anaconda3\python.exe` (v3.13) — no yt-dlp / audio-separator / torch here |
+| yt-dlp binary | Standalone exe at `%USERPROFILE%\AppData\Roaming\yt-dlp_win_x86\yt-dlp`. Custom-build quirks: `--no-subs` is invalid → omit it; `-x/--extract-audio` needs an ffmpeg/ffprobe location and this build is intermittent about detecting them (only `ffmpeg.exe` present). Verify success exit code + output path before relying on it. |
 | UVR5 install | Flat PyInstaller layout — `.pyd` files live at the install root; runtime data in `lib_v5\`, models in `models\`. No bundled python/site-packages. |
 | UVR5 models present | `MDX_Net_Models` (incl. DrumSep model), `Demucs_Models\v3_v4_repo` (`htdemucs.yaml` + `.th` weights → model `955717e8`), `VR_Models`. |
 | GPU backend | **RTX 4070 SUPER (12GB)** confirmed → CUDA available & preferred. UVR5 also ships torch_directml as fallback. |
 | audio-separator | Headless package driving UVR5's Demucs/MDXC models. Recognizes UVR5's bundled `.th` weights — reuse the installed HTDemucs weight directly, no canonical `.pt` re-download. |
-| ffmpeg / ffprobe | Bundled at `C:\Users\Kurt\AppData\Local\Programs\Ultimate Vocal Remover\ffmpeg.exe`. No `ffprobe.exe` reachable anywhere; point yt-dlp's `--ffmpeg-location` at a dir with BOTH, or verify exit code + output path on intermittent ffmpeg-only success. |
+| ffmpeg / ffprobe | Bundled at `%USERPROFILE%\AppData\Local\Programs\Ultimate Vocal Remover\ffmpeg.exe`. No `ffprobe.exe` reachable anywhere; point yt-dlp's `--ffmpeg-location` at a dir with BOTH, or verify exit code + output path on intermittent ffmpeg-only success. |
 
 ## Durable / portable scope (§10)
 

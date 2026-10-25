@@ -119,7 +119,8 @@ def find_ytdlp(scope_dir: str = "") -> ToolStatus:
             return s
 
     # 2. this box's existing %APPDATA%\yt-dlp_win_x86 (reuse, no re-download)
-    appdata = os.environ.get("APPDATA", "") or "C:\\Users\\Kurt\\AppData\\Roaming"
+    # portable fallback: derive %APPDATA% from the user profile, never a hard-coded path
+    appdata = os.environ.get("APPDATA", "") or os.path.join(os.environ.get("USERPROFILE", ""), "AppData", "Roaming")
     for cand in [os.path.join(appdata, "yt-dlp_win_x86", n)
                  for n in ("yt-dlp.exe", "yt-dlp_x86.exe", "yt-dlp")]:
         s = _try(cand)

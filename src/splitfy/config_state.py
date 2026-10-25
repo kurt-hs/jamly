@@ -132,9 +132,10 @@ class ConfigStore:
 if __name__ == "__main__":
     store = ConfigStore.create(default_config_path())
     print("config path:", store.path)
-    store.record("ffmpeg", ["C:\\Users\\Kurt\\.portable\\win64\\ffmpeg"], preferred=True)
-    store.set_override("AUTOCV_UVR_ROOT", "C:/Users/Kurt/AppData/Local/Programs/Ultimate Vocal Remover")
+    # portable demo values only — no hard-coded username/device paths
+    store.record("ffmpeg", ["<user>/.portable/win64/ffmpeg"], preferred=True)
+    store.set_override("AUTOCV_UVR_ROOT", "<user>%AppData%\\Local\\Programs\\Ultimate Vocal Remover")
     store.save()
     reloaded = ConfigStore.from_path(store.path)
-    assert not reloaded.empty and reloaded.get_paths("ffmpeg") == ["C:\\Users\\Kurt\\.portable\\win64\\ffmpeg"]
+    assert not reloaded.empty and reloaded.get_paths("ffmpeg") == ["<user>/.portable/win64/ffmpeg"]
     print("record + reload OK:", reloaded._data["tools"]["ffmpeg"])

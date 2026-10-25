@@ -2,7 +2,7 @@
 
 Design notes:
   * Every subprocess call is made with an **argument list** (never a shell string),
-    so paths containing spaces (e.g. `C:\\Users\\Kurt\\AppData\\...`) work on both native
+    so paths containing spaces (e.g. a Windows user path with folders) work on both native
     Windows and this git-bash box without any shlex quoting.
   * Tool binaries are passed as full absolute paths; resolution lives in bootstrap/run,
     not here, so these builders stay pure and unit-testable.
