@@ -6,6 +6,7 @@ _work/
 portable/
 .cache/
 .ruff_cache/
+.pytest_cache/
 .DS_Store
 Thumbs.db
 .venv-audio-sep/
