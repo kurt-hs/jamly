@@ -9,8 +9,10 @@
 
 set -euo pipefail
 
+# Walk up from this file until we reach the repo root (the dir containing src/splitfy). The wrappers
+# now live at <root>/scripts/<os>/<file>, so a depth-independent search keeps this correct.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"   # repo root = one level up from linux/
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && cd .. && pwd)"   # repo root = two levels up from scripts/linux/
 PORT="${1:-8765}"
 PY="python3"
 

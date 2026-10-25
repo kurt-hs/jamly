@@ -15,6 +15,6 @@ where python >nul 2>nul || (echo "python not found on PATH" & exit /b 1)
 set "PYTHON=python"
 if "%~1"=="" set "PORT=8765"
 
-cd /d "%~dp0\.."   REM repo root (one level up from windows/) so `import splitfy` works
+cd /d "%~dp0\.\.."   REM repo root (two levels up from scripts\windows\) so import splitfy works
 echo splitfy server: starting on http://127.0.0.1:%PORT%  (scope=%CD%)
 "%PYTHON%" -m splitfy.server --port %PORT% --scope "%CD%"

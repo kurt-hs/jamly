@@ -205,7 +205,7 @@ the listener (see `src/splitfy/server.py`). To make it always-on / reboot-persis
 - **CORS** — every response carries `Access-Control-Allow-Origin: *` and an `OPTIONS` preflight is answered, so
   the MV3 extension and Tampermonkey userscript can fetch over HTTP from their cross-origin contexts. Covered by
   `test_server.py::ServerIntegrationTests::test_cors_headers_on_responses_and_preflight`.
-- **Windows** — foreground: `windows/start-splitfy-server.bat [PORT]`; persistent: `powershell windows/install-schedule-task.ps1`
+- **Windows** — foreground: `scripts/windows/start-splitfy-server.bat [PORT]`; persistent: `powershell scripts/windows/install-schedule-task.ps1`
   (and `uninstall-schedule-task.ps1` to remove). The task runs from the repo root so `import splitfy` needs no install.
-- **Linux** — systemd unit `linux/splitfy-server.service` driven by `linux/splitfy-server-launch.sh` (`start|stop|status|restart [PORT]`).
+- **Linux** — systemd unit `scripts/linux/splitfy-server.service` driven by `scripts/linux/splitfy-server-launch.sh` (`start|stop|status|restart [PORT]`).
   Edit the absolute paths in that `.service` file (`WorkingDirectory`, `ExecStart`) to point at your checkout before enabling.

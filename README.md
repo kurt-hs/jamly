@@ -69,11 +69,11 @@ CORS headers (`Access-Control-Allow-Origin: *`) and answers `OPTIONS` preflight 
 `test_server.py::ServerIntegrationTests::test_cors_headers_on_responses_and_preflight`.
 
 For always-on / reboot-persistent service use per-platform wrappers (they resolve tools from the repo,
-so no paths are baked into source). See `DESIGN.md §12`:
+so no paths are baked into source). See `DESIGN.md §14`:
 
-* **Windows** — foreground: `windows\start-splitfy-server.bat [PORT]`; persistent: run
-  `powershell windows\install-schedule-task.ps1` (and `uninstall-schedule-task.ps1` to remove).
-* **Linux**   — systemd unit `linux\splitfy-server.service`, driven by `linux\splitfy-server-launch.sh`
+* **Windows** — foreground: `scripts/windows\start-splitfy-server.bat [PORT]`; persistent: run
+  `powershell scripts/windows/install-schedule-task.ps1` (and `uninstall-schedule-task.ps1` to remove).
+* **Linux**   — systemd unit `scripts/linux\splitfy-server.service`, driven by `scripts/linux/splitfy-server-launch.sh`
   (`start|stop|status|restart [PORT]`). See `DESIGN.md §14`; edit the absolute paths in that `.service` file first.
 
 ## Notes on portability
