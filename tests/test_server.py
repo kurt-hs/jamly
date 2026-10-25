@@ -35,6 +35,7 @@ import unittest
 from unittest import mock
 from urllib.request import Request, urlopen
 from urllib.error import URLError
+import http.client
 
 from splitfy.server import ItemServer, build_parser
 
@@ -224,6 +225,49 @@ class ServerIntegrationTests(unittest.TestCase):
                 events2 = _wait_until(port, lambda evs: wid in _completed_ids(evs), deadline=3.0)
                 recs2 = [r for r in _completed_records(events2) if r["watch_id"] == wid]
                 self.assertEqual(len(recs2), 1)
+            finally:
+                _cleanup(srv, qpath, threads)
+
+    def test_cors_headers_on_responses_and_preflight(self):
+        """The browser clients fetch this http://127.0.0.1 server from a cross-origin
+        extension/userscript context, so every response (and the OPTIONS preflight) must carry
+        CORS headers; without them the browsers would block the body and the popup/stem could not
+        talk to the queue over HTTP."""
+        wid = "corsTestId01"
+        with _stub_process_one(_FakeResult(ok=True, stage="mix", title=wid)):
+            srv, port, qpath, worker_t, server_t = _start_server()
+            threads = (worker_t, server_t)
+            try:
+                # GET /healthz and POST /add must both advertise CORS on the wire.
+                req = Request("http://127.0.0.1:%d/healthz" % port)
+                with urlopen(req, timeout=5) as resp:
+                    headers = dict(resp.getheaders())
+                self.assertEqual(resp.status, 200)
+                self.assertEqual(headers.get("Access-Control-Allow-Origin"), "*")
+
+                data = json.dumps({"inputs": [wid], "titles": []}).encode("utf-8")
+                req = Request("http://127.0.0.1:%d/add" % port, data=data)
+                req.add_header("Content-Type", "application/json")
+                req.add_header("Origin", "https://youtube.com")
+                with urlopen(req, timeout=5) as resp:
+                    self.assertEqual(resp.status, 200)
+                    self.assertEqual(dict(resp.getheaders()).get("Access-Control-Allow-Origin"), "*")
+
+                # A real cross-origin preflight (as the extension would send) must return 204 with CORS.
+                c = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+                try:
+                    c.request(
+                        "OPTIONS", "/add",
+                        headers={"Origin": "https://youtube.com",
+                                "Access-Control-Request-Method": "POST"},
+                    )
+                    r = c.getresponse()
+                    hdrs = dict(r.getheaders())
+                    self.assertEqual(r.status, 204)
+                    self.assertEqual(hdrs.get("Access-Control-Allow-Origin"), "*")
+                    self.assertIn("POST", hdrs.get("Access-Control-Allow-Methods", ""))
+                finally:
+                    c.close()
             finally:
                 _cleanup(srv, qpath, threads)
 

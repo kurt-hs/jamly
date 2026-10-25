@@ -190,9 +190,26 @@ class QueueStatusHandler(BaseHTTPRequestHandler):
         # we attach our ItemServer to it in start() so handlers can read shared state.
         return getattr(getattr(self, "server", None), "_item_server", None)
 
+    # Cross-origin support for the browser clients: they run in an extension
+    # (chrome-extension://) or a userscript (https://youtube.com/...) context and
+    # fetch this http(s)://127.0.0.1 server, so without these headers the browsers
+    # would block the response body on CORS grounds.
+    def _cors(self):
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+
+    def do_OPTIONS(self):  # CORS preflight -> allow the cross-origin GET/POST above
+        self.send_response(204)
+        self._cors()
+        self.send_header("Access-Control-Max-Age", "86400")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
     def _send_json(self, obj, status=200):
         body = json.dumps(obj).encode("utf-8")
         self.send_response(status)
+        self._cors()
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -204,6 +221,7 @@ class QueueStatusHandler(BaseHTTPRequestHandler):
             s = self._server_obj
             # send SSE headers once, before streaming body lines
             self.send_response(200)
+            self._cors()
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Cache-Control", "no-cache")
             self.send_header("Connection", "keep-alive")
