@@ -17,7 +17,6 @@
         "_work/": true,
         ".portable/": true
     },
-    "python.testing.enabled": true,
     "python.testing.unittestArgs": [
         "-v",
         "tests"
