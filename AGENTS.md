@@ -1,6 +1,6 @@
 # AGENTS.md — contributing & coding conventions
 
-Guidance for anyone adding or changing code in this repo. Keep it about *how to work here*, not the design rationale (that lives in `PLAN.md`) or usage (`README.md`).
+Guidance for anyone adding or changing code in this repo. Keep it about *how to work here*, not the design rationale (that lives in `DESIGN.md`) or usage (`README.md`).
 
 ## Layout
 
@@ -9,7 +9,7 @@ All application code is a proper package under `src/auto_convert/`:
 ```
 src/auto_convert/{__init__,bootstrap,core,normalize,provision,run,server,_input_queue}.py
 tests/*.py            # unittest suite (also runs under pytest)
-PLAN.md               design + portability research (read-only reference)
+DESIGN.md               design + portability research (read-only reference)
 README.md             user-facing overview & quick start
 AGENTS.md             this file
 ```

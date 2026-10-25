@@ -35,7 +35,7 @@ tests/            unittest suite (absolute-package imports; runs under pytest or
 browser/extension # MV3 WebExtension + shared DOM-free client (manifest, service worker,
                   popup/options HTML); browser/userscripts/auto_convert.user.js is the
                   standalone Tampermonkey panel (installed separately from the extension)
-PLAN.md           long-form design + portability research notes
+DESIGN.md           long-form design + portability research notes
 AGENTS.md         contributing & coding conventions
 ```
 
@@ -58,10 +58,10 @@ python -m unittest discover -s tests
 ## HTTP server mode
 
 `server.py` runs a small endpoint for browser userscripts/extension popups: `GET /status` streams
-progress JSON, `/items` adds videos to the queue. See `PLAN.md §11` for the full UX design.
+progress JSON, `/items` adds videos to the queue. See `DESIGN.md §11` for the full UX design.
 
 ## Notes on portability
 
 The tool is designed to "just work" on any machine. `provision.py` self-heals a private
 `.portable/<os>/` scope: it reuses already-installed tools first and only downloads what is missing
-(static ffmpeg+ffprobe build, ONNX Runtime + the Demucs weights). See `PLAN.md §10` for details.
+(static ffmpeg+ffprobe build, ONNX Runtime + the Demucs weights). See `DESIGN.md §10` for details.
