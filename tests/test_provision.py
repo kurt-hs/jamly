@@ -14,6 +14,7 @@ import zipfile
 import sys as _shim_sys  # noqa: E402
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 from auto_convert import bootstrap as b
+import auto_convert.config_state as cs
 import auto_convert.provision as p
 
 
@@ -84,6 +85,74 @@ class ProvisionTests(unittest.TestCase):
             res = p.provision(scope)  # reused before any fetch -> no opener needed
             self.assertTrue(res["provisioned"])
             self.assertFalse(res["downloaded"])
+
+
+class ConfigStoreReuseTests(unittest.TestCase):
+    """ConfigStore reuse-first persistence (record_provision / resolve_recorded_tools)."""
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    @staticmethod
+    def _extract_into_scope(scope):
+        dest = p.ffmpeg_bin_dir(scope)
+        os.makedirs(dest, exist_ok=True)
+        open(os.path.join(dest, "ffmpeg"), "w").write("#!/bin/sh\n")
+        open(os.path.join(dest, "ffprobe"), "w").write("#!/bin/sh\n")
+
+    def test_record_then_resolve_roundtrip(self):
+        with tempfile.TemporaryDirectory() as scope:
+            self._extract_into_scope(scope)
+            tools = {"ffmpeg": p.ffmpeg_bin_dir(scope) + "/ffmpeg",
+                     "ffprobe": p.ffmpeg_bin_dir(scope) + "/ffprobe"}
+            store = cs.ConfigStore.create()
+            recorded = p.record_provision(store, scope, tools)
+            self.assertEqual(sorted(recorded), sorted(["ffmpeg", "ffprobe"]))
+            # stored relative to scope, marked preferred/portable
+            self.assertTrue(store.has("ffmpeg") and store.has("ffprobe"))
+            self.assertTrue(os.path.relpath(tools["ffmpeg"], scope).split(os.sep)[0].startswith("."))
+            self.assertTrue(store.get_field("ffmpeg", "preferred") is True)
+            self.assertEqual(store.get_field("ffmpeg", "origin"), "portable")
+
+            resolved = p.resolve_recorded_tools(scope, store)
+            self.assertEqual(sorted(resolved), sorted(["ffmpeg", "ffprobe"]))
+            for tool in resolved:
+                self.assertTrue(os.path.isfile(resolved[tool]), tool)
+                self.assertTrue(resolved[tool].startswith(os.path.abspath(scope)))
+
+    def test_resolve_missing_returns_empty(self):
+        # recorded path that does NOT exist on disk must not be trusted (no false reuse)
+        store = cs.ConfigStore.create()
+        store.record("ffmpeg", paths=[".portable/win64/ffmpeg/bin/nonexistent"])
+        self.assertEqual(p.resolve_recorded_tools(self._tmp, store), {})
+
+    def test_resolve_absolute_entry_when_present(self):
+        abs_path = os.path.join(self._tmp, "sys-ffmpeg")
+        open(abs_path, "w").close()
+        store = cs.ConfigStore.create()
+        store.record("ffprobe", paths=[abs_path])
+        resolved = p.resolve_recorded_tools(self._tmp, store)
+        self.assertEqual(resolved, {"ffprobe": _abs(abs_path)})
+
+    def test_record_only_succeeding_tool(self):
+        with tempfile.TemporaryDirectory() as scope:
+            # only ffmpeg present; ffprobe missing -> record + resolve must drop it
+            dest = p.ffmpeg_bin_dir(scope)
+            os.makedirs(dest, exist_ok=True)
+            open(os.path.join(dest, "ffmpeg"), "w").close()
+            tools = {"ffmpeg": os.path.join(dest, "ffmpeg")}  # ffprobe omitted on purpose
+            store = cs.ConfigStore.create()
+            recorded = p.record_provision(store, scope, tools)
+            self.assertEqual(recorded, ["ffmpeg"])
+            resolved = p.resolve_recorded_tools(scope, store)
+            self.assertEqual(sorted(resolved), ["ffmpeg"])
+
+
+def _abs(path):
+    return os.path.abspath(os.path.expanduser(os.path.expandvars(path)))
 
 
 if __name__ == "__main__":

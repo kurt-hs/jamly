@@ -6,6 +6,7 @@ They deliberately avoid invoking yt-dlp / ffmpeg / separation (network + GPU hea
 import argparse
 import os
 import sys
+import tempfile
 import unittest
 import unittest.mock as mock
 
@@ -16,6 +17,8 @@ import unittest.mock as mock
 import sys as _shim_sys  # noqa: E402
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 from auto_convert import run as run_mod
+import auto_convert.provision as p
+from auto_convert.config_state import ConfigStore as cs
 
 
 class DownloadCmdTests(unittest.TestCase):
@@ -95,6 +98,42 @@ class RunPipelineEmptyTests(unittest.TestCase):
     def test_empty_inputs_is_noop(self):
         args = argparse.Namespace(output_dir="output", replace_existing=False, threads=0)
         self.assertEqual(run_mod.run_pipeline([], args), [])
+
+
+class ResolveRunEnvReuseTests(unittest.TestCase):
+    """_resolve_run_env prefers a ConfigStore-recorded portable ffmpeg over rescanning."""
+
+    def _seed_recorded_ffmpeg(self, scope):
+        names = ("ffmpeg.exe", "ffprobe.exe") if p.PLATFORM_WINDOWS else ("ffmpeg", "ffprobe")
+        bin_dir = os.path.join(p.ffmpeg_bin_dir(scope), names[0])
+        os.makedirs(os.path.dirname(bin_dir), exist_ok=True)
+        open(bin_dir, "w").close()
+        rel = os.path.relpath(bin_dir, scope)
+        store = cs.create()
+        store.record("ffmpeg", paths=[rel], preferred=True)
+        return bin_dir, rel
+
+    def test_prefers_recorded_path_over_find_ffmpeg(self):
+        with tempfile.TemporaryDirectory() as scope:
+            bin_dir, rel = self._seed_recorded_ffmpeg(scope)
+            recorded_abs = os.path.abspath(bin_dir)
+            # resolve_recorded_tools() itself is unit-tested in tests/test_provision.py; here we
+            # assert _resolve_run_env consumes a ConfigStore-recorded ffmpeg and skips the scan.
+            with mock.patch.object(run_mod, "resolve_recorded_tools", return_value={"ffmpeg": recorded_abs}), \
+                 mock.patch.object(run_mod, "find_ffmpeg", side_effect=RuntimeError("must not scan when reused")), \
+                 mock.patch.object(run_mod, "resolve_engine", return_value="uvr5"):
+                _s, _e, ffmpeg_dir = run_mod._resolve_run_env(argparse.Namespace(engine="auto", threads=0))
+            self.assertEqual(os.path.normcase(os.path.abspath(ffmpeg_dir)),
+                             os.path.normcase(recorded_abs))
+
+    def test_falls_back_to_find_ffmpeg_when_no_record(self):
+        with tempfile.TemporaryDirectory() as scope:
+            with mock.patch.dict(os.environ, {"AUTOCV_SCOPE": scope}), \
+                 mock.patch.object(run_mod, "find_ffmpeg", return_value="/nonexistent/ffmpeg") as ff, \
+                 mock.patch.object(run_mod, "resolve_engine", return_value="uvr5"):
+                _s, _e, ffmpeg_dir = run_mod._resolve_run_env(argparse.Namespace(engine="auto", threads=0))
+            self.assertEqual(ffmpeg_dir, "/nonexistent/ffmpeg")
+            ff.assert_called_once()   # no recorded path -> normal scan runs
 
 
 if __name__ == "__main__":

@@ -30,6 +30,7 @@ from .core import (
     tool_source,
 )
 from .bootstrap import find_ffmpeg
+from .provision import resolve_recorded_tools
 from .logging import Logger
 from auto_convert._input_queue import WatchQueue, default_queue_path
 
@@ -197,7 +198,10 @@ def _resolve_run_env(args) -> tuple:
     scope = os.environ.get("AUTOCV_SCOPE") or os.getcwd()
     uvr_root = os.environ.get("AUTOCV_UVR_ROOT") or ""
     engine = resolve_engine(args, scope, uvr_root)
-    ffmpeg_dir = find_ffmpeg(scope)
+    # reuse-first: if a prior run recorded a portable ffmpeg path that still exists on disk,
+    # prefer it here so we skip the broader PATH/app scan (resolve_recorded_tools returns {} when
+    # nothing usable is recorded -> find_ffmpeg(scope) runs unchanged).
+    ffmpeg_dir = resolve_recorded_tools(scope).get("ffmpeg") or find_ffmpeg(scope)
     return scope, engine, ffmpeg_dir
 
 

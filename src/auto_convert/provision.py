@@ -5,8 +5,9 @@ downloads missing pieces into a private `.portable/<os>/` layout so nothing is i
 globally. Currently provisions the ffmpeg + ffprobe static build; detection hooks are
 already wired to find it under `<scope>/.portable/<os>/ffmpeg`.
 
-Pure standard-library, network calls isolated in `fetch_*` so they can be unit-tested
-with a fake opener without touching the real internet.
+Pure standard-library; network calls isolated in `fetch_*` (unit-testable with a fake opener), and
+reuse-first persistence delegated to :class:`ConfigStore` via ``record_provision`` /
+``resolve_recorded_tools`` so later launches reuse recorded paths without rescanning.
 """
 from __future__ import annotations
 
@@ -172,6 +173,63 @@ def ffmpeg_bin_dir(scope_dir: str = "") -> str:
     osf = _os_family()
     scope = _abs(os.path.expanduser(scope_dir)) if scope_dir else _abs(os.getcwd())
     return os.path.join(scope, ".portable", osf, "ffmpeg", "bin")
+
+
+# --------------------------------------------------------------------------- #
+# reuse-first persistence (ConfigStore integration)
+#
+# After a successful download-only extraction we RECORD the portable bin dir into
+# ConfigStore (relative to scope) so later launches can REUSE it without rescanning PATH /
+# app roots. ``resolve_recorded_tools`` is the fast-path: given a scope + store, it returns
+# tool -> absolute path for any recorded location that still exists on disk.
+# --------------------------------------------------------------------------- #
+_PROVISIONABLE = ("ffmpeg", "ffprobe")
+
+
+def record_provision(store: "ConfigStore", scope_dir: str, tools: dict) -> list:
+    """Record freshly-provisioned binaries into `store` (relative to scope).
+
+    `tools` is the result of :func:`extract_build` ({"ffmpeg": <abs>, "ffprobe": <abs>}). Paths
+    are stored relative to ``scope_dir`` so they survive moving the portable tree; each entry is
+    marked ``preferred=True`` with ``origin="portable"``. Returns the list of recorded tool names.
+    """
+    scope = _abs(os.path.expanduser(scope_dir)) if scope_dir else _abs(os.getcwd())
+    rel_root = os.path.relpath(tools["ffmpeg"], scope)
+    # record both ffmpeg and ffprobe (a build always ships the pair); keep only what succeeded
+    recorded = []
+    for tool in _PROVISIONABLE:
+        if tools.get(tool):
+            store.record(
+                tool,
+                paths=[os.path.relpath(tools[tool], scope)],  # portable-relative path
+                preferred=True,
+                origin="portable",
+            )
+            recorded.append(tool)
+    return recorded
+
+
+def resolve_recorded_tools(scope_dir: str, store=None) -> dict:
+    """Return {tool: abs_path} for recorded tool paths that still exist on disk.
+
+    Handles both portable-relative paths (``.portable/<os>/ffmpeg/bin``, resolved against
+    ``scope_dir``) and absolute paths already present on disk. Empty when nothing usable is
+    recorded -- callers fall back to their normal PATH/app scan. This is the reuse-without-
+    rescanning fast-path.
+    """
+    if store is None:
+        from .config_state import ConfigStore, default_config_path
+        store = ConfigStore.from_path(default_config_path())
+    scope = _abs(os.path.expanduser(scope_dir)) if scope_dir else _abs(os.getcwd())
+    out = {}
+    for tool in _PROVISIONABLE:
+        paths = store.get_paths(tool)
+        for p in paths:
+            cand = p if os.path.isabs(p) and os.path.isfile(p) else os.path.join(scope, p)
+            if os.path.isfile(cand):
+                out[tool] = _abs(cand)
+                break
+    return out
 
 
 def _exists_all(root: str, names) -> bool:
