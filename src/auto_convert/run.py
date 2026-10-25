@@ -268,6 +268,11 @@ def process_one(wid: str, args, progress=None) -> ItemResult:
         # on every platform (no title to rely on yet, no unicode/special chars, no truncation).
         fmt = getattr(args, "audio_format", DEFAULT_OUTPUT_FORMAT) or DEFAULT_OUTPUT_FORMAT
         drums_out, nodrums_out, meta_path = stem_output_paths(args.output_dir, wid, fmt)
+        # Finalize the primary (drums) stem first. Both stems are produced together before success;
+        # doing it here means a drum re-encode failure surfaces immediately and never leaves its
+        # no-drums complement half-mixed on disk (the workdir is wiped in finally regardless).
+        finalize_output(ffmpeg_exe_for(ffmpeg_dir), drums, drums_out, fmt)
+        res.status, res.stage = "mix", "mix"
         # No-drums mix: ffmpeg blends bass+other+vocals (drums excluded by construction) into
         # nodrums_out. build_mix_cmd takes the established 5-arg form -- (ffmpeg, bass, other,
         # vocals, output) -- matching core.build_ffmpeg_mix_cmd and its tests; 'drums' is intentionally
@@ -275,10 +280,6 @@ def process_one(wid: str, args, progress=None) -> ItemResult:
         mix_cmd = build_mix_cmd(ffmpeg_exe_for(ffmpeg_dir), stems["bass"],
                                 stems["other"], stems["vocals"], nodrums_out)
         _run(mix_cmd)
-
-        # finalize each stem: re-encode for a lossy format, copy verbatim for raw WAV. Raw output
-        # needs no encoder here; the mix step above already used ffmpeg for the no-drums blend.
-        finalize_output(ffmpeg_exe_for(ffmpeg_dir), drums, drums_out, fmt)
 
         res.status, res.stage = "done", ""
         res.title = wid

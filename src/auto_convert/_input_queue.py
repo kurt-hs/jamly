@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import time
+import uuid
 from typing import List, Optional
 
 
@@ -139,7 +140,8 @@ class WatchQueue:
         }
         if self.path:
             os.makedirs(os.path.dirname(self.path), exist_ok=True)
-            tmp = "%s.tmp.%d" % (self.path, os.getpid())
+            # unique temp name so two concurrent writers don't collide on the same .tmp before replace.
+            tmp = "%s.tmp.%d.%s" % (self.path, os.getpid(), uuid.uuid4().hex[:8])
             with open(tmp, "w", encoding="utf-8") as fh:
                 json.dump(data, fh, ensure_ascii=False, indent=2)
             os.replace(tmp, self.path)

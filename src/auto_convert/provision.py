@@ -109,8 +109,22 @@ def _extract_archive(zip_path: str, dest_dir: str) -> None:
     """Extract a BtbN build archive (.zip on Windows, .tar.xz elsewhere) into `dest_dir`.`"""
     ext = os.path.splitext(zip_path)[1].lower()
     if ext == ".zip":
+        # Guard against Zip-Slip (absolute paths / ``..`` members) before writing anywhere.
+        dest = os.path.abspath(dest_dir)
         with zipfile.ZipFile(zip_path) as zf:
-            zf.extractall(dest_dir)
+            for name in zf.namelist():
+                safe = os.path.normpath(os.path.join(dest, name))
+                if not (safe == dest or safe.startswith(dest + os.sep)):
+                    # absolute path or traversal outside the destination -- skip this member
+                    continue
+                # create the member's parent dir (extractall does this implicitly); guard above
+                # already ensured `safe` stays inside dest, so this can't escape it.
+                try:
+                    os.makedirs(os.path.dirname(safe), exist_ok=True)
+                    with open(safe, "wb") as out:
+                        out.write(zf.read(name))
+                except OSError:
+                    pass  # unreadable / non-regular entry (e.g. a directory) -- ignore
     else:  # .tar.xz / .tgz
         import tarfile, lzma
         with open(zip_path, "rb") as fh, tarfile.open(fileobj=fh, mode="r:") as tf:
@@ -268,7 +282,9 @@ def provision(scope_dir: str = "", existing_dirs=None) -> dict:
              "sources": {tool: 'reused'|'downloaded'|'missing'}}.
     """
     osf = _os_family()
-    arch = {"win": _win_arch(), "linux": _linux_arch()}[osf]
+    # macOS/unknown platforms share the generic tar.xz asset name, so only win/linux need an
+    # explicit arch; fall back to None instead of raising KeyError when osf is not in {"win", "linux"}.
+    arch = {"win": _win_arch(), "linux": _linux_arch()}[osf] if osf in ("win", "linux") else None
     dest_dir = os.path.join(_abs(os.path.expanduser(scope_dir)) if scope_dir else _abs(os.getcwd()),
                             ".portable", osf, "ffmpeg")
     existing_dirs = list(existing_dirs) if existing_dirs else []
@@ -347,8 +363,6 @@ def main(argv=None) -> int:
     res = provision(scope)
     if isinstance(res, dict) and res.get("provisioned"):
         print(f"provisioned ffmpeg+ffprobe into:\n  {res['dir']}")
-    elif isinstance(res, dict) and res.get("provisioned"):
-        print("ffmpeg+ffprobe already present at:", res["dir"])
     else:
         print("PROVISION FAILED:", res if isinstance(res, str) else res.get("error", res))
         return 1

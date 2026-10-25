@@ -228,7 +228,8 @@ class Logger:
             for line in read_lines():
                 if on_line:
                     on_line(line)
-                sys.stdout.write(self._c(line.rstrip("\n"), "blue") + "\n")
-                sys.stdout.flush()
+                # Route through the injected stream (captured/redirected when set) so live progress
+                # is overridable and testable, not hardcoded to sys.stdout.
+                self._write(self._c(line.rstrip("\n"), "blue"))
         except Exception as exc:  # noqa: BLE001 - a broken pipe must not crash the run
             self.warn("stream interrupted (%s)" % exc)

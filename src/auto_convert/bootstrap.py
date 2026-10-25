@@ -7,7 +7,7 @@ functions' results, but are not implemented here -- see DESIGN.md section 10 for
 provisioning plan and `find_*`/status return values as their contracts.
 
 Environment knobs (all optional; sensible defaults used otherwise):
-    AUTOCV_UVR_ROOT   install root of Ultimate Vocal Remover (default: this box's UVR5 path)
+    AUTOCV_UVR_ROOT   install root of Ultimate Vocal Remover (default: empty; set it to your own install)
     AUTOCV_SCOPE      directory that will hold `.portable/` (default: current working dir)
 
 Run directly to print a human-readable tool report and an exit code reflecting whether
@@ -103,15 +103,16 @@ def find_ytdlp(scope_dir: str = "") -> ToolStatus:
               and any(name in n for n in ("yt-dlp", "yt-dlp.exe", "yt-dlp_x86.exe", "yt-dlp.bat")))
         return ToolStatus("yt-dlp", path=path, ok=ok)
 
-    # 1. official per-OS standalone inside the portable scope
+    # 1. official per-OS standalone inside the portable scope. Probe BOTH the flat
+    #    <scope>/.portable/<f> direct child and (on Windows) the <os_family>/ subdir, because
+    #    _scan_known_roots records a downloaded build in either layout; without both forms a cached
+    #    portable yt-dlp would be re-scanned every launch.
+    names = ("yt-dlp.exe", "yt-dlp_x86.exe", "yt-dlp") if PLATFORM_WINDOWS else ("yt-dlp",)
+    candidates = [os.path.join(portable, f) for f in names]
     if PLATFORM_WINDOWS:
-        candidates = [os.path.join(portable, "win_x86", "yt-dlp.exe"),
-                      os.path.join(portable, "win32", "yt-dlp.exe"),
-                      os.path.join(portable, "win_x86", "yt-dlp"),
-                      os.path.join(portable, "win32", "yt-dlp")]
-    else:
-        candidates = [os.path.join(portable, "linux/yt-dlp"),
-                      os.path.join(portable, "macos/yt-dlp")]
+        for sub in ("win_x86", "win32"):
+            for f in names:
+                candidates.append(os.path.join(portable, sub, f))
     for c in candidates:
         s = _try(c)
         if s.ok:
@@ -483,8 +484,6 @@ def summarize(scope_dir: str = "", uvr_root: str = "") -> list:
         additional_dirs=(uvr["uvr_root"] if (uvr_root and uvr["uvr_exists"]) else None),
         scope_dir=scope_dir,
     )
-    weights = demucs_weights(uvr["repo"] if uvr["repo_exists"] else "")
-
     return [py, ytdlp, ffmpeg, uvr5_ffmpeg_path(uvr_root), ToolStatus(
         "htdemucs-weights",
         path=next((w for w in weights), None),
@@ -496,8 +495,9 @@ def summarize(scope_dir: str = "", uvr_root: str = "") -> list:
 
 def main(argv=None) -> int:
     scope = os.environ.get("AUTOCV_SCOPE") or os.getcwd()
-    root = os.environ.get("AUTOCV_UVR_ROOT") or \
-        "C:/Users/Kurt/AppData/Local/Programs/Ultimate Vocal Remover"
+    # env-only default: empty unless AUTOCV_UVR_ROOT is set, so the tool stays portable and never
+    # points at one developer's personal install. On a box without UVR5 it reports "not found".
+    root = os.environ.get("AUTOCV_UVR_ROOT", "")
 
     print("auto_convert dependency detection")
     print("=" * 60)
