@@ -64,6 +64,6 @@ them later; the reusable helpers (`_read_sse_currents`, `_post_add`, `_FakeResul
 
 ## Hygiene
 
-- Commit messages use an **inline, single-quoted `git -m`**. Do not route a message through `/tmp/...` (a shell alias on this box rewrites that path to an absolute Windows temp dir) and avoid backticks inside the body — both get mangled by git-bash. If you need multi-line prose, write it directly in one `-m`.
+- Commit messages use an **inline, single-quoted `git -m`**. Do not put literal backticks inside a *double*-quoted body: bash treats `` `...` `` as command substitution (it strips them and runs the inner text). Single-quoting avoids this entirely. `/tmp/...` works fine here; no alias workaround is needed for it. If you need multi-line prose, write it directly in one `-m`.
 - Commit only source, tests, and docs. `.portable/`, downloaded models/cache, and stray temp dirs are gitignored — never commit them.
 - Do not leave diagnostic/probe scripts in the tree; clean up before committing.
