@@ -20,16 +20,19 @@ import auto_convert.core as c
 class HtdemucsBuilderTests(unittest.TestCase):
     def test_flags_present_and_ordered(self):
         cmd = c.build_htdemucs_four_stems_cmd("python", "in.wav", "/work", threads=2)
-        # python_exe is element 0; the subcommand follows
-        self.assertEqual(cmd[1:4], ["-m", "htdemucs", "four-stems"])
-        self.assertIn("--model", cmd) and self.assertEqual(cmd[cmd.index("--model") + 1], "htdemucs")
+        # python_exe is element 0; the CLI module + subcommand follow
+        self.assertEqual(cmd[1:4], ["-m", "demucs", "separate"])
+        # model selection uses -n/--name (not --model); htdemucs selects the 4-source model
+        self.assertIn("-n", cmd) and self.assertEqual(cmd[cmd.index("-n") + 1], "htdemucs")
         self.assertIn("--audio", cmd) and self.assertIn("in.wav", cmd)
         self.assertIn("--out", cmd) and self.assertIn("/work", cmd)
-        self.assertEqual(cmd[cmd.index("--threads") + 1], "2")
+        # -j is the parallelism flag (not --threads); source count comes from the model
+        self.assertEqual(cmd[cmd.index("-j") + 1], "2")
 
     def test_no_threads_flag_by_default(self):
         cmd = c.build_htdemucs_four_stems_cmd("python", "in.wav", "/work")
-        self.assertNotIn("--threads", cmd)
+        # no per-core flag by default; demucs auto-selects device (cuda/mps/cpu)
+        self.assertNotIn("-j", cmd)
 
 
 class Uvr5BuilderTests(unittest.TestCase):
@@ -83,6 +86,34 @@ class LocateStemsTests(unittest.TestCase):
 
     def test_missing_dirs_is_safe(self):
         self.assertEqual(c._locate_stems(self._tmp), [])
+
+
+class HtdemucsRunnerTests(unittest.TestCase):
+    def test_htdemucs_engine_builds_official_demucs_cli(self):
+        # engine selection -> availability gate (mocked present) -> official demucs CLI shape.
+        import os
+        import unittest.mock as mock
+        fake = [os.path.abspath(os.path.join("separated", "htdemucs", "%s.wav" % s))
+                for s in ("drums", "bass", "other", "vocals")]
+        with mock.patch("auto_convert.core._dir_has_any", return_value=True), \
+             mock.patch("auto_convert.core.find_python", return_value="python"), \
+             mock.patch.object(c, "_locate_stems", return_value=fake), \
+             mock.patch.object(c, "run") as run_mock:
+            res = c.separate_stems("song.wav", engine=c.ENGINE_HTDEMUCS, uvr_root="")
+        # module is `demucs`, subcommand `separate` -- NOT the removed htdemucs four-stems entry point
+        self.assertEqual(run_mock.call_args.args[0][1:4], ["-m", "demucs", "separate"])
+        idx = run_mock.call_args.args[0].index("-n")
+        self.assertEqual(run_mock.call_args.args[0][idx + 1], "htdemucs")   # -n/--name selects the model
+        self.assertNotIn("--four-stems", run_mock.call_args.args[0])       # source count comes from the model
+
+    def test_htdemucs_engine_missing_package_raises(self):
+        # availability gate fails first (mocked as if no demucs dir) -> clear RuntimeError naming package
+        import unittest.mock as mock
+        with self.assertRaises(RuntimeError) as ctx, \
+             mock.patch("auto_convert.core._dir_has_any", return_value=False), \
+             mock.patch("auto_convert.core.find_python", return_value="python"):
+            c.separate_stems("song.wav", engine=c.ENGINE_HTDEMUCS, uvr_root="")
+        self.assertIn("demucs package is not installed", str(ctx.exception))
 
 
 class SeparateStemsFailureTests(unittest.TestCase):

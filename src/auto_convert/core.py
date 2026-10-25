@@ -304,7 +304,7 @@ def ensure_output_dir(path: str) -> str:
 # --------------------------------------------------------------------------- #
 ENGINE_AUTO = "auto"
 ENGINE_UVR5 = "uvr5"      # audio-separator using the reused UVR5 `.th` weights
-ENGINE_HTDEMUCS = "htdemucs"  # canonical ONNX Runtime HTDemucs (.onnx model)
+ENGINE_HTDEMUCS = "htdemucs"  # four-source separation via the official `demucs` PyPI CLI (torch-based)
 
 # Demucs four-stem weight repo shipped inside the UVR5 GUI (audio-separator maps these .th files).
 DEMUCS_REPO_SUBDIR = os.path.join("models", "Demucs_Models", "v3_v4_repo")
@@ -457,14 +457,17 @@ def build_htdemucs_four_stems_cmd(
     model_name: str = "htdemucs",
     threads: int = 0,
 ) -> List[str]:
-    """Canonical ONNX Runtime HTDemucs four-stems CLI (loads the `.onnx` model).
+    """Official Demucs PyPI CLI separation (torch-based; NOT the onnxruntime variant).
 
-    Emits <workdir>/separated/<model>/<track>.wav. Requires `pip install htdemucs`.
+    Mirrors ``python -m demucs separate``: ``-n/--name htdemucs`` selects the 4-source model,
+    and ``--out`` places results in <workdir>/separated/<model>/<track>/{drums,bass,other,vocals}.wav
+    (exactly what :func:`_locate_stems` walks). No ``--four-stems`` flag exists -- source count comes
+    from the model. Requires ``pip install demucs``.
     """
-    cmd = [str(python_exe), "-m", "htdemucs", "four-stems", "--model", str(model_name),
-           "--audio", str(input_audio), "--out", str(workdir)]
+    cmd = [str(python_exe), "-m", "demucs", "separate", "--audio", str(input_audio),
+           "--out", str(workdir), "-n", str(model_name)]
     if threads and threads > 0:
-        cmd += ["--threads", str(threads)]
+        cmd += ["-j", str(threads)]
     return cmd
 
 
@@ -500,8 +503,11 @@ def separate_stems(
     os.makedirs(workdir, exist_ok=True)
 
     if engine in (ENGINE_AUTO, ENGINE_HTDEMUCS):
-        if not (_dir_has_any(_site_packages(), ("htdemucs", "onnxruntime"))):
-            raise RuntimeError("engine 'htdemucs' selected but the htdemucs package is not installed")
+        # The maintained Demucs v4 CLI lives in the `demucs` PyPI package (torch-based); detect it by
+        # its site-packages directory rather than a now-removed onnxruntime variant. Lightweight and
+        # import-free so importing this module never pulls torch.
+        if not (_dir_has_any(_site_packages(), ("demucs",))):
+            raise RuntimeError("engine 'htdemucs' selected but the demucs package is not installed")
         cmd = build_htdemucs_four_stems_cmd(py, audio, workdir, threads=threads)
         res = run(cmd)
         if not res.ok:
