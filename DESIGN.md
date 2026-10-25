@@ -9,7 +9,7 @@ decisions, and machine-specific findings below.
 The Python package lives under `src/splitfy/` (stdlib-only):
 `normalize.py` (URL→watch-id), `core.py` (subprocess runners for yt-dlp/Demucs/ffmpeg),
 `bootstrap.py` (reuse-first dependency detection), `provision.py` (self-provisioning into
-`.portable/`), `_input_queue.py` (`WatchQueue`, resumable + persisted done-set), `run.py` (CLI
+`.portable/`), `watch_queue.py` (`WatchQueue`, resumable + persisted done-set), `run.py` (CLI
 orchestrator with queue integration) and `server.py` (streaming `/status` SSE status server). Binary/config discovery is a cache-aware probe: `find_known_roots()` plus the new path-backed
 `splitfy/config_state.py` (`ConfigStore`, atomic persistence, empty-if-missing/invalid),
 and `tests/test_bootstrap_extra.py` (16 tests covering the probe/cache/persistence contracts). The
@@ -144,7 +144,7 @@ into its own private `.portable/` scope so it "just works" anywhere (Windows pri
 ### Design
 
 1. **Curated known-install roots** (`core.py` / `bootstrap.py`, pure stdlib): probe PATH first, then a curated list of well-known app locations — `%APPDATA%\yt-dlp_win_x86`, `AppData\Local\Programs\{Shotcut,DaVinci Resolve,OBS Studio,Blender,Kdenlive,Avidemux,HandBrake,PotPlayer}` (apps that ship ffmpeg/ffprobe), UVR5 roots, plus `.portable/<os>/`. This is a *best-effort* probe; it does not need to find every copy on this box — it needs to cover the common cases cross-machine.
-2. **Persist discovered paths in `splitfy.json`** (repo root; records existing binaries + user overrides). On first run / re-provision, write what was found so future runs reuse without rescanning and can report *reused vs downloaded*. A missing/absent file → empty queue on load (already handled by `_input_queue.from_path`).
+2. **Persist discovered paths in `splitfy.json`** (repo root; records existing binaries + user overrides). On first run / re-provision, write what was found so future runs reuse without rescanning and can report *reused vs downloaded*. A missing/absent file → empty queue on load (already handled by `watch_queue.from_path`).
 3. **Reuse-first provisioning**: `bootstrap.py` checks config + known roots first; only when absent (or `--provision`) does it download into `.portable/<os>/`: official yt-dlp standalone, a static ffmpeg+ffprobe build, and the ONNX Runtime HTDemucs export. The script then points yt-dlp's `--ffmpeg-location` at the discovered dir.
 4. **FFmpeg nuance**: a directory with only `ffmpeg.exe` (no ffprobe) is usable for some yt-dlp builds but not this one — keep the "needs BOTH" rule, and treat third-party shared ffmpeg as *local-reuse-only* (not portable). Open question: whether to also detect a system-wide ffmpeg/ffprobe via `%PATH%` on Windows.
 
@@ -175,7 +175,7 @@ into its own private `.portable/` scope so it "just works" anywhere (Windows pri
 
 Both clients build on the shared
 contract the server already emits: a `/status` SSE stream with per-item terminal records
-(`last_completed`) and `pending`/`done` counts, plus the `_input_queue` queue-file schema.
+(`last_completed`) and `pending`/`done` counts, plus the `watch_queue` queue-file schema.
 
 - **Userscript** — `browser/userscripts/splitfy.user.js` (Tampermonkey/Greasemonkey manifest):
   `GM_addStyle` UI, `/status` polling via fetch/XHR fallback, read/write of the local queue JSON, and
@@ -184,7 +184,7 @@ contract the server already emits: a `/status` SSE stream with per-item terminal
   worker that imports the shared DOM-free client via `importScripts`, plus popup/options HTML). Shares one
   protocol with the userscript (`GET /status` SSE + `POST /add`); a small server writes to the same queue
   file so users can enqueue from an always-on background page instead of the CLI process.
-- **Shared contract** — both clients use the identical `/status` JSON shape and `_input_queue` schema;
+- **Shared contract** — both clients use the identical `/status` JSON shape and `watch_queue` schema;
   the shared client (`browser/extension/splitfy_client.js`) is DOM-free, so it ships as a static
   asset in the extension rather than as an `splitfy` module. A contract test drives the parsing logic
   directly; streamed-path tests use bounded reads so they stay deterministic under both runners.

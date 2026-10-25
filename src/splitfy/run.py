@@ -37,7 +37,7 @@ from .core import (
 from .bootstrap import find_ffmpeg
 from .provision import resolve_recorded_tools
 from .logging import Logger
-from splitfy._input_queue import WatchQueue, default_queue_path
+from splitfy.watch_queue import WatchQueue, default_queue_path
 
 ENGINE_CHOICES = ("auto", "uvr5", "htdemucs")
 

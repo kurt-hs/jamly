@@ -42,7 +42,7 @@ def default_config_path(scope_dir: str = "") -> str:
 class ConfigStore:
     """In-memory view over ``splitfy.json`` with atomic persistence.
 
-    Like :mod:`_input_queue`, a missing/invalid file loads as empty so discovery never fails on a
+    Like :mod:`watch_queue`, a missing/invalid file loads as empty so discovery never fails on a
     first run or when the file is hand-corrupted. Records are keyed by tool category; each entry
     holds the discovered paths plus any extra fields (e.g. ``preferred``) written alongside them.
     """

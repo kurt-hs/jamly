@@ -24,7 +24,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from splitfy._input_queue import WatchQueue, default_queue_path
+from splitfy.watch_queue import WatchQueue, default_queue_path
 from .core import AUDIO_FORMATS, DEFAULT_OUTPUT_FORMAT
 from .run import ItemResult, process_one
 

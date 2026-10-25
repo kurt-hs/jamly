@@ -6,7 +6,7 @@ streaming ``/status`` SSE endpoint while a background worker processes items con
 Why these are robust (and do NOT hang or race):
 
 * No stdlib-``queue`` shadowing: since the restructure, ``server.py`` imports our own
-  :class:`splitfy._input_queue.WatchQueue` (which now also exposes ``done_ids()`` and an
+  :class:`splitfy.watch_queue.WatchQueue` (which now also exposes ``done_ids()`` and an
   ``.items`` accessor). The HTTP layer therefore loads cleanly under both runners -- this is the
   resolution of the earlier "queue issue" that broke pytest collection. Tests use only the standard
   library, so they run anywhere without third-party HTTP clients.

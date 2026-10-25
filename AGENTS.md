@@ -26,7 +26,7 @@ This box's Python ships a stdlib `queue` that **lacks the CPython watch_queue ex
 (no `WatchQueue`). Code must therefore import our own implementation directly:
 
 ```python
-from splitfy._input_queue import WatchQueue, default_queue_path
+from splitfy.watch_queue import WatchQueue, default_queue_path
 ```
 
 Never name a module `queue.py`, and never rely on repo-root shadowing to make `from queue import` work.
