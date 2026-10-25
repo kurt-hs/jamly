@@ -12,3 +12,6 @@ Thumbs.db
 *.log
 queue.json
 auto_convert_queue.json
+
+# scratch
+.split_extra_tmp.py

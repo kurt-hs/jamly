@@ -8,8 +8,6 @@ isolated config path so it never writes to the repo root during tests.
 On Windows fake binaries are named ``ffmpeg.exe`` / ``yt-dlp.exe``; on POSIX the bare name -- both
 are accepted by find_*.
 """
-import contextlib
-import io
 import os
 import sys
 import tempfile
@@ -64,8 +62,10 @@ class ScanKnownRootsTests(unittest.TestCase):
         self.assertIn(good, r["ffmpeg"])
 
     def test_first_good_additional_dir_wins_for_ffmpeg(self):
-        good = tempfile.mkdtemp(); _bin_dir_with_both(good)
-        partial = tempfile.mkdtemp(); _bin_dir_with_ffmpeg_only(partial)  # only ffmpeg -> not reusable
+        good = tempfile.mkdtemp()
+        _bin_dir_with_both(good)
+        partial = tempfile.mkdtemp()
+        _bin_dir_with_ffmpeg_only(partial)  # only ffmpeg -> not reusable
         r = b._scan_known_roots(additional_dirs=[partial, good], uvr_scan=False)  # isolate from real-box installs
         self.assertIn(good, r["ffmpeg"])          # a dir shipping BOTH binaries is reported as reusable
         self.assertNotIn(partial, r["ffmpeg"])    # a dir with only ffmpeg is NOT
@@ -88,7 +88,8 @@ class ScanKnownRootsTests(unittest.TestCase):
             r = b._scan_known_roots(uvr_scan=False)  # isolate the standalone probe from real-box installs
             self.assertTrue(any("yt-dlp" in os.path.basename(p) for p in r["yt-dlp"]))
         finally:
-            os.environ.clear(); os.environ.update(old)
+            os.environ.clear()
+            os.environ.update(old)
 
     def test_curated_app_bundles_both_binaries(self):
         lp = tempfile.mkdtemp()
@@ -142,7 +143,8 @@ class FindKnownRootsCacheTests(unittest.TestCase):
     def test_first_call_scans_then_caches(self):
         with tempfile.TemporaryDirectory() as scope:
             cfg = self._isolated_config(scope)
-            good = tempfile.mkdtemp(); _bin_dir_with_both(good)
+            good = tempfile.mkdtemp()
+            _bin_dir_with_both(good)
             r1 = b.find_known_roots(config_path=cfg, additional_dirs=[good])  # cache miss -> scan
             self.assertIn(good, r1["ffmpeg"])
             self.assertTrue(os.path.isfile(cfg))  # results persisted for reuse
@@ -150,15 +152,17 @@ class FindKnownRootsCacheTests(unittest.TestCase):
     def test_second_call_returns_cached_without_rescanning(self):
         with tempfile.TemporaryDirectory() as scope:
             cfg = self._isolated_config(scope)
-            good = tempfile.mkdtemp(); _bin_dir_with_both(good)
-            r2 = b.find_known_roots(config_path=cfg, additional_dirs=[good])  # prime cache
+            good = tempfile.mkdtemp()
+            _bin_dir_with_both(good)
+            b.find_known_roots(config_path=cfg, additional_dirs=[good])  # prime cache
             r3 = b.find_known_roots(config_path=cfg)  # cache hit -> no scan of `good` needed
             self.assertIn(good, r3["ffmpeg"])
 
     def test_force_flag_rescans_even_with_cache(self):
         with tempfile.TemporaryDirectory() as scope:
             cfg = self._isolated_config(scope)
-            good = tempfile.mkdtemp(); _bin_dir_with_both(good)
+            good = tempfile.mkdtemp()
+            _bin_dir_with_both(good)
             b.find_known_roots(config_path=cfg, additional_dirs=[good])  # prime cache
             r4 = b.find_known_roots(config_path=cfg, force=True, additional_dirs=[good])
             self.assertIn(good, r4["ffmpeg"])
@@ -166,7 +170,8 @@ class FindKnownRootsCacheTests(unittest.TestCase):
     def test_empty_cache_triggers_scan(self):
         with tempfile.TemporaryDirectory() as scope:
             cfg = self._isolated_config(scope)  # no file yet -> empty cache
-            good = tempfile.mkdtemp(); _bin_dir_with_both(good)
+            good = tempfile.mkdtemp()
+            _bin_dir_with_both(good)
             r5 = b.find_known_roots(config_path=cfg, additional_dirs=[good])
             self.assertIn(good, r5["ffmpeg"])
 class ConfigPersistenceTests(unittest.TestCase):

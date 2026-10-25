@@ -13,7 +13,6 @@ import unittest.mock as mock
 # src-layout: make the ``auto_convert`` package importable for both `pytest` and
 # `python -m unittest discover -s tests` without an editable install. Inserted before any
 # absolute-package import so it always runs first.
-import sys as _shim_sys  # noqa: E402
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
 from auto_convert.logging import Logger  # noqa: E402 (public helpers + Logger)
@@ -33,8 +32,11 @@ def _capture(logger=None):
 class RenderTests(unittest.TestCase):
     def test_ok_fail_warn_step_note_emit(self):
         log, buf = _capture()
-        log.ok("done"); log.fail("boom"); log.warn("careful")
-        log.step("download"); log.note("hello world")
+        log.ok("done")
+        log.fail("boom")
+        log.warn("careful")
+        log.step("download")
+        log.note("hello world")
         out = buf.getvalue()
         self.assertIn("\u2713 done", out)    # checkmark ok
         self.assertIn("\u2717 boom", out)    # cross fail
@@ -44,7 +46,8 @@ class RenderTests(unittest.TestCase):
     def test_quiet_suppresses_everything(self):
         import io
         log = Logger(quiet=True, color=False)
-        buf = io.StringIO(); log.stream = buf
+        buf = io.StringIO()
+        log.stream = buf
         for fn in (lambda: log.step("x"), lambda: log.ok("y"), lambda: log.note("z")):
             fn()
         self.assertEqual(buf.getvalue(), "")
@@ -79,7 +82,6 @@ class ProgressBarTests(unittest.TestCase):
         self.assertEqual(Logger.parse_download_progress("[download] starting"), {})
 
     def test_render_bar_width_and_size(self):
-        import io
         log, buf = _capture()
         bar = Logger.render_bar("95", "23.4M", "24.8M")
         blocks = sum(c == "\u2588" for c in bar)     # filled cells == round(16*95/100)==15
@@ -88,7 +90,6 @@ class ProgressBarTests(unittest.TestCase):
         self.assertIn("95%", bar) and self.assertIn("23.4M", bar) and self.assertIn("24.8M", bar)
 
     def test_render_bar_no_size(self):
-        import io
         log, buf = _capture()
         bar = Logger.render_bar("12")
         blocks = sum(c == "\u2588" for c in bar)     # filled cells == round(16*12/100)==2
@@ -101,7 +102,8 @@ class VersionOfTests(unittest.TestCase):
     def test_quiet_returns_none_without_querying(self):
         log, buf = _capture()
         old = sys.stderr
-        captured = mock.MagicMock(); sys.stderr = captured   # would raise if a subprocess was spawned
+        captured = mock.MagicMock()
+        sys.stderr = captured   # would raise if a subprocess was spawned
         try:
             self.assertIsNone(log.version_of("whatever.exe"))  # quiet -> no subprocess
         finally:
