@@ -16,6 +16,12 @@ AGENTS.md             this file
 
 `src/` is the setuptools src-layout root (`pyproject.toml`). The package dir is `auto_convert`.
 
+The browser extension source lives under `browser/` (relocated from the repo root, §13):
+its MV3 manifest + service worker + popup/options HTML and the shared DOM-free client are in
+`browser/extension/`; the standalone Tampermonkey panel (`auto_convert.user.js`) is in
+`browser/userscripts/`. It is not a Python package — it ships as static assets, so keep those
+files out of `src/`/`tests/` and never `import` them from the suite.
+
 ## Imports — do not use bare-sibling imports
 
 Every import across modules inside the package must be **relative** or **absolute**; never a
@@ -48,7 +54,8 @@ python -m pytest                    # pythonpath=["src"] from pyproject.toml
 python -m unittest discover -s tests  # each test file shims src onto sys.path
 ```
 
-Expected result: **84 passed, 2 skipped** (the two SSE-integration tests in `test_server.py` skip by design — see below).
+Expected result: **129 passed under both runners** (no skips; the SSE-integration tests that
+were once deemed flaky now pass cleanly).
 
 - Each test module imports the package via its absolute name and adds a single line to put
   `src/` on `sys.path`; it must not add the project root or any redundant inserts.

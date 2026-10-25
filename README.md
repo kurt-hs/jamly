@@ -32,6 +32,9 @@ src/auto_convert/
   run.py          CLI orchestrator: download -> separate -> metadata/renaming
   server.py       HTTP(S) server with SSE `GET /status` progress streaming
 tests/            unittest suite (absolute-package imports; runs under pytest or -m unittest)
+browser/extension # MV3 WebExtension + shared DOM-free client (manifest, service worker,
+                  popup/options HTML); browser/userscripts/auto_convert.user.js is the
+                  standalone Tampermonkey panel (installed separately from the extension)
 PLAN.md           long-form design + portability research notes
 AGENTS.md         contributing & coding conventions
 ```

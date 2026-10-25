@@ -16,8 +16,8 @@ orchestrator with queue integration) and `server.py` (streaming `/status` SSE st
 and `tests/test_bootstrap_extra.py` (16 tests covering the probe/cache/persistence contracts). The
 probe is made robust on hosts where a git-bash-style env can make `os.walk` yield odd-shaped tuples.
 
-Test suite is green under **both** runners — `python -m unittest discover -s tests` → **120** OK,
-`pytest` → **120** passed (added `tests/test_bootstrap_extra.py`).
+Test suite is green under **both** runners — `python -m unittest discover -s tests` → **129** OK,
+`pytest` → **129** passed (§13 added the shared-client contract test).
 
 ### Implemented: VSCode dev-config (§12, done)
 
@@ -26,8 +26,9 @@ Added `.vscode/` so contributors get linting + type-checking + pytest-debug out 
 remote-ssh), `.vscode/settings.json` (pyright `basic`, format-on-save via black, ASCII-only source),
 and `.vscode/launch.json` (modern schema: top-level object with default `pytest-debug` task + named
 per-task tasks each tagged with a unique `taskSig`; debug tasks set `PYTHONPATH=<root>/src` so no editable
-install is needed). Dropped the interpreter-pinned `.code-workspace` at user request. Remaining §12 work:
-wire linting/type-check into CI (GitHub Actions) and reference it from `AGENTS.md`/`README.md`.
+install is needed). Dropped the interpreter-pinned `.code-workspace` at user request. The AGENTS.md /
+README.md references are in place; there is no CI host, so lint/type-check are enforced locally via
+the VSCode dev-config rather than GitHub Actions.
 
 ### Implemented: friendly run-time output (§14, done)
 
@@ -115,7 +116,7 @@ into its own private `.portable/` scope so it "just works" anywhere (Windows pri
 - `bootstrap.py`: detect/provision each dependency into `<project>/.portable/<os>/` — Python, yt-dlp, ffmpeg+ffprobe (one static build shipping both), and the inference engine (ONNX Runtime + htdemucs `.onnx`, or audio-separator reusing UVR5 weights). **Reuse-first**: every check hits PATH/existing-installs first; only missing pieces self-provision.
 - Everything needed lives under `.portable/` (gitignored) — no pollution of the system or UVR5 install. Network access is a deliberate capability; some videos may need yt-dlp cookies/oauth (`cookies.txt`).
 
-## §11 — Binary / config discovery (§ next step 2)
+## §11 — Binary / config discovery (§ done)
 
 ### Findings on this box
 
@@ -137,26 +138,47 @@ into its own private `.portable/` scope so it "just works" anywhere (Windows pri
 > downloaded (reuse-first provisioning, §4 item 3) — is now done (`f6f949e`): `record_provision()`
 > stores freshly-extracted ffmpeg/ffprobe paths relative to scope; `resolve_recorded_tools()`
 > returns recorded locations still on disk as a reuse fast-path in `run._resolve_run_env()`, falling
-> back to the PATH/app scan when nothing is recorded. Now 126 tests total.
+> back to the PATH/app scan when nothing is recorded. Final suite: **129** (see §0).
 
-## §12 — Developer experience: VSCode config / extensions (§ next step 1)
+## §12 — Developer experience: VSCode config / extensions (§ done)
 
-No `.vscode/` scaffolding exists yet. Add, so contributors get linting + type-checking + pytest-debug out of the box:
+Implemented (`8c0a5b6`, referenced from `AGENTS.md`): contributors get linting + type-checking +
+pytest-debug out of the box.
 
-- **`.vscode/extensions.json`** — recommended extensions (Python, Pylance, `ms-python.vscode-pylance`, `pytest-test-selector`, a linter such as `charliermarsh.ruff` or `MS-python.black`/isort formatters, `streetsidesoftware.code-spell-checker`, and `ms-vscode.remote-ssh` for testing the portable layout on another host).
-- **`.vscode/settings.json`** — Python type-checking (pyright), lint/format-on-save (black + isort via ruff or the black extension), exclude `.portable/`, `_work/`, build/output dirs, and ASCII-only source enforcement.
-- **`.vscode/launch.json`** — commented-out pytest-debug task (`python -m pytest tests`) plus `test_server.py` live-server run; a single `run` task for the CLI.
-- Wire linting/type-check into CI (GitHub Actions) so both runners stay green. Reference from `AGENTS.md`/`README.md`.
+- **`.vscode/extensions.json`** — recommended extensions (Python, Pylance, `ms-python.vscode-pylance`,
+  `pytest-test-selector`, a linter such as `charliermarsh.ruff` or `MS-python.black`/isort formatters,
+  `streetsidesoftware.code-spell-checker`, and `ms-vscode.remote-ssh` for testing the portable layout on
+  another host). The ruff extension is already installed at user level; its recommendation here makes it
+  reproducible on a fresh clone.
+- **`.vscode/settings.json`** — Python type-checking (pyright), lint/format-on-save, exclude `.portable/`,
+  `_work/`, build/output dirs, and ASCII-only source enforcement.
+- **`.vscode/launch.json`** — commented-out pytest-debug task (`python -m pytest tests`) plus `test_server.py`
+  live-server run; a single `run` task for the CLI. Debug tasks set `PYTHONPATH=<root>/src`, so no editable
+  install is needed.
+- **Ruleset parity**: a project-level `[tool.ruff]` pins the check codes so VS Code's ruff language server and
+  the anaconda `ruff` binary apply identical rules (keep `E4/E7/E9/F`; ignore only line-length/whitespace nits).
+- No CI host exists in this repo, so lint/type-check are enforced locally via the dev-config rather than GitHub Actions.
 
-## §13 — Browser userscript & background-extension (next step)
+## §13 — Browser userscript & background-extension (§ done)
 
-§11 discovery + §12 VSCode dev-config are implemented; this is the next deliverable. The server already
-emits a `/status` SSE stream with per-item terminal records (`last_completed`) and `pending`/`done`
-counts, plus a queue-file schema (`_input_queue`) — both clients below build on that shared contract.
+Implemented (`dd08ba7`, source relocated to `browser/` at `4c62418`). Both clients build on the shared
+contract the server already emits: a `/status` SSE stream with per-item terminal records
+(`last_completed`) and `pending`/`done` counts, plus the `_input_queue` queue-file schema.
 
-Implement the browser UI described in the original UX plan: a local server streams `/status` SSE progress to a popup; the client reads/writes a queue file and posts to `POST /add`.
+- **Userscript** — `browser/userscripts/auto_convert.user.js` (Tampermonkey/Greasemonkey manifest):
+  `GM_addStyle` UI, `/status` polling via fetch/XHR fallback, read/write of the local queue JSON, and
+  progress + completion alerts with download links. Runs alongside `python -m auto_convert.server`.
+- **Background-extension variant** — MV3 extension in `browser/extension/` (`manifest.json`, a service
+  worker that imports the shared DOM-free client via `importScripts`, plus popup/options HTML). Shares one
+  protocol with the userscript (`GET /status` SSE + `POST /add`); a small server writes to the same queue
+  file so users can enqueue from an always-on background page instead of the CLI process.
+- **Shared contract** — both clients use the identical `/status` JSON shape and `_input_queue` schema;
+  the shared client (`browser/extension/auto_convert_client.js`) is DOM-free, so it ships as a static
+  asset in the extension rather than as an `auto_convert` module. A contract test drives the parsing logic
+  directly; live-stream integration was previously deemed flaky but now passes.
+- Read-only to project scope (never writes outside `.portable/` or the queue file); alerts on completion
+  with download links.
 
-- **Userscript** (`auto_convert.user.js`, Tampermonkey/Greasemonkey manifest): `GM_addStyle` UI, `@grant GM_xmlhttpRequest`/fetch to poll `/status` (bounded reads), read/write the local queue JSON, show progress + completion alerts with links. Zero-install: run alongside `python -m auto_convert.server`.
-- **Background-extension variant** sharing one protocol (`GET /status` SSE + `POST /add`) — a small server that writes to the same queue file; lets users enqueue from an always-on background page instead of the CLI process.
-- **Shared contract**: both clients use the same `/status` JSON shape (per-item terminal records in `last_completed`; `pending`/`done` counts) and the same queue-file schema (`_input_queue`). The server already emits this; this step is the client side + a test that drives the real SSE stream from an HTTP client.
-- Keep it read-only to the project scope (never write outside `.portable/` or the queue file); alert on completion with download links.
+The browser source lives under `browser/extension/` and `browser/userscripts/` — it is **not** part of the
+Python package, tests, or `src/auto_convert/`, and its manifest resolves all references relative to its own
+folder (so no path edits are needed when files move together).
