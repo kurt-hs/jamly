@@ -5,50 +5,45 @@
             "name": "pytest-debug",
             "type": "debugpy",
             "request": "launch",
+            "module": "pytest",
+            "args": [
+                "-s",
+                "tests"
+            ],
             "justMyCode": true,
             "cwd": "${workspaceFolder}",
             "env": {
                 "PYTHONPATH": "${workspaceFolder}/src"
             },
-            "args": [
-                "-s",
-                "-o",
-                "failfast=true",
-                "tests"
-            ],
             "console": "integratedTerminal"
         },
         {
             "name": "unittest-debug",
             "type": "debugpy",
             "request": "launch",
+            "module": "unittest",
+            "args": [
+                "discover",
+                "-s",
+                "tests"
+            ],
             "justMyCode": true,
             "cwd": "${workspaceFolder}",
             "env": {
                 "PYTHONPATH": "${workspaceFolder}/src"
             },
-            "args": [
-                "-m",
-                "unittest",
-                "discover",
-                "-s",
-                "tests"
-            ],
             "console": "integratedTerminal"
         },
         {
             "name": "run-server",
             "type": "debugpy",
             "request": "launch",
+            "module": "splitfy.server",
             "justMyCode": false,
             "cwd": "${workspaceFolder}",
             "env": {
                 "PYTHONPATH": "${workspaceFolder}/src"
             },
-            "args": [
-                "-m",
-                "splitfy.server"
-            ],
             "console": "integratedTerminal"
         }
     ]
