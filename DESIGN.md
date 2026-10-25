@@ -194,3 +194,18 @@ contract the server already emits: a `/status` SSE stream with per-item terminal
 The browser source lives under `browser/extension/` and `browser/userscripts/` — it is **not** part of the
 Python package, tests, or `src/splitfy/`, and its manifest resolves all references relative to its own
 folder (so no path edits are needed when files move together).
+
+## §14 — Cross-platform server delivery
+
+The HTTP listener runs as a foreground process:  `python -m splitfy.server --port 8765`.
+There is **no** auto-start mechanism and the installed `splitfy` console script drives batch/queue mode, not
+the listener (see `src/splitfy/server.py`). To make it always-on / reboot-persistent across platforms,
+`servers/`-adjacent wrappers resolve tools from the repo root (no baked-in paths):
+
+- **CORS** — every response carries `Access-Control-Allow-Origin: *` and an `OPTIONS` preflight is answered, so
+  the MV3 extension and Tampermonkey userscript can fetch over HTTP from their cross-origin contexts. Covered by
+  `test_server.py::ServerIntegrationTests::test_cors_headers_on_responses_and_preflight`.
+- **Windows** — foreground: `windows/start-splitfy-server.bat [PORT]`; persistent: `powershell windows/install-schedule-task.ps1`
+  (and `uninstall-schedule-task.ps1` to remove). The task runs from the repo root so `import splitfy` needs no install.
+- **Linux** — systemd unit `linux/splitfy-server.service` driven by `linux/splitfy-server-launch.sh` (`start|stop|status|restart [PORT]`).
+  Edit the absolute paths in that `.service` file (`WorkingDirectory`, `ExecStart`) to point at your checkout before enabling.

@@ -1,0 +1,25 @@
+# splitfy HTTP status server — portable SERVICE launcher (Linux).
+#
+# Starts the queue-status HTTP server as a background service so it survives
+# reboots, mirroring `windows/start-splitfy-server.bat` and the PowerShell
+# scheduled-task scripts. Requires systemd; on a box without it, run the
+# foreground variant directly:  python -m splitfy.server --port 8765
+#
+# Usage (from anywhere):
+#   sudo systemctl start|stop|status|restart splitfy-server.service
+
+[Unit]
+Description=splitfy audio-separation HTTP status server
+Documentation=file:///$(pwd)/README.md
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/splitfy            # absolute path to the checkout (edit)
+Environment=AUTOCV_SCOPE=/opt/splitfy    # tool resolution scope = repo root
+ExecStart=/usr/bin/python3 -m splitfy.server --port 8765 --scope /opt/splitfy
+Restart=always
+User=root                                  # needs write access for the queue file; edit as appropriate
+
+[Install]
+WantedBy=multi-user.target
