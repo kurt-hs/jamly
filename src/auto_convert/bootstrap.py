@@ -137,10 +137,8 @@ def detect_ffmpeg(ffmpeg_dirs: list = None, scope_dir: str = "", additional_dirs
     PLAN.md section 2 / blocked item: an ffprobe binary must be sourced separately.
     """
     if PLATFORM_WINDOWS:
-        ext = ".exe"
         names = ("ffmpeg.exe", "ffprobe.exe")
     else:
-        ext = ""
         names = ("ffmpeg", "ffprobe")
 
     dirs = list(ffmpeg_dirs or []) + list(additional_dirs)
@@ -167,8 +165,12 @@ def detect_ffmpeg(ffmpeg_dirs: list = None, scope_dir: str = "", additional_dirs
     if os.path.isdir(port_root):
         def _scoped(name):
             for entry in os.walk(port_root):
-                try: dp, dn, fn = entry
-                except ValueError: dp, dn, fn = entry[0], [], []
+                # defensive unpack: a malformed host path can make os.walk yield odd-shaped
+                # tuples -- we only need dirpath + filenames, so one bad component never aborts.
+                try:
+                    dp, fn = entry
+                except ValueError:
+                    dp, fn = entry[0], []
                 if name in fn and os.path.isfile(os.path.join(dp, name)):
                     return os.path.join(dp, name)
             return ""
@@ -182,7 +184,7 @@ def detect_ffmpeg(ffmpeg_dirs: list = None, scope_dir: str = "", additional_dirs
     return ToolStatus("ffmpeg")
 
 
-def find_ffmpeg(scope_dir: str = "") -> Optional[str]:
+def find_ffmpeg(scope_dir: str = ""):
     """Return an absolute path to a dir holding BOTH ffmpeg+ffprobe, else None.
 
     Thin wrapper over :func:`detect_ffmpeg` used by run.py / server mode so the caller
@@ -272,8 +274,6 @@ def _curated_app_roots() -> list:
 
     appdata_roaming = os.environ.get("APPDATA", "")
     userprofile = os.environ.get("USERPROFILE", "")
-    home = _abs(userprofile) if (userprofile and PLATFORM_WINDOWS) else \
-          (_abs(os.path.expandvars("~")) if not PLATFORM_WINDOWS else "")
 
     # AppData\Local\Programs: UVR5 + apps that ship ffmpeg/ffprobe install here as <app>.
     # AppData\Local\Programs + AppData\Roaming\Local\Programs: UVR5 GUI and apps that ship
@@ -370,8 +370,10 @@ def _scan_known_roots(scope_dir: str = "", additional_dirs=(), uvr_scan=True) ->
             for level, entry in enumerate(os.walk(root)):
                 # a malformed host path can make os.walk yield odd-shaped tuples -- unpack defensively so
                 # one bad component never aborts the whole walk and hides legitimate bundled-app roots.
-                try: dp, dn, fn = entry
-                except ValueError: dp, dn, fn = entry[0], [], []
+                try:
+                    dp = entry[0]
+                except ValueError:
+                    dp = ""
                 if level > 3:
                     continue
                 rel = _norm(dp).lower()
@@ -410,8 +412,11 @@ def _scan_known_roots(scope_dir: str = "", additional_dirs=(), uvr_scan=True) ->
                 # bounded walk: count descent levels from `root` (not absolute components)
                 try:
                     for level, entry in enumerate(os.walk(root)):
-                        try: dp, dn, fn = entry
-                        except ValueError: dp, dn, fn = entry[0], [], []
+                        # defensive unpack (see walk above): only dirpath + filenames are needed.
+                        try:
+                            dp, fn = entry
+                        except ValueError:
+                            dp, fn = entry[0], []
                         if level > 3:
                             continue
                         if name in fn and any(fn[0].endswith(e) for e in exts):
