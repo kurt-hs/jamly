@@ -19,7 +19,8 @@ import os
 import platform
 import sys
 
-from .core import PLATFORM_WINDOWS, which  # noqa: E402
+from .config_state import (ConfigStore, default_config_path)
+from .core import (_abs, PLATFORM_WINDOWS, _scan_uvr_roots, which)  # noqa: E402
 
 
 def _os_family() -> str:
@@ -165,7 +166,9 @@ def detect_ffmpeg(ffmpeg_dirs: list = None, scope_dir: str = "", additional_dirs
     port_root = os.path.join(scope, ".portable", _os_family(), "ffmpeg")
     if os.path.isdir(port_root):
         def _scoped(name):
-            for dp, dn, fn in os.walk(port_root):
+            for entry in os.walk(port_root):
+                try: dp, dn, fn = entry
+                except ValueError: dp, dn, fn = entry[0], [], []
                 if name in fn and os.path.isfile(os.path.join(dp, name)):
                     return os.path.join(dp, name)
             return ""
@@ -226,7 +229,217 @@ def demucs_weights(repo: str = "", model: str = "htdemucs") -> list:
                   if f.endswith(".th") and os.path.isfile(os.path.join(repo, f)))
 
 
+# --------------------------------------------------------------------------- #
+# curated cross-machine install-root discovery (§11 / PLAN.md §10)
+# --------------------------------------------------------------------------- #
+def _dir_has_both(root: str) -> bool:
+    """True if `root` holds BOTH ffmpeg+ffprobe (bare names on POSIX, .exe on Windows)."""
+    try:
+        ext = ".exe" if PLATFORM_WINDOWS else ""
+        ff = os.path.join(_abs(root), "ffmpeg%s" % ext)
+        fp = os.path.join(_abs(root), "ffprobe%s" % ext)
+        return os.path.isfile(ff) and os.path.isfile(fp)
+    except OSError:
+        return False
+
+
+def _curated_app_roots() -> list:
+    r"""Well-known app locations that may bundle ffmpeg/ffprobe or ship UVR5.
+
+    Probed AFTER PATH-first so a host's own installs win; this is best-effort coverage of the
+    common cases cross-machine (not an exhaustive scan of every copy on one box). Returns a
+    de-duplicated list of candidate directories: ``AppData\Local\Programs`` (where UVR5 and most
+    editors/muxers install) and ``AppData\Roaming`` (winget/npm installs, standalone yt-dlp).
+    Pure file checks -- no heavy imports.
+    """
+    roots = []
+    seen = set()
+
+    def _add(path: str):
+        # Only add genuine directories; skip bogus cwd-relative paths that arise when APPDATA /
+        # USERPROFILE are unset (e.g. under git-bash) so os.walk never sees a malformed root.
+        ap = os.path.abspath(os.path.expanduser(os.path.expandvars(path)))
+        if not ap or ap in seen:
+            return
+        try:
+            is_dir = os.path.isdir(ap)
+        except OSError:
+            is_dir = False
+        if not is_dir:
+            return
+        seen.add(ap)
+        roots.append(ap)
+
+    appdata_roaming = os.environ.get("APPDATA", "")
+    userprofile = os.environ.get("USERPROFILE", "")
+    home = _abs(userprofile) if (userprofile and PLATFORM_WINDOWS) else \
+          (_abs(os.path.expandvars("~")) if not PLATFORM_WINDOWS else "")
+
+    # AppData\Local\Programs: UVR5 + apps that ship ffmpeg/ffprobe install here as <app>.
+    # AppData\Local\Programs + AppData\Roaming\Local\Programs: UVR5 GUI and apps that ship
+    # ffmpeg/ffprobe here as <app>\.  Both siblings are required so we don't miss the common case.
+    _add(os.path.join(appdata_roaming, "Local", "Programs"))
+    _add(os.path.join(userprofile, "AppData", "Local", "Programs"))
+    # AppData\Roaming: standalone yt-dlp (yt-dlp_win_x86), winget/npm tool folders, etc.
+    _add(os.path.join(appdata_roaming, "Roaming"))
+    return roots
+
+
+def _looks_like_ytdlp(path: str) -> bool:
+    """True if `path` is an executable named yt-dlp (accepts .exe/.bat, rejects .py). Pure check."""
+    name = os.path.basename(os.path.normpath(path))
+    return (os.path.isfile(path) and not path.endswith(".py")
+            and any(n in name for n in ("yt-dlp", "yt-dlp.exe", "yt-dlp_x86.exe", "yt-dlp.bat")))
+
+
+def find_known_roots(scope_dir: str = "", additional_dirs=(), config_path=None, force=False) -> dict:
+    """Return reusable install roots for this run.
+
+    Fast path: when a valid cache exists at ``config_path`` (defaults to the scope root's
+    ``auto_convert.json``), the recorded paths are returned immediately -- no filesystem scan,
+    so every run after the first is cheap and can report *reused vs downloaded*. Only when the
+    cache is empty/invalid, or ``force=True``, do we call :func:`_scan_known_roots` (the slow,
+    exhaustive probe) once and persist its results for next time.
+
+    See :func:`_scan_known_roots` for the semantics of each category. Pure stdlib; no network.
+    """
+    cfg = ConfigStore.from_path(config_path or default_config_path(scope_dir))
+    if not force and not cfg.empty:
+        return _load_cached(cfg)
+
+    fresh = _scan_known_roots(scope_dir=scope_dir, additional_dirs=tuple(additional_dirs))
+    store = ConfigStore.from_path(config_path or default_config_path(scope_dir))
+    for cat in ("ffmpeg", "yt-dlp", "uvr_root"):
+        paths = list(fresh[cat])
+        if len(paths) <= 1 and store.get_paths(cat):
+            # keep the previously-recorded path when this run found nothing new; only add it
+            # if it is genuinely absent (avoids clobbering a useful root with an empty scan)
+            pass
+        else:
+            store.record(cat, list(fresh[cat]))
+    try:
+        store.save()
+    except OSError:
+        pass  # caching is best-effort; discovery still returns the freshly-scanned paths
+    return fresh
+
+
+def _scan_known_roots(scope_dir: str = "", additional_dirs=(), uvr_scan=True) -> dict:
+    """Exhaustive filesystem probe of reusable install roots (PATH-first, then curated).
+
+    Returns::
+
+        {"ffmpeg": [dir...], "yt-dlp": [path...], "uvr_root": [root...]}
+
+    This is the *slow* path -- invoked only once per unique scope when no cache exists. See
+    :func:`find_known_roots`. A directory with only ffmpeg is NOT listed here (needs BOTH);
+    see :func:`detect_ffmpeg` for that WARN-only case.
+
+    ``uvr_scan`` gates the one-time UVR5-weight-repo probe; pass False to exercise the fast
+    PATH/curated probes against temp dirs in isolation (the UVR scan is separately unit-tested).
+    """
+    out = {"ffmpeg": [], "yt-dlp": [], "uvr_root": []}
+
+    # normalized marker to skip this box's UVR5-bundled ffmpeg (surfaced via uvr_roots, not here)
+    uvr_marker = "programs/ultimate vocal remover"
+
+    def _norm(path: str) -> str:
+        return os.path.normpath(_abs(os.path.expanduser(os.path.expandvars(path))))                .replace("\\", "/")
+
+    # --- ffmpeg: PATH-first, then curated app roots (skip the UVR5 bundled copy; it is a uvr root) ---
+    path_ffmpeg = which("ffmpeg")
+    if path_ffmpeg and _dir_has_both(os.path.dirname(_abs(path_ffmpeg))):
+        out["ffmpeg"].append(_abs(path_ffmpeg))
+
+    for d in list(additional_dirs) + [os.path.join(scope_dir, ".portable", "ffmpeg")]:
+        ap = os.path.abspath(os.path.expanduser(d))
+        if not os.path.isdir(ap):
+            continue
+        # skip the UVR5 bundled copy: it is surfaced via uvr_roots (not a portable reuse target)
+        if uvr_marker in _norm(d).lower():
+            continue
+        if _dir_has_both(ap):
+            out["ffmpeg"].append(ap)
+
+    for root in _curated_app_roots():
+        # extra guard: skip anything that is not a real directory (defensive; roots are already
+        # dir-filtered at creation) -- discovery must never crash on a malformed path.
+        if not os.path.isdir(root):
+            continue
+        try:
+            for level, entry in enumerate(os.walk(root)):
+                # a malformed host path can make os.walk yield odd-shaped tuples -- unpack defensively so
+                # one bad component never aborts the whole walk and hides legitimate bundled-app roots.
+                try: dp, dn, fn = entry
+                except ValueError: dp, dn, fn = entry[0], [], []
+                if level > 3:
+                    continue
+                rel = _norm(dp).lower()
+                # only directories shipping BOTH binaries are reusable targets; the UVR5 bundled copy is a uvr root (skipped above)
+                if not _dir_has_both(dp):
+                    continue
+                if uvr_marker in rel:
+                    continue  # reported via uvr_root, not here
+                out["ffmpeg"].append(_abs(dp))
+        except (OSError, ValueError):
+            # a malformed host path can make os.walk yield odd-shaped tuples -- skip gracefully
+            pass
+
+    # --- yt-dlp: this box's AppData standalone, then curated roots (PATH-first) ---
+    y_appdata = os.environ.get("APPDATA", "")
+    for cand in [os.path.join(y_appdata, "yt-dlp_win_x86", n)
+                 for n in ("yt-dlp.exe", "yt-dlp_x86.exe", "yt-dlp")]:
+        if _looks_like_ytdlp(cand):
+            out["yt-dlp"].append(_abs(cand))
+    # portable-scope standalone yt-dlp -- symmetric with the AppData probe layout (win_x86/)
+    port_ytdlp = os.path.join(scope_dir, ".portable", "yt-dlp")
+    for f in ("yt-dlp.exe", "yt-dlp_x86.exe", "yt-dlp"):
+        fp = _abs(os.path.join(port_ytdlp, f))
+        if _looks_like_ytdlp(fp) and not any(f.startswith(x) for x in out["yt-dlp"]):
+            out["yt-dlp"].append(fp)
+    win_x86 = os.path.join(port_ytdlp, "win_x86")
+    if os.path.isdir(win_x86):
+        for f in ("yt-dlp.exe", "yt-dlp_x86.exe", "yt-dlp"):
+            fp = _abs(os.path.join(win_x86, f))
+            if _looks_like_ytdlp(fp) and not any(f.startswith(x) for x in out["yt-dlp"]):
+                out["yt-dlp"].append(fp)
+    for root in _curated_app_roots():
+        if os.path.isdir(root):
+            def _find(name, exts):
+                hit = ""
+                # bounded walk: count descent levels from `root` (not absolute components)
+                try:
+                    for level, entry in enumerate(os.walk(root)):
+                        try: dp, dn, fn = entry
+                        except ValueError: dp, dn, fn = entry[0], [], []
+                        if level > 3:
+                            continue
+                        if name in fn and any(fn[0].endswith(e) for e in exts):
+                            hit = _abs(os.path.join(dp, fn[0]))
+                            break
+                except (OSError, ValueError):
+                    pass  # malformed host path -- skip this curated root gracefully
+                return hit
+            for p in (_find("yt-dlp", (".exe", ".bat")), _find("yt-dlp", ())):
+                if p and not any(p.startswith(x) for x in out["yt-dlp"]):
+                    out["yt-dlp"].append(p)
+
+    # --- UVR5 installs shipping the reusable Demucs weight repo (reuses _scan_uvr_roots) ---
+    if uvr_scan:
+        uvr_roots = list(_scan_uvr_roots())
+        out["uvr_root"] = uvr_roots
+
+    return {k: list(dict.fromkeys(v)) for k, v in out.items()}  # de-dup, order-preserving
+
+
+def _load_cached(cfg: "ConfigStore") -> dict:
+    """Return cached roots (all three categories) as-is, or empty if nothing recorded."""
+    out = {"ffmpeg": list(cfg.get_paths("ffmpeg")), "yt-dlp": list(cfg.get_paths("yt-dlp")),
+           "uvr_root": list(cfg.get_paths("uvr_root"))}
+    return {k: list(dict.fromkeys(v)) for k, v in out.items()}
+
 def _exists_exe(path: str) -> bool:
+    """Return True if `path` is an existing executable (existence on Windows; X_OK elsewhere)."""
     import os as _os
     p = _os.path.abspath(_os.path.expandvars(path))
     if not _os.path.isfile(p):

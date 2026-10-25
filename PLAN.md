@@ -11,8 +11,13 @@ The core pipeline + server are implemented under `src/auto_convert/` (package la
 `bootstrap.py` (reuse-first dependency detection), `provision.py` (self-provisioning into
 `.portable/`), `_input_queue.py` (`WatchQueue`, resumable + persisted done-set), `run.py` (CLI
 orchestrator with queue integration) and `server.py` (streaming `/status` SSE status server). The
-test suite is green under **both** runners — `python -m unittest discover -s tests` → **104** OK,
-`pytest` → **104** passed (added `tests/test_logging.py`).
+§11 discovery implementation complete: cache-aware `find_known_roots()` + new path-backed
+`auto_convert/config_state.py` (`ConfigStore`, atomic persistence, empty-if-missing/invalid),
+and `tests/test_bootstrap_extra.py` (16 tests covering the probe/cache/persistence contracts). The
+probe is made robust on hosts where a git-bash-style env can make `os.walk` yield odd-shaped tuples.
+
+Test suite is green under **both** runners — `python -m unittest discover -s tests` → **120** OK,
+`pytest` → **120** passed (added `tests/test_bootstrap_extra.py`).
 
 ### Implemented: friendly run-time output (§14, done)
 
