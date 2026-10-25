@@ -5,11 +5,14 @@ Per input (YouTube link / partial URL / bare watch id) the pipeline is::
     download -> yt-dlp best-audio extract   (container chosen natively by the stream)
          -> separate_stems() four-stems      (htdemucs ONNX or UVR5 audio-separator)
          -> ffmpeg no-drums mix               (bass + other + vocals, 2ch)
+         -> per-stem encode-or-copy           (lossy format default; raw WAV on request)
 
-Outputs per item: ``<title>_drums.wav`` and ``<title>_no_drums.wav`` (each with a
-``.meta.json`` sidecar). Heavy/networked steps are delegated to core/provision; this module's
-own logic -- input gathering/dedup, output naming, stage command building, per-item status,
-dry-run preview, and CLI wiring -- is pure or unit-testable without GPU/network.
+Outputs per item: ``<title>_drums.<fmt>`` and ``<title>_no_drums.<fmt>`` where ``<fmt>`` is the
+chosen audio format (see :func:`build_parser`'s ``--audio-format``); lossy MP3 is the default,
+raw WAV is opt-in. Each output keeps a ``.meta.json`` sidecar.
+Heavy/networked steps are delegated to core/provision; this module's own logic -- input
+gathering/dedup, output naming, stage command building, per-item status, dry-run preview, and CLI
+wiring -- is pure or unit-testable without GPU/network.
 
 Environment knobs (see bootstrap.py): AUTOCV_SCOPE, AUTOCV_UVR_ROOT.
 """
@@ -25,6 +28,8 @@ from typing import Dict, List, Optional
 
 from .normalize import normalize_inputs, extract_watch_id
 from .core import (
+    AUDIO_FORMATS, DEFAULT_OUTPUT_FORMAT, FORMAT_MP3, FORMAT_WAV,
+    build_stem_encode_cmd,
     ENGINE_UVR5, ENGINE_HTDEMUCS,
     _abs, ensure_output_dir, PLATFORM_WINDOWS, run as _run, sanitize_filename,
     tool_source,
@@ -235,12 +240,16 @@ def process_one(wid: str, args, progress=None) -> ItemResult:
 
         res.status, res.stage = "mix", "mix"
         base = sanitize_filename("%s %s" % (res.title or "audio", wid))[:80]
-        nodrums_out = os.path.join(args.output_dir, "%s_no_drums.wav" % base)
-        drums_out = os.path.join(args.output_dir, "%s_drums.wav" % base)
+        fmt = getattr(args, "audio_format", DEFAULT_OUTPUT_FORMAT) or DEFAULT_OUTPUT_FORMAT
+        nodrums_out = os.path.join(args.output_dir, "%s_no_drums.%s" % (base, fmt))
+        drums_out = os.path.join(args.output_dir, "%s_drums.%s" % (base, fmt))
         mix_cmd = build_mix_cmd(ffmpeg_exe_for(ffmpeg_dir), drums, stems["bass"],
                                 stems["other"], stems["vocals"], nodrums_out)
         _run(mix_cmd)
-        shutil.copy2(_abs(drums), _abs(drums_out))
+
+        # finalize each stem: re-encode for a lossy format, copy verbatim for raw WAV. Raw output
+        # needs no encoder here; the mix step above already used ffmpeg for the no-drums blend.
+        finalize_output(ffmpeg_exe_for(ffmpeg_dir), drums, drums_out, fmt)
 
         res.status, res.stage = "done", ""
         res.title = base
@@ -289,6 +298,24 @@ def ffmpeg_exe_for(ffmpeg_dir: str) -> str:
     return _abs(p) if os.path.isfile(p) else ""
 
 
+def finalize_output(ffmpeg_exe: str, src_wav: str, dst_path: str, fmt: str) -> bool:
+    """Write one final stem file in `fmt`: re-encode for lossy, copy verbatim for raw WAV.
+
+    Returns True on success. Raw (``wav``) output copies the source verbatim and needs no encoder,
+    so it works even when ffmpeg is unavailable; a lossy target requires ffmpeg to encode -- if that
+    step fails we raise so the item is marked errored rather than "done" with a missing file.
+    """
+    if fmt == FORMAT_WAV:
+        shutil.copy2(_abs(src_wav), _abs(dst_path))   # raw WAV -> verbatim, no encoder needed
+        return True
+    enc = build_stem_encode_cmd(ffmpeg_exe, src_wav, dst_path, fmt=fmt)
+    res = _run(enc)
+    if not res.ok:
+        raise RuntimeError("failed to encode %s output (exit %d): %s" % (
+            fmt, res.returncode, " ".join(res.args[:4])))
+    return True
+
+
 # --------------------------------------------------------------------------- #
 # CLI entrypoint
 # --------------------------------------------------------------------------- #
@@ -298,7 +325,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("-i", "--input", action="append", metavar="URL_OR_ID",
                    help="YouTube link/id/partial URL (repeatable). Also reads stdin when piped.")
     p.add_argument("-o", "--output-dir", default="output",
-                   help="Directory for <title>_drums.wav / _no_drums.wav (default: output)")
+                   help="Directory for <title>_drums.<fmt> / _no_drums.<fmt> (default: output)")
+    p.add_argument("--audio-format", choices=AUDIO_FORMATS, default=DEFAULT_OUTPUT_FORMAT,
+                   help=("Final audio format; 'wav' = lossless/raw WAVs, '%s' = reasonably-encoded lossy (default)"
+                         % DEFAULT_OUTPUT_FORMAT))
     p.add_argument("--engine", choices=ENGINE_CHOICES, default="auto",
                    help="Stem-separation engine (default: auto-detect installed engine)")
     p.add_argument("-t", "--threads", type=int, default=0,

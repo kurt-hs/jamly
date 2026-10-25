@@ -25,6 +25,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from auto_convert._input_queue import WatchQueue, default_queue_path
+from .core import AUDIO_FORMATS, DEFAULT_OUTPUT_FORMAT
 from .run import ItemResult, process_one
 
 
@@ -35,6 +36,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--scope", default=None, help="Working scope for engine/ytdlp/ffmpeg resolution (default: cwd)")
     p.add_argument("--queue", default=None, help="Queue file path (default: env AUTOCV_QUEUE or <scope>/auto_convert_queue.json)")
     p.add_argument("--interval-ms", type=int, default=1000, help="SSE progress event interval")
+    p.add_argument("--audio-format", choices=AUDIO_FORMATS, default=DEFAULT_OUTPUT_FORMAT,
+                   help=("Final audio format; 'wav' = lossless/raw WAVs, '%s' = reasonably-encoded lossy (default)"
+                         % DEFAULT_OUTPUT_FORMAT))
     p.add_argument("--idle-wait-s", type=float, default=2.0, help="Block this long when the queue is empty")
     return p
 

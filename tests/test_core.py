@@ -132,8 +132,33 @@ class RunTests(unittest.TestCase):
         self.assertIn("NOT FOUND", r.stderr)
 
 
-if __name__ == "__main__":
-    unittest.main(verbosity=2)
+class AudioFormatCmdTests(unittest.TestCase):
+    """build_stem_encode_cmd: lossy re-encode vs raw verbatim-copy decision."""
+
+    def test_mp3_builds_lame_320k_reencode(self):
+        cmd = core.build_stem_encode_cmd("ffmpeg.exe", "in.wav", "out.mp3", fmt="mp3")
+        self.assertIsNotNone(cmd)
+        self.assertEqual(cmd[0], "ffmpeg.exe")
+        # libmp3lame V0 320kbps -- the lossy default encoder settings
+        self.assertIn("-c:a", cmd) and self.assertEqual(cmd[cmd.index("-c:a") + 1], "libmp3lame")
+        self.assertIn("-b:a", cmd) and self.assertEqual(cmd[cmd.index("-b:a") + 1], "320k")
+        # input is abs-pathed; output path passed through verbatim (last arg)
+        self.assertTrue(cmd[cmd.index("-i") + 1].endswith(os.path.abspath("in.wav")))
+        self.assertEqual(cmd[-1], "out.mp3")
+
+    def test_wav_returns_none_for_verbatim_copy(self):
+        # raw WAV needs no ffmpeg re-encode -> caller copies the stem verbatim instead
+        self.assertIsNone(core.build_stem_encode_cmd("ffmpeg.exe", "in.wav", "out.wav", fmt="wav"))
+
+    def test_unknown_format_is_treated_as_raw(self):
+        # defensive: an unrecognised format must not invent encoder flags -> None (verbatim copy)
+        self.assertIsNone(core.build_stem_encode_cmd("ffmpeg.exe", "in.wav", "out.aac", fmt="aac"))
+
+    def test_default_arg_is_mp3_reencode(self):
+        # default parameter is the lossy format, so omitting it still re-encodes
+        cmd = core.build_stem_encode_cmd("ffmpeg.exe", "in.wav", "out.mp3")
+        self.assertIsNotNone(cmd)
+        self.assertIn("libmp3lame", cmd)
 
 
 class DetectEngineTests(unittest.TestCase):

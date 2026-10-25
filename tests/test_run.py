@@ -17,6 +17,7 @@ import unittest.mock as mock
 import sys as _shim_sys  # noqa: E402
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 from auto_convert import run as run_mod
+from auto_convert.core import RunResult   # for finalize_output() test helpers
 import auto_convert.provision as p
 from auto_convert.config_state import ConfigStore as cs
 
@@ -134,6 +135,57 @@ class ResolveRunEnvReuseTests(unittest.TestCase):
                 _s, _e, ffmpeg_dir = run_mod._resolve_run_env(argparse.Namespace(engine="auto", threads=0))
             self.assertEqual(ffmpeg_dir, "/nonexistent/ffmpeg")
             ff.assert_called_once()   # no recorded path -> normal scan runs
+
+
+class FinalizeOutputTests(unittest.TestCase):
+    """encode-or-copy decision for one final stem (lossy re-encode vs raw verbatim copy)."""
+
+    def _write_fake_wav(self, path):
+        with open(path, "wb") as fh:
+            fh.write(b"RIFF\x00\x00\x00\x00WAVEfake-stem-audio-bytes-for-finalize-test")
+        return os.path.abspath(path)
+
+    def test_raw_wav_copies_verbatim_and_never_calls_ffmpeg(self):
+        with tempfile.TemporaryDirectory() as d:
+            src = self._write_fake_wav(os.path.join(d, "drums.wav"))
+            dst = os.path.join(d, "drums.mp3")   # extension is irrelevant for raw output
+            called = mock.MagicMock()
+            with mock.patch.object(run_mod, "_run", called):
+                ok = run_mod.finalize_output("ffmpeg.exe", src, dst, fmt="wav")
+            self.assertTrue(ok)
+            self.assertFalse(called.called)                 # no encoder needed for raw WAV
+            self.assertEqual(open(src, "rb").read(), open(dst, "rb").read())  # verbatim copy
+
+    def test_lossy_mp3_reencodes_via_run(self):
+        with tempfile.TemporaryDirectory() as d:
+            src = self._write_fake_wav(os.path.join(d, "drums.wav"))
+            dst = os.path.join(d, "drums.mp3")
+            called = mock.MagicMock(return_value=RunResult(args=["ffmpeg.exe"], returncode=0, stdout="", stderr=""))
+            with mock.patch.object(run_mod, "_run", called):
+                ok = run_mod.finalize_output("no-such-ffmpeg", src, dst, fmt="mp3")
+            self.assertTrue(ok)
+            self.assertTrue(called.called)
+            cmd = called.call_args[0][0]
+            self.assertEqual(cmd[0], "no-such-ffmpeg")
+            self.assertIn("libmp3lame", cmd) and self.assertIn("320k", cmd)
+            self.assertEqual(cmd[-1], dst)
+
+    def test_lossy_encode_failure_raises(self):
+        with tempfile.TemporaryDirectory() as d:
+            src = self._write_fake_wav(os.path.join(d, "drums.wav"))
+            dst = os.path.join(d, "drums.mp3")
+            with mock.patch.object(run_mod, "_run", return_value=RunResult(args=["ffmpeg"], returncode=1, stdout="", stderr="")):
+                with self.assertRaises(RuntimeError):
+                    run_mod.finalize_output("ffmpeg.exe", src, dst, fmt="mp3")
+
+    def test_lossy_missing_ffmpeg_raises(self):
+        # a non-zero exit (e.g. FileNotFoundError -> RunResult.ok False) must not silently pass
+        with tempfile.TemporaryDirectory() as d:
+            src = self._write_fake_wav(os.path.join(d, "drums.wav"))
+            dst = os.path.join(d, "drums.mp3")
+            with mock.patch.object(run_mod, "_run", return_value=RunResult(args=["bogus.exe"], returncode=-1, stdout="", stderr="")):
+                with self.assertRaises(RuntimeError):
+                    run_mod.finalize_output("bogus.exe", src, dst, fmt="mp3")
 
 
 if __name__ == "__main__":

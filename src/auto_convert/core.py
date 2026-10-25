@@ -225,6 +225,26 @@ def build_demucs_four_stems_cmd(
     return cmd
 
 
+# --------------------------------------------------------------------------- #
+# output audio format
+# --------------------------------------------------------------------------- #
+# Final per-stem encoding. WAV is lossless/raw (the stem is copied verbatim); MP3 is a
+# reasonably-encoded lossy default. The table maps each lossy format to its ffmpeg codec +
+# constant-bitrate; an empty entry means "no re-encode" (raw).
+FORMAT_WAV = "wav"        # lossless / raw -- no re-encode, stem copied verbatim
+FORMAT_MP3 = "mp3"         # lossy default -- libmp3lame V0 320kbps (broadly playable)
+
+# All formats the CLI accepts. ORDER matters: it becomes argparse's choice order.
+AUDIO_FORMATS = (FORMAT_WAV, FORMAT_MP3)
+DEFAULT_OUTPUT_FORMAT = FORMAT_MP3   # lossy is the default -- smaller files out of the box
+
+# Per-format ffmpeg encoder settings for lossy targets. V0 320kbps MP3 keeps near-CD quality while
+# staying far smaller than WAV and playing everywhere (Windows media libs, UVR5, drag-and-drop).
+_LOSSY_ENCODERS = {
+    FORMAT_MP3: {"codec": "libmp3lame", "bitrate": "320k"},
+}
+
+
 def build_ffmpeg_mix_cmd(
     ffmpeg_exe: str,
     bass: str,
@@ -235,6 +255,26 @@ def build_ffmpeg_mix_cmd(
     """Mix non-drum stems (bass+other+vocals) into the 2-channel no-drums file."""
     return [str(ffmpeg_exe), "-nostdin", "-y", "-i", _abs(bass), "-i", _abs(other),
             "-i", _abs(vocals), "-shortest", "-map", "0?", "-mixer_channels", "2", str(output)]
+
+
+def build_stem_encode_cmd(
+    ffmpeg_exe: str,
+    input_wav: str,
+    output_path: str,
+    fmt: str = FORMAT_MP3,
+) -> Optional[List[str]]:
+    """Build the ffmpeg command that re-encodes one stem WAV into `fmt`.
+
+    Returns ``None`` for raw (lossless) targets -- no re-encode is needed, so the caller copies the
+    source verbatim instead. Pure command builder (no subprocess), so it stays unit-testable and the
+    encode-or-copy decision lives in one place shared by run.py / server.py.
+    """
+    enc = _LOSSY_ENCODERS.get(fmt)
+    if not enc:
+        return None   # raw WAV target -> caller copies verbatim, no ffmpeg call
+    cmd = [str(ffmpeg_exe), "-nostdin", "-y", "-i", _abs(input_wav),
+           "-c:a", enc["codec"], "-b:a", enc["bitrate"], str(output_path)]
+    return cmd
 
 
 # --------------------------------------------------------------------------- #
