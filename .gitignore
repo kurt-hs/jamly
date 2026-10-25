@@ -9,5 +9,6 @@ portable/
 Thumbs.db
 .venv-audio-sep/
 .venv/
+*.egg-info/
 *.log
 splitfy_queue.json

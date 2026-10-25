@@ -14,8 +14,18 @@ requires-python = ">=3.9"
 license = { file = "LICENSE.md" }
 keywords = ["audio", "demucs", "stem-separation", "yt-dlp"]
 
+# uv-managed project venv at ``.venv`` (created by `uv sync`). Pure stdlib app,
+# so the only test-time dependency is pytest; pin the interpreter for a
+# reproducible, portable environment that VS Code can pin via .vscode/settings.json.
+[tool.uv]
+# Pin the interpreter used to build .venv for a reproducible, portable env.
+python-version = "3.13"
+
 [project.scripts]
 splitfy = "splitfy.run:main"
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
