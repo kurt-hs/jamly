@@ -511,7 +511,7 @@ def separate_stems(
         cmd = build_htdemucs_four_stems_cmd(py, audio, workdir, threads=threads)
         res = run(cmd)
         if not res.ok:
-            _print_tail(res.stderr); raise RuntimeError("htdemucs four-stems failed (exit %d): %s" % (res.returncode, " ".join(cmd[:4])))
+            _print_tail(res.stderr); raise RuntimeError("demucs four-stem separation failed (exit %d): %s" % (res.returncode, " ".join(cmd[:4])))
 
     elif engine in (ENGINE_AUTO, ENGINE_UVR5):
         if not (_dir_has_any(_site_packages(), ("audio_separator",))):
