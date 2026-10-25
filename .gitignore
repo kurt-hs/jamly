@@ -5,6 +5,7 @@ _work/
 .portable/
 portable/
 .cache/
+.ruff_cache/
 .DS_Store
 Thumbs.db
 .venv-audio-sep/
