@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "auto_convert status",
+  "version": "1.0.0",
+  "description": "Enqueue audio-separation jobs from an always-on background page; polls the auto_convert /status server for live progress.",
+  "author": "auto_convert",
+  "background": {
+    "service_worker": "auto_convert_extension_bg.js"
+  },
+  "action": {
+    "default_popup": "auto_convert_popup.html",
+    "default_title": "auto_convert status",
+    "default_icon": {}
+  },
+  "options_ui": {
+    "page": "auto_convert_options.html",
+    "open_in_tab": true
+  },
+  "permissions": ["storage", "activeTab"],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "web_accessible_resources": []
+}
