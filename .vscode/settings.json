@@ -16,5 +16,13 @@
         ".venv-audio-sep": true,
         "_work/": true,
         ".portable/": true
-    }
+    },
+    "python.testing.enabled": true,
+    "python.testing.unittestArgs": [
+        "-v",
+        "tests"
+    ],
+    "python.testing.pytestArgs": [
+        "tests"
+    ]
 }
