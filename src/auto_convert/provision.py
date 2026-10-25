@@ -1,6 +1,6 @@
 """Self-provisioning for the portable pipeline scope (.portable/).
 
-Reuses an already-installed tool when possible (reuse-first policy, PLAN.md §10); only
+Reuses an already-installed tool when possible (reuse-first policy, DESIGN.md §10); only
 downloads missing pieces into a private `.portable/<os>/` layout so nothing is installed
 globally. Currently provisions the ffmpeg + ffprobe static build; detection hooks are
 already wired to find it under `<scope>/.portable/<os>/ffmpeg`.

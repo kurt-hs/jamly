@@ -1,4 +1,4 @@
-"""Unit tests for curated cross-machine install-root discovery and config persistence (§11 / PLAN.md §10).
+"""Unit tests for curated cross-machine install-root discovery and config persistence (§11 / DESIGN.md §10).
 
 Discovery logic is exercised via :func:`auto_convert.bootstrap._scan_known_roots` (the pure probe)
 against throwaway temp dirs -- fast, deterministic, and independent of this host's real installs.

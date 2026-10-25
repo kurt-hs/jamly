@@ -1,4 +1,4 @@
-"""Persistent discovery config for auto_convert (reuse-first provisioning, PLAN.md §11).
+"""Persistent discovery config for auto_convert (reuse-first provisioning, DESIGN.md §11).
 
 Backed by a small JSON file at the repo/scope root so run.py / bootstrap.py / provision.py can
 record what was found on one host and reuse it next time -- without rescanning PATH and app roots

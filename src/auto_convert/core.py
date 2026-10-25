@@ -186,7 +186,7 @@ def build_ytdlp_extract_cmd(
 
     NOTE: this box ships a custom yt-dlp build that rejects `--no-subs`, so it is NOT passed.
     `--ffmpeg-location` must point at a dir containing BOTH ffmpeg.exe and ffprobe.exe, else the
-    mux step is intermittent (see PLAN.md section 7).
+    mux step is intermittent (see DESIGN.md section 7).
     """
     cmd = [str(ytdlp_exe), str(url)]
     if ffmpeg_dir:

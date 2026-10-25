@@ -3,7 +3,7 @@
 This module is intentionally **detection-only** and pure standard-library so it can be
 unit-tested without any network or heavy installs. The later provisioning steps
 (autodownloading yt-dlp / ffmpeg + ffprobe / ONNX model) hook into these same
-functions' results, but are not implemented here -- see PLAN.md section 10 for the
+functions' results, but are not implemented here -- see DESIGN.md section 10 for the
 provisioning plan and `find_*`/status return values as their contracts.
 
 Environment knobs (all optional; sensible defaults used otherwise):
@@ -134,7 +134,7 @@ def detect_ffmpeg(ffmpeg_dirs: list = None, scope_dir: str = "", additional_dirs
 
     The bundled UVR5 ffmpeg.exe has no matching ffprobe.exe, so a directory with only
     ffmpeg is reported as WARN (usable for some yt-dlp builds but not this one). See
-    PLAN.md section 2 / blocked item: an ffprobe binary must be sourced separately.
+    DESIGN.md section 2 / blocked item: an ffprobe binary must be sourced separately.
     """
     if PLATFORM_WINDOWS:
         names = ("ffmpeg.exe", "ffprobe.exe")
@@ -232,7 +232,7 @@ def demucs_weights(repo: str = "", model: str = "htdemucs") -> list:
 
 
 # --------------------------------------------------------------------------- #
-# curated cross-machine install-root discovery (§11 / PLAN.md §10)
+# curated cross-machine install-root discovery (§11 / DESIGN.md §10)
 # --------------------------------------------------------------------------- #
 def _dir_has_both(root: str) -> bool:
     """True if `root` holds BOTH ffmpeg+ffprobe (bare names on POSIX, .exe on Windows)."""
