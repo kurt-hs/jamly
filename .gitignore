@@ -10,4 +10,4 @@ Thumbs.db
 .venv-audio-sep/
 .venv/
 *.log
-auto_convert_queue.json
+splitfy_queue.json

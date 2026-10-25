@@ -1,4 +1,4 @@
-# auto-convert
+# splitfy
 
 A small, portable **four-stem audio-separation** tool. Given a YouTube link it downloads the
 highest-quality available audio and splits it into two WAV stems:
@@ -23,7 +23,7 @@ the machine its bundled models are reused automatically instead.
 ## Layout
 
 ```
-src/auto_convert/
+src/splitfy/
   normalize.py    URL -> YouTube watch-id extraction/validation + dedup
   core.py         engine auto-detection (htdemucs ONNX vs UVR5), command builders, stem run
   bootstrap.py    dependency/tool detection (python, yt-dlp, ffmpeg, UVR5)
@@ -33,7 +33,7 @@ src/auto_convert/
   server.py       HTTP(S) server with SSE `GET /status` progress streaming
 tests/            unittest suite (absolute-package imports; runs under pytest or -m unittest)
 browser/extension # MV3 WebExtension + shared DOM-free client (manifest, service worker,
-                  popup/options HTML); browser/userscripts/auto_convert.user.js is the
+                  popup/options HTML); browser/userscripts/splitfy.user.js is the
                   standalone Tampermonkey panel (installed separately from the extension)
 DESIGN.md           long-form design + portability research notes
 AGENTS.md         contributing & coding conventions
@@ -44,8 +44,8 @@ AGENTS.md         contributing & coding conventions
 From a checkout:
 
 ```bash
-python src/auto_convert/run.py -i <youtube-url> [-i <more>] [--engine auto|uvr5|htdemucs]
-# or, if installed via pip install -e . :  auto-convert -i <youtube-url>
+python src/splitfy/run.py -i <youtube-url> [-i <more>] [--engine auto|uvr5|htdemucs]
+# or, if installed via pip install -e . :  splitfy -i <youtube-url>
 ```
 
 Run the test suite (pytest OR unittest):

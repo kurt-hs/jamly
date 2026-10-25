@@ -1,12 +1,12 @@
-# auto-convert — a small, portable audio-separation CLI + server.
-# src-layout: all application code lives under ``src/auto_convert/`` so the package
+# splitfy — a small, portable audio-separation CLI + server.
+# src-layout: all application code lives under ``src/splitfy/`` so the package
 # can be installed (``pip install -e .``) or run directly from a checkout.
 [build-system]
 requires = ["setuptools>=61", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "auto-convert-audio-sep"
+name = "splitfy-audio-sep"
 version = "0.1.0"
 description = "Portable four-stem audio separation (YouTube download -> drums / no-drums WAV)."
 readme = "README.md"
@@ -15,12 +15,12 @@ license = { file = "LICENSE.md" }
 keywords = ["audio", "demucs", "stem-separation", "yt-dlp"]
 
 [project.scripts]
-auto-convert = "auto_convert.run:main"
+splitfy = "splitfy.run:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
-# Make the package importable (bare ``import auto_convert.*``) when running tests
+# Make the package importable (bare ``import splitfy.*``) when running tests
 # or scripts straight from a checkout without an editable install.
 # Pin ruff's ruleset so VS Code (@sumneko/ruff-languageserver) uses the SAME
 # checks as the anaconda `ruff` binary — no more editor-vs-CLI disagreement.

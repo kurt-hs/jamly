@@ -1,10 +1,10 @@
-// auto_convert_client_test.js — client-side integration test for the shared status protocol.
+// splitfy_client_test.js — client-side integration test for the shared status protocol.
 //
 // Spins up an in-process HTTP server that mimics the real ItemServer endpoints (GET /status SSE,
 // POST /add) and drives `autoConvertClient` against it over Node's global fetch. This validates the
 // browser-client parsing logic (the "data: {...}" extraction from the SSE stream, JSON shapes, and
 // dedup/trim of inputs) without a real yt-dlp run — the server side itself is covered by
-// tests/test_server.py driving urllib against the live ItemServer. Run with `node auto_convert_client_test.js`.
+// tests/test_server.py driving urllib against the live ItemServer. Run with `node splitfy_client_test.js`.
 
 "use strict";
 var http = require("http");
@@ -59,7 +59,7 @@ function startFakeServer() {
 var assert = require("assert");
 
 startFakeServer().then(function (base_url) {
-  var code = "self=globalThis;" + require("fs").readFileSync(__dirname + "/auto_convert_client.js", "utf8");
+  var code = "self=globalThis;" + require("fs").readFileSync(__dirname + "/splitfy_client.js", "utf8");
   eval(code);
 
   return new Promise(function (resolve, reject) {

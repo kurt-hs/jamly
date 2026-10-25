@@ -6,7 +6,7 @@ streaming ``/status`` SSE endpoint while a background worker processes items con
 Why these are robust (and do NOT hang or race):
 
 * No stdlib-``queue`` shadowing: since the restructure, ``server.py`` imports our own
-  :class:`auto_convert._input_queue.WatchQueue` (which now also exposes ``done_ids()`` and an
+  :class:`splitfy._input_queue.WatchQueue` (which now also exposes ``done_ids()`` and an
   ``.items`` accessor). The HTTP layer therefore loads cleanly under both runners -- this is the
   resolution of the earlier "queue issue" that broke pytest collection. Tests use only the standard
   library, so they run anywhere without third-party HTTP clients.
@@ -19,7 +19,7 @@ Why these are robust (and do NOT hang or race):
   pattern: a bounded stream read, never an infinite one racing an unbounded worker.
 
 The heavy steps (yt-dlp + ffmpeg/GPU) are stubbed out with :func:`unittest.mock.patch.object` on
-``auto_convert.server.process_one`` so the tests add no network dependency and finish deterministically.
+``splitfy.server.process_one`` so the tests add no network dependency and finish deterministically.
 
 Core queue behaviour this depends on is covered by :file:`tests/test_queue.py`; here we cover the live
 HTTP/SSE path end to end.
@@ -36,7 +36,7 @@ from unittest import mock
 from urllib.request import Request, urlopen
 from urllib.error import URLError
 
-from auto_convert.server import ItemServer, build_parser
+from splitfy.server import ItemServer, build_parser
 
 
 class _FakeResult:
@@ -63,7 +63,7 @@ def _stub_process_one(result):
 
 def _server_module():
     # import lazily so the patch can target the fully-loaded module object
-    from auto_convert import server as _smod
+    from splitfy import server as _smod
     return _smod
 
 

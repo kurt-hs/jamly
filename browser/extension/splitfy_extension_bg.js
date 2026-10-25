@@ -1,8 +1,8 @@
-// Background service worker for the auto_convert WebExtension.
+// Background service worker for the splitfy WebExtension.
 //
 // Shares ONE client implementation with the Tampermonkey userscript by importing the same sibling
-// module (auto_convert_client.js) via importScripts(). Both clients therefore speak identical
-// protocol to a running `python -m auto_convert.server`:
+// module (splitfy_client.js) via importScripts(). Both clients therefore speak identical
+// protocol to a running `python -m splitfy.server`:
 //   GET  /status -> {pending, done, total, current, last_completed}
 //   POST /add    body {"inputs":[...], "titles":[...]} -> {queued, newly_added, pending_count}
 //
@@ -11,7 +11,7 @@
 // instead of driving a CLI process interactively. SERVER_URL defaults to 127.0.0.1:8765 and can be
 // overridden through the extension options UI (ac.serverUrl message).
 
-importScripts(chrome.runtime.getURL("auto_convert_client.js"));
+importScripts(chrome.runtime.getURL("splitfy_client.js"));
 
 var SERVER_URL = "http://127.0.0.1:8765"; // default; settable from the options UI (ac_serverUrl)
 chrome.storage.local.get(["ac_serverUrl"], function (items) {

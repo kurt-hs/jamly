@@ -1,8 +1,8 @@
 """Unit tests for curated cross-machine install-root discovery and config persistence (§11 / DESIGN.md §10).
 
-Discovery logic is exercised via :func:`auto_convert.bootstrap._scan_known_roots` (the pure probe)
+Discovery logic is exercised via :func:`splitfy.bootstrap._scan_known_roots` (the pure probe)
 against throwaway temp dirs -- fast, deterministic, and independent of this host's real installs.
-The cache-aware :func:`auto_convert.bootstrap.find_known_roots` is tested separately with an
+The cache-aware :func:`splitfy.bootstrap.find_known_roots` is tested separately with an
 isolated config path so it never writes to the repo root during tests.
 
 On Windows fake binaries are named ``ffmpeg.exe`` / ``yt-dlp.exe``; on POSIX the bare name -- both
@@ -15,12 +15,12 @@ import unittest
 from unittest import mock
 
 
-# src-layout: make the ``auto_convert`` package importable for both `pytest` and
+# src-layout: make the ``splitfy`` package importable for both `pytest` and
 # `python -m unittest discover -s tests` without an editable install. Inserted before any
 # absolute-package import so it always runs first.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
-from auto_convert import bootstrap as b  # noqa: E402
-from auto_convert.config_state import ConfigStore  # noqa: E402
+from splitfy import bootstrap as b  # noqa: E402
+from splitfy.config_state import ConfigStore  # noqa: E402
 
 
 def _touch(path):
@@ -131,7 +131,7 @@ class FindKnownRootsCacheTests(unittest.TestCase):
     """
 
     def _isolated_config(self, scope):
-        return os.path.join(scope, "auto_convert.json")
+        return os.path.join(scope, "splitfy.json")
 
     def setUp(self):
         self._uvr = mock.patch.object(b, "_scan_uvr_roots", return_value=[])
@@ -175,10 +175,10 @@ class FindKnownRootsCacheTests(unittest.TestCase):
             r5 = b.find_known_roots(config_path=cfg, additional_dirs=[good])
             self.assertIn(good, r5["ffmpeg"])
 class ConfigPersistenceTests(unittest.TestCase):
-    """auto_convert.json round-trips discovered paths and is reused on later runs."""
+    """splitfy.json round-trips discovered paths and is reused on later runs."""
 
     def _config_path(self, scope):
-        return os.path.join(scope, "auto_convert.json")
+        return os.path.join(scope, "splitfy.json")
 
     def test_missing_file_loads_empty(self):
         cfg = self._config_path(tempfile.mkdtemp())

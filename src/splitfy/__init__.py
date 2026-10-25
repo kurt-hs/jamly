@@ -1,4 +1,4 @@
-"""auto_convert — portable YouTube audio-separation tool.
+"""splitfy — portable YouTube audio-separation tool.
 
 A single, self-healing script/folder that turns a YouTube link into lossless stems:
   - downloads the highest-quality audio (yt-dlp),

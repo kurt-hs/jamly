@@ -11,12 +11,12 @@ import unittest
 from contextlib import redirect_stdout
 
 
-# src-layout: make the ``auto_convert`` package importable for both `pytest` and
+# src-layout: make the ``splitfy`` package importable for both `pytest` and
 # `python -m unittest discover -s tests` without an editable install. Inserted before any
 # absolute-package import so it always runs first.
 import sys as _shim_sys  # noqa: E402
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
-from auto_convert import bootstrap as b
+from splitfy import bootstrap as b
 
 
 def _touch(path):

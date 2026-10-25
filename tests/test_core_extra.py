@@ -9,12 +9,12 @@ import tempfile
 import unittest
 
 
-# src-layout: make the ``auto_convert`` package importable for both `pytest` and
+# src-layout: make the ``splitfy`` package importable for both `pytest` and
 # `python -m unittest discover -s tests` without an editable install. Inserted before any
 # absolute-package import so it always runs first.
 import sys as _shim_sys  # noqa: E402
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
-import auto_convert.core as c
+import splitfy.core as c
 
 
 class HtdemucsBuilderTests(unittest.TestCase):
@@ -95,8 +95,8 @@ class HtdemucsRunnerTests(unittest.TestCase):
         import unittest.mock as mock
         fake = [os.path.abspath(os.path.join("separated", "htdemucs", "%s.wav" % s))
                 for s in ("drums", "bass", "other", "vocals")]
-        with mock.patch("auto_convert.core._dir_has_any", return_value=True), \
-             mock.patch("auto_convert.core.find_python", return_value="python"), \
+        with mock.patch("splitfy.core._dir_has_any", return_value=True), \
+             mock.patch("splitfy.core.find_python", return_value="python"), \
              mock.patch.object(c, "_locate_stems", return_value=fake), \
              mock.patch.object(c, "run") as run_mock:
             res = c.separate_stems("song.wav", engine=c.ENGINE_HTDEMUCS, uvr_root="")
@@ -110,8 +110,8 @@ class HtdemucsRunnerTests(unittest.TestCase):
         # availability gate fails first (mocked as if no demucs dir) -> clear RuntimeError naming package
         import unittest.mock as mock
         with self.assertRaises(RuntimeError) as ctx, \
-             mock.patch("auto_convert.core._dir_has_any", return_value=False), \
-             mock.patch("auto_convert.core.find_python", return_value="python"):
+             mock.patch("splitfy.core._dir_has_any", return_value=False), \
+             mock.patch("splitfy.core.find_python", return_value="python"):
             c.separate_stems("song.wav", engine=c.ENGINE_HTDEMUCS, uvr_root="")
         self.assertIn("demucs package is not installed", str(ctx.exception))
 
@@ -124,8 +124,8 @@ class SeparateStemsFailureTests(unittest.TestCase):
 
     def test_no_python_raises_runtimeerror(self):
         import unittest.mock as m
-        with m.patch("auto_convert.core.find_python", return_value=None), \
-             m.patch("auto_convert.core._dir_has_any", return_value=True):
+        with m.patch("splitfy.core.find_python", return_value=None), \
+             m.patch("splitfy.core._dir_has_any", return_value=True):
             with self.assertRaises(RuntimeError) as ctx:
                 c.separate_stems("song.wav", engine=c.ENGINE_UVR5, uvr_root="/x")
         self.assertIn("no python interpreter", str(ctx.exception))

@@ -24,9 +24,9 @@ SOFTWARE.
 
 ## Scope of this license
 
-This MIT license covers the original `auto_convert` application code (the CLI,
+This MIT license covers the original `splitfy` application code (the CLI,
 HTTP status server, input queue, tool discovery/provisioning helpers and pure
-orchestration builders under `src/auto_convert/`) and the bundled browser
+orchestration builders under `src/splitfy/`) and the bundled browser
 extension + userscript assets.
 
 It does **not** cover third-party tools this project drives at runtime — each keeps

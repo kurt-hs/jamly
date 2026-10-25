@@ -49,7 +49,7 @@
             },
             "args": [
                 "-m",
-                "auto_convert.server"
+                "splitfy.server"
             ],
             "console": "integratedTerminal",
             "taskSig": "${2}"

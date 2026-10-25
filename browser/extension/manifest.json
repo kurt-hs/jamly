@@ -1,19 +1,19 @@
 {
   "manifest_version": 3,
-  "name": "auto_convert status",
+  "name": "splitfy status",
   "version": "1.0.0",
-  "description": "Enqueue audio-separation jobs from an always-on background page; polls the auto_convert /status server for live progress.",
-  "author": "auto_convert",
+  "description": "Enqueue audio-separation jobs from an always-on background page; polls the splitfy /status server for live progress.",
+  "author": "splitfy",
   "background": {
-    "service_worker": "auto_convert_extension_bg.js"
+    "service_worker": "splitfy_extension_bg.js"
   },
   "action": {
-    "default_popup": "auto_convert_popup.html",
-    "default_title": "auto_convert status",
+    "default_popup": "splitfy_popup.html",
+    "default_title": "splitfy status",
     "default_icon": {}
   },
   "options_ui": {
-    "page": "auto_convert_options.html",
+    "page": "splitfy_options.html",
     "open_in_tab": true
   },
   "permissions": ["storage", "activeTab"],

@@ -6,12 +6,12 @@ decisions, and machine-specific findings below.
 
 ## Overview (§0)
 
-The Python package lives under `src/auto_convert/` (stdlib-only):
+The Python package lives under `src/splitfy/` (stdlib-only):
 `normalize.py` (URL→watch-id), `core.py` (subprocess runners for yt-dlp/Demucs/ffmpeg),
 `bootstrap.py` (reuse-first dependency detection), `provision.py` (self-provisioning into
 `.portable/`), `_input_queue.py` (`WatchQueue`, resumable + persisted done-set), `run.py` (CLI
 orchestrator with queue integration) and `server.py` (streaming `/status` SSE status server). Binary/config discovery is a cache-aware probe: `find_known_roots()` plus the new path-backed
-`auto_convert/config_state.py` (`ConfigStore`, atomic persistence, empty-if-missing/invalid),
+`splitfy/config_state.py` (`ConfigStore`, atomic persistence, empty-if-missing/invalid),
 and `tests/test_bootstrap_extra.py` (16 tests covering the probe/cache/persistence contracts). The
 probe is made robust on hosts where a git-bash-style env can make `os.walk` yield odd-shaped tuples.
 
@@ -144,7 +144,7 @@ into its own private `.portable/` scope so it "just works" anywhere (Windows pri
 ### Design
 
 1. **Curated known-install roots** (`core.py` / `bootstrap.py`, pure stdlib): probe PATH first, then a curated list of well-known app locations — `%APPDATA%\yt-dlp_win_x86`, `AppData\Local\Programs\{Shotcut,DaVinci Resolve,OBS Studio,Blender,Kdenlive,Avidemux,HandBrake,PotPlayer}` (apps that ship ffmpeg/ffprobe), UVR5 roots, plus `.portable/<os>/`. This is a *best-effort* probe; it does not need to find every copy on this box — it needs to cover the common cases cross-machine.
-2. **Persist discovered paths in `auto_convert.json`** (repo root; records existing binaries + user overrides). On first run / re-provision, write what was found so future runs reuse without rescanning and can report *reused vs downloaded*. A missing/absent file → empty queue on load (already handled by `_input_queue.from_path`).
+2. **Persist discovered paths in `splitfy.json`** (repo root; records existing binaries + user overrides). On first run / re-provision, write what was found so future runs reuse without rescanning and can report *reused vs downloaded*. A missing/absent file → empty queue on load (already handled by `_input_queue.from_path`).
 3. **Reuse-first provisioning**: `bootstrap.py` checks config + known roots first; only when absent (or `--provision`) does it download into `.portable/<os>/`: official yt-dlp standalone, a static ffmpeg+ffprobe build, and the ONNX Runtime HTDemucs export. The script then points yt-dlp's `--ffmpeg-location` at the discovered dir.
 4. **FFmpeg nuance**: a directory with only `ffmpeg.exe` (no ffprobe) is usable for some yt-dlp builds but not this one — keep the "needs BOTH" rule, and treat third-party shared ffmpeg as *local-reuse-only* (not portable). Open question: whether to also detect a system-wide ffmpeg/ffprobe via `%PATH%` on Windows.
 
@@ -177,20 +177,20 @@ Both clients build on the shared
 contract the server already emits: a `/status` SSE stream with per-item terminal records
 (`last_completed`) and `pending`/`done` counts, plus the `_input_queue` queue-file schema.
 
-- **Userscript** — `browser/userscripts/auto_convert.user.js` (Tampermonkey/Greasemonkey manifest):
+- **Userscript** — `browser/userscripts/splitfy.user.js` (Tampermonkey/Greasemonkey manifest):
   `GM_addStyle` UI, `/status` polling via fetch/XHR fallback, read/write of the local queue JSON, and
-  progress + completion alerts with download links. Runs alongside `python -m auto_convert.server`.
+  progress + completion alerts with download links. Runs alongside `python -m splitfy.server`.
 - **Background-extension variant** — MV3 extension in `browser/extension/` (`manifest.json`, a service
   worker that imports the shared DOM-free client via `importScripts`, plus popup/options HTML). Shares one
   protocol with the userscript (`GET /status` SSE + `POST /add`); a small server writes to the same queue
   file so users can enqueue from an always-on background page instead of the CLI process.
 - **Shared contract** — both clients use the identical `/status` JSON shape and `_input_queue` schema;
-  the shared client (`browser/extension/auto_convert_client.js`) is DOM-free, so it ships as a static
-  asset in the extension rather than as an `auto_convert` module. A contract test drives the parsing logic
+  the shared client (`browser/extension/splitfy_client.js`) is DOM-free, so it ships as a static
+  asset in the extension rather than as an `splitfy` module. A contract test drives the parsing logic
   directly; streamed-path tests use bounded reads so they stay deterministic under both runners.
 - Read-only to project scope (never writes outside `.portable/` or the queue file); alerts on completion
   with download links.
 
 The browser source lives under `browser/extension/` and `browser/userscripts/` — it is **not** part of the
-Python package, tests, or `src/auto_convert/`, and its manifest resolves all references relative to its own
+Python package, tests, or `src/splitfy/`, and its manifest resolves all references relative to its own
 folder (so no path edits are needed when files move together).

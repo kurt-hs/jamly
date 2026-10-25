@@ -297,7 +297,7 @@ def find_known_roots(scope_dir: str = "", additional_dirs=(), config_path=None, 
     """Return reusable install roots for this run.
 
     Fast path: when a valid cache exists at ``config_path`` (defaults to the scope root's
-    ``auto_convert.json``), the recorded paths are returned immediately -- no filesystem scan,
+    ``splitfy.json``), the recorded paths are returned immediately -- no filesystem scan,
     so every run after the first is cheap and can report *reused vs downloaded*. Only when the
     cache is empty/invalid, or ``force=True``, do we call :func:`_scan_known_roots` (the slow,
     exhaustive probe) once and persist its results for next time.
@@ -499,7 +499,7 @@ def main(argv=None) -> int:
     # points at one developer's personal install. On a box without UVR5 it reports "not found".
     root = os.environ.get("AUTOCV_UVR_ROOT", "")
 
-    print("auto_convert dependency detection")
+    print("splitfy dependency detection")
     print("=" * 60)
     for s in summarize(scope, root):
         print(s.report())

@@ -4,9 +4,9 @@ Guidance for anyone adding or changing code in this repo. Keep it about *how to 
 
 ## Layout (structural only — not a checklist)
 
-All application code is a proper setuptools src-layout package under `src/auto_convert/`; tests are in `tests/`. The browser extension ships separately as static assets (`browser/extension/` + the standalone Tampermonkey panel), so keep those files out of `src/`/`tests/` and never import them from the suite.
+All application code is a proper setuptools src-layout package under `src/splitfy/`; tests are in `tests/`. The browser extension ships separately as static assets (`browser/extension/` + the standalone Tampermonkey panel), so keep those files out of `src/`/`tests/` and never import them from the suite.
 
-Do not maintain an exact list of member names here — it goes stale as modules are added or removed; refer to the package via its real path (`src/auto_convert`, see Imports) rather than by enumerating members.
+Do not maintain an exact list of member names here — it goes stale as modules are added or removed; refer to the package via its real path (`src/splitfy`, see Imports) rather than by enumerating members.
 
 ## Imports — do not use bare-sibling imports
 
@@ -14,8 +14,8 @@ Every import across modules inside the package must be **relative** or **absolut
 bare sibling name that only works when the project root is on `sys.path`:
 
 - Within a module: `from .core import ...`, `import .queue as q`.
-- Across modules (e.g. from a test): `from auto_convert.core import ...`,
-  `mock.patch("auto_convert.core.detect_engine", ...)`.
+- Across modules (e.g. from a test): `from splitfy.core import ...`,
+  `mock.patch("splitfy.core.detect_engine", ...)`.
 
 Reason: tests load the package via its real path (`src/`), so bare sibling imports break under
 a proper loader. The suite is green under both runners only when this holds (see Testing).
@@ -26,7 +26,7 @@ This box's Python ships a stdlib `queue` that **lacks the CPython watch_queue ex
 (no `WatchQueue`). Code must therefore import our own implementation directly:
 
 ```python
-from auto_convert._input_queue import WatchQueue, default_queue_path
+from splitfy._input_queue import WatchQueue, default_queue_path
 ```
 
 Never name a module `queue.py`, and never rely on repo-root shadowing to make `from queue import` work.
@@ -52,7 +52,7 @@ python -m unittest discover -s tests  # each test file shims src onto sys.path
 
 - Each test module imports the package via its absolute name and adds a single line to put
   `src/` on `sys.path`; it must not add the project root or any redundant inserts.
-- `mock.patch` targets use **full dotted paths** (`"auto_convert.core.X"`), never bare `"core.X"`.
+- `mock.patch` targets use **full dotted paths** (`"splitfy.core.X"`), never bare `"core.X"`.
 - Source stays ASCII-only so it compiles and loads under any locale; keep `py_compile` clean.
 
 ### The two skipped SSE-integration tests are intentional

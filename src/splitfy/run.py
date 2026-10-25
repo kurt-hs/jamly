@@ -1,4 +1,4 @@
-"""Main CLI orchestrator for auto_convert.
+"""Main CLI orchestrator for splitfy.
 
 Per input (YouTube link / partial URL / bare watch id) the pipeline is::
 
@@ -37,13 +37,13 @@ from .core import (
 from .bootstrap import find_ffmpeg
 from .provision import resolve_recorded_tools
 from .logging import Logger
-from auto_convert._input_queue import WatchQueue, default_queue_path
+from splitfy._input_queue import WatchQueue, default_queue_path
 
 ENGINE_CHOICES = ("auto", "uvr5", "htdemucs")
 
 
 # module-level logger; quiet by default so importing this module never prints (tests/callers opt in).
-# Tests replace it via ``monkeypatch.setattr("auto_convert.run._log", ...)`` to capture output.
+# Tests replace it via ``monkeypatch.setattr("splitfy.run._log", ...)`` to capture output.
 _log = Logger()
 
 
@@ -302,7 +302,7 @@ def run_pipeline(inputs: List[str], args, progress=None) -> List[ItemResult]:
     each heavy step (optional hook)."""
     scope = os.environ.get("AUTOCV_SCOPE") or os.getcwd()
     engine = resolve_engine(args, scope, os.environ.get("AUTOCV_UVR_ROOT") or "")
-    print("auto_convert: %d input(s), engine=%s" % (len(inputs), engine or "n/a"))
+    print("splitfy: %d input(s), engine=%s" % (len(inputs), engine or "n/a"))
 
     results = []
     for i, wid in enumerate(inputs):
@@ -351,7 +351,7 @@ def finalize_output(ffmpeg_exe: str, src_wav: str, dst_path: str, fmt: str) -> b
 # --------------------------------------------------------------------------- #
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        prog="auto_convert", description="Download audio from YouTube and split drums / no-drums.")
+        prog="splitfy", description="Download audio from YouTube and split drums / no-drums.")
     p.add_argument("-i", "--input", action="append", metavar="URL_OR_ID",
                    help="YouTube link/id/partial URL (repeatable). Also reads stdin when piped.")
     p.add_argument("-o", "--output-dir", default="output",

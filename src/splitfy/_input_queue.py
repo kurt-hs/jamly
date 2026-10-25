@@ -1,4 +1,4 @@
-"""Persistent, resumable input queue for auto_convert (progress + dedup).
+"""Persistent, resumable input queue for splitfy (progress + dedup).
 
 Backed by a small JSON file so the CLI and the HTTP server (#16) share one protocol::
 
@@ -24,7 +24,7 @@ from typing import List, Optional
 def default_queue_path(scope_dir: str = "") -> str:
     """Default queue-file location (visible next to outputs; gitignored state file)."""
     base = scope_dir if scope_dir else "."
-    return os.path.join(os.path.abspath(base), "auto_convert_queue.json")
+    return os.path.join(os.path.abspath(base), "splitfy_queue.json")
 
 
 class WatchQueue:

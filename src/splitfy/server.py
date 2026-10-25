@@ -1,10 +1,10 @@
-"""HTTP status server for auto_convert (#16).
+"""HTTP status server for splitfy (#16).
 
 Shares the persistent WatchQueue protocol with run.py. A background worker runs one
 queued item at a time via run.process_one, calling mark_done + save() after each item so
 progress is resumable and can be streamed over SSE:
 
-    python server.py --port 8765 [--scope .] [--queue auto_convert_queue.json]
+    python server.py --port 8765 [--scope .] [--queue splitfy_queue.json]
 
 Endpoints:
     GET /status   SSE stream of {pending, done, current, progress} (text/event-stream)
@@ -24,17 +24,17 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from auto_convert._input_queue import WatchQueue, default_queue_path
+from splitfy._input_queue import WatchQueue, default_queue_path
 from .core import AUDIO_FORMATS, DEFAULT_OUTPUT_FORMAT
 from .run import ItemResult, process_one
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="auto_convert HTTP status server (shares the queue protocol)")
+    p = argparse.ArgumentParser(description="splitfy HTTP status server (shares the queue protocol)")
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8765)
     p.add_argument("--scope", default=None, help="Working scope for engine/ytdlp/ffmpeg resolution (default: cwd)")
-    p.add_argument("--queue", default=None, help="Queue file path (default: env AUTOCV_QUEUE or <scope>/auto_convert_queue.json)")
+    p.add_argument("--queue", default=None, help="Queue file path (default: env AUTOCV_QUEUE or <scope>/splitfy_queue.json)")
     p.add_argument("--interval-ms", type=int, default=1000, help="SSE progress event interval")
     p.add_argument("--audio-format", choices=AUDIO_FORMATS, default=DEFAULT_OUTPUT_FORMAT,
                    help=("Final audio format; 'wav' = lossless/raw WAVs, '%s' = reasonably-encoded lossy (default)"
@@ -276,7 +276,7 @@ class QueueStatusHandler(BaseHTTPRequestHandler):
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
     srv = ItemServer(args)
-    print("auto_convert server: listening on http://%s:%d  (queue=%s)" % (args.host, args.port, srv.queue_path))
+    print("splitfy server: listening on http://%s:%d  (queue=%s)" % (args.host, args.port, srv.queue_path))
     try:
         srv.start()
     except KeyboardInterrupt:

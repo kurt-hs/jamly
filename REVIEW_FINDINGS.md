@@ -1,6 +1,6 @@
-# Adversarial Review Findings — auto_convert
+# Adversarial Review Findings — splitfy
 
-Adversarial review of the `auto_convert` repository (audio-stem separation: yt-dlp download →
+Adversarial review of the `splitfy` repository (audio-stem separation: yt-dlp download →
 four-stem split → ffmpeg no-drums mix → per-stem encode-or-copy). Findings are severity-tagged with a
 file + line so they can be triaged. Severity is subjective; "bug" = real defect today, "risk" = won't
 crash here but may bite elsewhere or on another machine/OS/toolchain version.

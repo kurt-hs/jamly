@@ -5,13 +5,13 @@ import tempfile
 import unittest
 
 
-# src-layout: make the ``auto_convert`` package importable for both `pytest` and
+# src-layout: make the ``splitfy`` package importable for both `pytest` and
 # `python -m unittest discover -s tests` without an editable install. Inserted before any
 # absolute-package import so it always runs first.
 import sys as _shim_sys  # noqa: E402
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
-import auto_convert.core as core  # noqa: E402 (module alias for core.X attribute access)
-from auto_convert.core import (  # noqa: E402
+import splitfy.core as core  # noqa: E402 (module alias for core.X attribute access)
+from splitfy.core import (  # noqa: E402
     PLATFORM_WINDOWS, RunResult, build_demucs_four_stems_cmd,
     build_ffmpeg_mix_cmd, build_ytdlp_extract_cmd, ensure_output_dir,
     sanitize_filename, run, which, _abs, _exists_exe,

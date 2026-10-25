@@ -1,4 +1,4 @@
-"""Persistent discovery config for auto_convert (reuse-first provisioning, DESIGN.md §11).
+"""Persistent discovery config for splitfy (reuse-first provisioning, DESIGN.md §11).
 
 Backed by a small JSON file at the repo/scope root so run.py / bootstrap.py / provision.py can
 record what was found on one host and reuse it next time -- without rescanning PATH and app roots
@@ -36,11 +36,11 @@ _TOOLS = ("ffmpeg", "yt-dlp", "uvr_root")
 def default_config_path(scope_dir: str = "") -> str:
     """Default config-file location (repo/scope root; gitignored state file)."""
     base = scope_dir if scope_dir else "."
-    return os.path.join(_abs(base), "auto_convert.json")
+    return os.path.join(_abs(base), "splitfy.json")
 
 
 class ConfigStore:
-    """In-memory view over ``auto_convert.json`` with atomic persistence.
+    """In-memory view over ``splitfy.json`` with atomic persistence.
 
     Like :mod:`_input_queue`, a missing/invalid file loads as empty so discovery never fails on a
     first run or when the file is hand-corrupted. Records are keyed by tool category; each entry
