@@ -22,6 +22,17 @@ where = ["src"]
 
 # Make the package importable (bare ``import auto_convert.*``) when running tests
 # or scripts straight from a checkout without an editable install.
+# Pin ruff's ruleset so VS Code (@sumneko/ruff-languageserver) uses the SAME
+# checks as the anaconda `ruff` binary — no more editor-vs-CLI disagreement.
+# Keep E4/E7/E9/F (the real bug class, e.g. undefined names) ON; drop only the
+# line-length/whitespace nits that clutter the editor but aren't bugs.
+[tool.ruff]
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
+ignore = ["E501", "W291", "W293"]
+
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
