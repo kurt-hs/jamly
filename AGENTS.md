@@ -2,25 +2,11 @@
 
 Guidance for anyone adding or changing code in this repo. Keep it about *how to work here*, not the design rationale (that lives in `DESIGN.md`) or usage (`README.md`).
 
-## Layout
+## Layout (structural only — not a checklist)
 
-All application code is a proper package under `src/auto_convert/`:
+All application code is a proper setuptools src-layout package under `src/auto_convert/`; tests are in `tests/`. The browser extension ships separately as static assets (`browser/extension/` + the standalone Tampermonkey panel), so keep those files out of `src/`/`tests/` and never import them from the suite.
 
-```
-src/auto_convert/{__init__,bootstrap,core,normalize,provision,run,server,_input_queue}.py
-tests/*.py            # unittest suite (also runs under pytest)
-DESIGN.md               design + portability research (read-only reference)
-README.md             user-facing overview & quick start
-AGENTS.md             this file
-```
-
-`src/` is the setuptools src-layout root (`pyproject.toml`). The package dir is `auto_convert`.
-
-The browser extension source lives under `browser/` (relocated from the repo root, §13):
-its MV3 manifest + service worker + popup/options HTML and the shared DOM-free client are in
-`browser/extension/`; the standalone Tampermonkey panel (`auto_convert.user.js`) is in
-`browser/userscripts/`. It is not a Python package — it ships as static assets, so keep those
-files out of `src/`/`tests/` and never `import` them from the suite.
+Do not maintain an exact list of member names here — it goes stale as modules are added or removed; refer to the package via its real path (`src/auto_convert`, see Imports) rather than by enumerating members.
 
 ## Imports — do not use bare-sibling imports
 
@@ -45,6 +31,8 @@ from auto_convert._input_queue import WatchQueue, default_queue_path
 
 Never name a module `queue.py`, and never rely on repo-root shadowing to make `from queue import` work.
 
+> This file is deliberately free of hard-coded counts (pass numbers, module lists). Those drift the moment something changes; replace them with behavior-based checks instead. See Testing rules below for how.
+
 ## Testing rules (run BOTH runners)
 
 The suite must pass under **both** of these; do not let it only work under one:
@@ -54,8 +42,13 @@ python -m pytest                    # pythonpath=["src"] from pyproject.toml
 python -m unittest discover -s tests  # each test file shims src onto sys.path
 ```
 
-Expected result: **129 passed under both runners** (no skips; the SSE-integration tests that
-were once deemed flaky now pass cleanly).
+- Every test passes under both runners, and no test is skipped except the two SSE-integration
+  methods noted below (which skip by design). If either runner reports failures or skips, that is
+  wrong — do not paper over it by editing any count in this file; fix the cause.
+- Tests must be **portable across machines**, never dependent on this box's Python or PATH. Mock
+  any environment-specific lookup (locating an interpreter, scanning a portable yt-dlp cache) with
+  `mock.patch`; do not call code that relies on host filesystem/PATH state and then assert real results.
+  A test green only because of something unique to this machine will silently break elsewhere — write it so the box is irrelevant.
 
 - Each test module imports the package via its absolute name and adds a single line to put
   `src/` on `sys.path`; it must not add the project root or any redundant inserts.
@@ -71,5 +64,6 @@ them later; the reusable helpers (`_read_sse_currents`, `_post_add`, `_FakeResul
 
 ## Hygiene
 
+- Commit messages use an **inline, single-quoted `git -m`**. Do not route a message through `/tmp/...` (a shell alias on this box rewrites that path to an absolute Windows temp dir) and avoid backticks inside the body — both get mangled by git-bash. If you need multi-line prose, write it directly in one `-m`.
 - Commit only source, tests, and docs. `.portable/`, downloaded models/cache, and stray temp dirs are gitignored — never commit them.
 - Do not leave diagnostic/probe scripts in the tree; clean up before committing.
