@@ -5,6 +5,7 @@ gathering + dedup across URL forms, engine-resolution override, and CLI dry-run 
 They deliberately avoid invoking yt-dlp / ffmpeg / separation (network + GPU heavy)."""
 import argparse
 import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -189,10 +190,25 @@ class MainDryRunTests(unittest.TestCase):
         try:
             # force isatty True so gather_inputs never blocks on a real stdin read
             with mock.patch.object(sys, "stdin", mock.MagicMock(isatty=lambda: True)):
-                rc = run_mod.main(["-i", "dQw4w9WgXcQ", "-i", "https://youtu.be/abcDEF12345", "--dry-run"])
-            self.assertEqual(rc, 0)
+                tmp = tempfile.mkdtemp()
+                prev = os.environ.get("AUTOCV_QUEUE")
+                try:
+                    # main() honours AUTOCV_QUEUE ahead of default_queue_path(cwd), so pointing it at a
+                    # temp file keeps the queue write out of the working tree -- no host cwd state.
+                    qpath = os.path.join(tmp, "splitfy_queue.json")
+                    with open(qpath, "w") as fh:
+                        fh.write("")
+                    os.environ["AUTOCV_QUEUE"] = os.path.abspath(qpath)
+                    rc = run_mod.main(["-i", "dQw4w9WgXcQ", "-i", "https://youtu.be/abcDEF12345", "--dry-run"])
+                finally:
+                    if prev is None:
+                        os.environ.pop("AUTOCV_QUEUE", None)
+                    else:
+                        os.environ["AUTOCV_QUEUE"] = prev
+                self.assertEqual(rc, 0)
         finally:
             sys.stdin = old
+            shutil.rmtree(tmp, ignore_errors=True)
 
 
 class RunPipelineEmptyTests(unittest.TestCase):
