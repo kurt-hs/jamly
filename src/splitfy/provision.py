@@ -11,7 +11,9 @@ reuse-first persistence delegated to :class:`ConfigStore` via ``record_provision
 """
 from __future__ import annotations
 
+import hashlib
 import io
+import json
 import os
 import platform
 import sys
@@ -19,6 +21,11 @@ import tempfile
 import zipfile
 
 from .core import (_abs, PLATFORM_WINDOWS, _os_family)  # noqa: E402
+
+
+def _sha256_hex(data: bytes) -> str:
+    """SHA-256 of `data` as a lowercase hex string."""
+    return hashlib.sha256(data).hexdigest()
 
 
 # --------------------------------------------------------------------------- #
@@ -64,8 +71,13 @@ class FetchError(Exception):
     pass
 
 
-def fetch_to_bytes(url: str, opener=None, timeout: int = 30) -> bytes:
-    """Download `url` into memory. `opener` defaults to urllib; tests inject a fake."""
+def fetch_to_bytes(url: str, opener=None, timeout: int = 30, expected_sha256=None) -> bytes:
+    """Download `url` into memory. `opener` defaults to urllib; tests inject a fake.
+
+    When `expected_sha256` is set, the downloaded body is verified against it before returning;
+    a mismatch raises :class:`FetchError` (fail-loud) instead of extracting/unverified code. Left
+    ``None`` (default) -> no verification, so callers that pin nothing keep prior behaviour.
+    """
     if opener is None:
         import urllib.request
         opener = urllib.request.urlopen
@@ -80,10 +92,43 @@ def fetch_to_bytes(url: str, opener=None, timeout: int = 30) -> bytes:
     try:
         resp = opener(url, timeout=timeout)  # real opener; fake returns _Resp-like
         if hasattr(resp, "_data"):
-            return resp._data                      # injected bytes path
-        return resp.read()                         # real HTTP body
+            data = resp._data                      # injected bytes path
+        else:
+            data = resp.read()                     # real HTTP body
     except Exception as exc:  # noqa: BLE001 - surface a single FetchError
         raise FetchError(str(exc)) from exc
+
+    if expected_sha256 is not None and _sha256_hex(data) != expected_sha256:
+        # fail-loud before extracting/running unverified code; message carries both digests so the
+        # mismatch is actionable (e.g. a stale pin vs. a newer build).
+        raise FetchError(
+            "downloaded build failed integrity check (expected %s, got %s)" % (
+                expected_sha256, _sha256_hex(data)))
+
+    return data
+
+
+def _integrity_path(scope_dir: str, osf: str) -> str:
+    """Path to the per-build integrity record (``.portable/<os>/ffmpeg/.integrity.json``)."""
+    scope = _abs(os.path.expanduser(scope_dir)) if scope_dir else _abs(os.getcwd())
+    return os.path.join(scope, ".portable", osf, "ffmpeg", ".integrity.json")
+
+
+def _record_integrity(scope_dir: str, osf: str, url: str, data: bytes) -> str:
+    """Persist the observed SHA-256 of a just-downloaded build (best-effort).
+
+    Returns the record path written. A missing/invalid store is treated as nothing recorded yet;
+    callers must not raise on write failures -- provisioning proceeds regardless.
+    """
+    path = _integrity_path(scope_dir, osf)
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as out:
+            json.dump({"asset": os.path.basename(url), "sha256": _sha256_hex(data),
+                       "url": url}, out)
+    except OSError:
+        return ""
+    return path
 
 
 # --------------------------------------------------------------------------- #
@@ -299,11 +344,22 @@ def provision(scope_dir: str = "", existing_dirs=None) -> dict:
 
     name = build_asset_name(osf, arch)
     url = base_url() + name
+    # only pass the verification kwarg when a known-good digest is actually pinned; left unset we
+    # call fetch_to_bytes exactly as before so reuse/download behaviour is unchanged.
+    expected_sha256 = os.environ.get("AUTOCV_FFMPEG_SHA256", "") or None
     try:
-        data = fetch_to_bytes(url)
+        if expected_sha256 is not None:
+            data = fetch_to_bytes(url, expected_sha256=expected_sha256)
+        else:
+            data = fetch_to_bytes(url)
     except FetchError as exc:
         return {"provisioned": False, "dir": None, "downloaded": False,
                 "sources": sources}
+
+    # integrity: record the observed digest next to the build so tampering is detectable on a
+    # later launch (and future pinning has a reference). Best-effort -- never fail provisioning on
+    # write errors; discovery still proceeds.
+    _record_integrity(scope_dir, osf, url, data)
 
     with tempfile.TemporaryDirectory() as tmp:
         zip_path = os.path.join(tmp, os.path.basename(url))
@@ -354,6 +410,10 @@ def main(argv=None) -> int:
     res = provision(scope)
     if isinstance(res, dict) and res.get("provisioned"):
         print(f"provisioned ffmpeg+ffprobe into:\n  {res['dir']}")
+        # integrity: the downloaded build's SHA-256 was recorded next to it; set AUTOCV_FFMPEG_SHA256
+        # to a known-good digest and provisioning will verify (and fail loudly) on any mismatch.
+        print("integrity: SHA-256 of the download recorded in .portable/<os>/ffmpeg/.integrity.json "
+              "(pin AUTOCV_FFMPEG_SHA256 to verify against a known-good build)")
     else:
         print("PROVISION FAILED:", res if isinstance(res, str) else res.get("error", res))
         return 1

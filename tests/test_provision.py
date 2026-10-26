@@ -17,6 +17,10 @@ from splitfy import bootstrap as b
 import splitfy.config_state as cs
 import splitfy.provision as p
 
+# Captured at import time (before any test monkeypatches module-level fetch_to_bytes) so later tests
+# can delegate to the pristine function regardless of cross-test opener pollution.
+_real_fetch = p.fetch_to_bytes
+
 
 def _zip_bytes(entries):
     buf = io.BytesIO()
@@ -195,5 +199,59 @@ def _abs(path):
     return os.path.abspath(os.path.expanduser(os.path.expandvars(path)))
 
 
-if __name__ == "__main__":
-    unittest.main(verbosity=2)
+
+
+class IntegrityTests(unittest.TestCase):
+    """Download-integrity layer for provisioned builds (S3 audit follow-up)."""
+
+    def test_sha256_hex_known_vector(self):
+        # RFC 3174 vector; also exercises the empty-input edge case.
+        self.assertEqual(
+            p._sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+        )
+        self.assertEqual(len(p._sha256_hex(b"")), 64)   # fixed-width lowercase hex
+
+    def _body(self, payload):
+        # read-only response: no _data attr so fetch_to_bytes takes the resp.read() path.
+        return type("Body", (), {"read": lambda s: payload})()
+
+    def test_fetch_rejects_wrong_digest(self):
+        # other tests monkeypatch module-level fetch_to_bytes (with a fixed body) and leave it set;
+        # delegate through a url-passing wrapper so the opener we inject controls what comes back.
+        def _delegate(url, opener=None, timeout=30, expected_sha256=None):
+            return _real_fetch(url=url, opener=opener, timeout=timeout, expected_sha256=expected_sha256)
+        p.fetch_to_bytes = _delegate
+
+        data = b"\x00" * 16
+        expected = p._sha256_hex(data)
+        # correct digest -> passes through unchanged (resp.read() path; no _data attr)
+        self.assertEqual(p.fetch_to_bytes("u", opener=lambda url, timeout=30: self._body(data)), data)
+        # wrong digest with expected pinned -> fail-loud FetchError (never returns the body)
+        try:
+            p.fetch_to_bytes(
+                "u",
+                opener=lambda url, timeout=30: self._body(b"tampered"),
+                expected_sha256=expected,
+            )
+            self.fail("expected FetchError on digest mismatch")
+        except p.FetchError:
+            pass
+
+    def test_provision_records_integrity_on_download(self):
+        with tempfile.TemporaryDirectory() as scope:
+            body = _zip_bytes(["bin/ffmpeg.exe", "bin/ffprobe.exe"])
+            # no env pin -> default flow unaffected; integrity is still recorded next to the build
+            p.fetch_to_bytes = lambda url, opener=None, timeout=30: body
+            res = p.provision(scope)
+            self.assertTrue(res["downloaded"])
+            rec_path = p._integrity_path(scope, b._os_family())
+            self.assertTrue(os.path.isfile(rec_path))
+            import json as _json
+            recorded = _json.load(open(rec_path))
+            self.assertEqual(recorded["sha256"], p._sha256_hex(body))
+            # expected asset name is platform-derived (not hard-coded), matching provision()'s own
+            # build_asset_name call for this box's os/arch.
+            osf = b._os_family()
+            exp_arch = {"win": p._win_arch(), "linux": p._linux_arch()}.get(osf)
+            self.assertEqual(recorded["asset"], p.build_asset_name(osf, exp_arch))
