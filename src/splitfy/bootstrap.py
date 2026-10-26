@@ -298,14 +298,15 @@ def find_known_roots(scope_dir: str = "", additional_dirs=(), config_path=None, 
 
     fresh = _scan_known_roots(scope_dir=scope_dir, additional_dirs=tuple(additional_dirs))
     store = ConfigStore.from_path(config_path or default_config_path(scope_dir))
+    # Persist only when this run actually discovered a usable root for the category: either it
+    # found >=2 candidates (a real multi-path install) or there was no prior record. A thin scan
+    # (<=1 candidate) on an already-known category is treated as noise, so we keep the previously
+    # recorded path instead of clobbering a good root with an empty/thin result.
     for cat in ("ffmpeg", "yt-dlp", "uvr_root"):
-        paths = list(fresh[cat])
-        if len(paths) <= 1 and store.get_paths(cat):
-            # keep the previously-recorded path when this run found nothing new; only add it
-            # if it is genuinely absent (avoids clobbering a useful root with an empty scan)
-            pass
-        else:
-            store.record(cat, list(fresh[cat]))
+        fresh_paths = list(fresh[cat])
+        had_prior = bool(store.get_paths(cat))
+        if len(fresh_paths) > 1 or not had_prior:
+            store.record(cat, fresh_paths)
     try:
         store.save()
     except OSError:

@@ -15,8 +15,7 @@ orchestrator with queue integration) and `server.py` (streaming `/status` SSE st
 and `tests/test_bootstrap_extra.py` (16 tests covering the probe/cache/persistence contracts). The
 probe is made robust on hosts where a git-bash-style env can make `os.walk` yield odd-shaped tuples.
 
-Test suite is green under **both** runners — `python -m unittest discover -s tests` → **129** OK,
-`pytest` → **129** passed.
+Test suite is green under **both** runners (`python -m unittest discover -s tests` and `pytest`). The exact test count grows as features are added, so it isn't pinned in this doc; see AGENTS.md for how the suite stays portable under either runner.
 
 ### Developer experience — VSCode config / extensions (§12)
 
@@ -151,7 +150,7 @@ into its own private `.portable/` scope so it "just works" anywhere (Windows pri
 > The discovery probe stores freshly-extracted ffmpeg/ffprobe paths relative to scope and reuses any
 > recorded locations still on disk as a reuse fast-path in `run._resolve_run_env()`, falling back to the PATH/app
 > scan when nothing is recorded. This reuse-first provisioning (§11 Design item 3) means future runs avoid
-> rescanning; covered by the probe/cache/persistence tests (suite count **129**, see §0).
+> rescanning (covered by the probe/cache/persistence suite).
 
 ## §12 — Developer experience: VSCode config / extensions
 

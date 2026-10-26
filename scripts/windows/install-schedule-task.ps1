@@ -17,11 +17,26 @@ while (-not (Test-Path -LiteralPath (Join-Path $scriptDir "src/splitfy")) -and $
 }
 $repoRoot  = $scriptDir   # repo root, so `import splitfy` needs no editable install
 
+# NOTE: no hardcoded Python path here — the version and install layout vary per box. Prefer
+# `python`/`py` on PATH (covers PATH installs + an editable install); fall back to a couple of
+# common locations so it still runs on a fresh machine, then give an actionable error.
 function Resolve-Python {
-    foreach ($c in @("$Python", "$env:APPDATA\Programs\Python\Python313\python.exe")) {
-        if (Get-Command $c -ErrorAction SilentlyContinue) { return $c }
+    $env:ProgramFiles = "$env:ProgramFiles"
+    foreach ($c in @("$Python", "python", "py")) {
+        if ($null -ne (Get-Command $c -ErrorAction SilentlyContinue)) { return $c }
     }
-    throw "python not found on PATH"
+    $bases = @(Join-Path "$env:LOCALAPPDATA" "Programs\Python",
+               Join-Path "$env:ProgramFiles" "Python")
+    foreach ($base in $bases) {
+        if (Test-Path -LiteralPath $base) {
+            $dirs = Get-ChildItem -LiteralPath $base -Directory | Where-Object { $_.Name -match 'Python\d+' }
+            if ($dirs) {
+                $exe = Join-Path $dirs[0].FullName "python.exe"
+                if (Test-Path -LiteralPath $exe) { return $exe }
+            }
+        }
+    }
+    throw "$Python not set and no python on PATH or common Windows locations; set the '$Python' env var."
 }
 $py = Resolve-Python
 

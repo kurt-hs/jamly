@@ -13,13 +13,18 @@ Description=splitfy audio-separation HTTP status server
 Documentation=file:///$(pwd)/README.md
 After=network.target
 
+# Fill in real install locations on THIS box — all three of these must point at the same dir:
+#   WorkingDirectory  == Environment AUTOCV_SCOPE  == --scope arg below.
+# `python3 -m splitfy.server` needs the package importable from that dir, so either do an
+# editable install (`pip install -e .`) or export PYTHONPATH to the repo root. User=root is only
+# needed if that dir isn't writable by your normal user; drop it (and use a real user) otherwise.
 [Service]
 Type=simple
-WorkingDirectory=/opt/splitfy            # absolute path to the checkout (edit)
-Environment=AUTOCV_SCOPE=/opt/splitfy    # tool resolution scope = repo root
+WorkingDirectory=/opt/splitfy             # absolute path to the checkout (edit)
+Environment=AUTOCV_SCOPE=/opt/splitfy     # tool resolution scope = repo root
 ExecStart=/usr/bin/python3 -m splitfy.server --port 8765 --scope /opt/splitfy
 Restart=always
-User=root                                  # needs write access for the queue file; edit as appropriate
+User=root                                  # edit as appropriate
 
 [Install]
 WantedBy=multi-user.target
