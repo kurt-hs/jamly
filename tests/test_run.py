@@ -4,6 +4,7 @@ These cover the pure/testable layers: stage command building, output naming, inp
 gathering + dedup across URL forms, engine-resolution override, and CLI dry-run wiring.
 They deliberately avoid invoking yt-dlp / ffmpeg / separation (network + GPU heavy)."""
 import argparse
+import json
 import os
 import shutil
 import sys
@@ -130,6 +131,65 @@ class NamingConsistencyTests(unittest.TestCase):
         self.assertEqual({os.path.basename(s) for s in stem_inputs}, {"bass.wav", "other.wav", "vocals.wav"})
         self.assertNotIn("drums.wav", (os.path.basename(s) for s in stem_inputs))  # drum stem must never be mixed in
         self.assertEqual(mix_cmd[-1], nodrums_out)                # the no-drums path is the mix's output
+
+    def test_process_one_writes_metadata_sidecar_with_parsed_title(self):
+        # end-to-end task-4 wiring with live metadata: a confident [Artist] - [Songname] parse must land on
+        # BOTH stems and in .meta.json; the structured sidecar records every field, not just the title.
+        wid = "dM8WjgRA6o8"
+        workdir = tempfile.mkdtemp()
+        out_dir = tempfile.mkdtemp()
+        extract_name = "%s.webm" % wid   # whatever yt-dlp emits; naming only needs the prefix
+        fmt = "wav"
+
+        def fake_stream_download(cmd):
+            with open(os.path.join(workdir, extract_name), "wb") as fh:
+                fh.write(b"RIFF\x00\x00\x00\x00WAVEfake-extract")
+            return RunResult(args=list(cmd), returncode=0, stdout="", stderr="")
+
+        def fake_separate(_audio, engine, _workdir, threads, uvr_root=""):
+            for name in ("drums", "bass", "other", "vocals"):
+                with open(os.path.join(workdir, "%s.wav" % name), "wb") as fh:
+                    fh.write(f"RIFF\x00\x00\x00\x00WAVEfake-stem-{name}".encode())
+            return {"drums": os.path.abspath(os.path.join(workdir, "drums.wav")),
+                    "bass": os.path.abspath(os.path.join(workdir, "bass.wav")),
+                    "other": os.path.abspath(os.path.join(workdir, "other.wav")),
+                    "vocals": os.path.abspath(os.path.join(workdir, "vocals.wav"))}
+
+        # live metadata (as yt-dlp --print would return for this video); the real title carries a
+        # trusted ' - ' separator so it parses into [Artist] - [Songname].
+        meta = {"title": "Between the Suried and Me - Extremophile Elite (LIVE)",
+                "artist": None, "uploader": "Metal Blade Records", "duration_seconds": 603}
+
+        args = argparse.Namespace(audio_format=fmt, threads=0, output_dir=out_dir, replace_existing=True)
+        with mock.patch.object(run_mod, "make_workdir", return_value=workdir), \
+             mock.patch.object(run_mod, "_find_ytdlp", return_value="fake-ytdlp"), \
+             mock.patch.object(run_mod, "_stream_download", fake_stream_download), \
+             mock.patch.object(run_mod, "separate", fake_separate), \
+             mock.patch.object(run_mod, "_fetch_item_metadata", return_value=meta), \
+             mock.patch.object(run_mod, "_run"):
+            res = run_mod.process_one(wid, args, source_url="https://www.youtube.com/watch?v=%s" % wid)
+
+        self.assertTrue(res.ok, res.error)
+        drums_name = os.path.basename(res.drums_path)
+        nodrums_name = os.path.basename(res.nodrums_path)
+        # the parsed title drives both stems; neither carries the machine key (it lives in meta only)
+        self.assertEqual(drums_name, "Between the Suried and Me - Extremophile Elite (LIVE)_drums.wav")
+        self.assertEqual(nodrums_name, "Between the Suried and Me - Extremophile Elite (LIVE)_no_drums.wav")
+
+        # res.title carries the machine key + stage tag alongside the human name
+        self.assertEqual(res.title, "Between the Suried and Me - Extremophile Elite (LIVE) | dM8WjgRA6o8 (<original>)")
+
+        meta_path = res.meta_path
+        self.assertTrue(os.path.exists(meta_path), "expected .meta.json on disk: %s" % meta_path)
+        with open(meta_path, encoding="utf-8") as fh:
+            written = json.load(fh)
+        self.assertEqual(written["watch_id"], wid)
+        self.assertEqual(written["title"], "Between the Suried and Me - Extremophile Elite (LIVE)")
+        self.assertEqual(written["artist"], "")          # yt-dlp reports NA -> normalized to empty
+        self.assertEqual(written["uploader"], "Metal Blade Records")
+        self.assertEqual(written["duration_seconds"], 603)
+
+        self.assertTrue(os.path.exists(res.drums_path), "expected output on disk: %s" % res.drums_path)
 class GatherInputsTests(unittest.TestCase):
     def _ns(self, input_list=None):
         return argparse.Namespace(input=input_list)

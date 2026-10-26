@@ -21,9 +21,11 @@ from __future__ import annotations
 import argparse
 import os
 import shutil
+import subprocess
 import sys
+import json
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from .normalize import normalize_inputs_full, extract_watch_id, Input
 from .core import (
@@ -36,7 +38,12 @@ from .core import (
 from .bootstrap import find_ffmpeg
 from .provision import resolve_recorded_tools
 from .logging import Logger
+from .naming import parse_title_artist, stem_prefix, build_metadata_name, meta_dict
 from splitfy.watch_queue import WatchQueue, default_queue_path
+
+# best-effort metadata lookup timeout (seconds); the whole thing is wrapped so a slow/failing yt-dlp
+# never blocks or fails item processing -- process_one degrades to the watch-id fallback.
+METADATA_FETCH_TIMEOUT = 300
 
 ENGINE_CHOICES = ("auto", "uvr5", "htdemucs")
 
@@ -235,17 +242,55 @@ def _resolve_run_env(args) -> tuple:
     return scope, engine, ffmpeg_dir, uvr_root
 
 
-def stem_output_paths(output_dir: str, watch_id: str, fmt: str) -> tuple:
+def stem_output_paths(output_dir: str, watch_id: str, fmt: str,
+                      parsed: Optional[Tuple[str, str]] = None) -> tuple:
     """Consistent output paths for one item's stems + sidecar.
 
-    All three share the watch id as their common prefix (so they are traceable to a single name
-    and match the yt-dlp extract <wid>.<ext>); each stem then carries an indicative suffix
-    (<_drums / _no_drums>) and the meta file mirrors the bare id. Pure -- no filesystem access.
+    Both stems share the human prefix -- a confident ``[Artist] - [Songname]`` parse when available
+    (see :func:`naming.parse_title_artist`), otherwise the bare watch id so outputs stay uniquely
+    traceable on every platform and match the yt-dlp extract <wid>.<ext>; each stem then carries an
+    indicative suffix (<_drums / _no_drums>). The meta file always mirrors the bare watch id. Pure.
     """
-    nodrums = os.path.join(output_dir, "%s_no_drums.%s" % (watch_id, fmt))
-    drums = os.path.join(output_dir, "%s_drums.%s" % (watch_id, fmt))
+    prefix = stem_prefix(watch_id, parsed)
+    nodrums = os.path.join(output_dir, "%s_no_drums.%s" % (prefix, fmt))
+    drums = os.path.join(output_dir, "%s_drums.%s" % (prefix, fmt))
     meta = os.path.join(output_dir, "%s.meta.json" % watch_id)
     return drums, nodrums, meta
+
+
+def _fetch_item_metadata(ytdlp_exe: str, source_url: Optional[str]) -> Optional[dict]:
+    """Best-effort real title/artist/uploader/duration from yt-dlp --print.
+
+    Returns a dict with keys title, artist, author, uploader, duration_seconds and id -- or None if
+    the lookup fails (offline, bare id, or error). Never raises: process_one falls back to parsing
+    the raw input text, then the watch-id prefix, when this returns None.
+    """
+    try:
+        cmd = [
+            ytdlp_exe,
+            "--print",
+            "%(title)s|%(artist)s|%(author)s|%(uploader)s|%(duration)s|%(id)s",
+            source_url,
+        ]
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=METADATA_FETCH_TIMEOUT)
+    except Exception:  # noqa: BLE001 - metadata is best-effort; any failure degrades to fallback
+        return None
+    if proc.returncode != 0 or not proc.stdout.strip():
+        return None
+    fields = {}
+    for pair in proc.stdout.splitlines():
+        pair = pair.strip()
+        if not pair:
+            continue
+        key, _, value = pair.partition("|")
+        if key and value.strip():
+            fields[key] = value.strip()
+    dur = fields.get("duration", "")
+    try:
+        fields["duration_seconds"] = int(dur) if dur != "" else None
+    except ValueError:
+        pass
+    return {k: v for k, v in fields.items() if k}
 
 
 def process_one(wid: str, args, progress=None, source_url: Optional[str] = None) -> ItemResult:
@@ -286,7 +331,12 @@ def process_one(wid: str, args, progress=None, source_url: Optional[str] = None)
         # URL-safe, unique per video, and known before extraction -- so it's a stable filename basis
         # on every platform (no title to rely on yet, no unicode/special chars, no truncation).
         fmt = getattr(args, "audio_format", DEFAULT_OUTPUT_FORMAT) or DEFAULT_OUTPUT_FORMAT
-        drums_out, nodrums_out, meta_path = stem_output_paths(args.output_dir, wid, fmt)
+        # best-effort real title/artist/uploader/duration from yt-dlp --print; None -> fall back to
+        # parsing the raw input text (a bare id / partial path has no usable fields) then the watch-
+        # id prefix. The real title is parsed for filenames, while .meta.json records every field.
+        item_meta = _fetch_item_metadata(ytdlp_exe, source_url)
+        parsed = parse_title_artist(item_meta["title"] if item_meta else source_url)
+        drums_out, nodrums_out, meta_path = stem_output_paths(args.output_dir, wid, fmt, parsed=parsed)
         # Finalize the primary (drums) stem first. Both stems are produced together before success;
         # doing it here means a drum re-encode failure surfaces immediately and never leaves its
         # no-drums complement half-mixed on disk (the workdir is wiped in finally regardless).
@@ -300,11 +350,29 @@ def process_one(wid: str, args, progress=None, source_url: Optional[str] = None)
                                 stems["other"], stems["vocals"], nodrums_out)
         _run(mix_cmd)
 
+        # both stems succeeded: surface the human name and write the structured sidecar. output_dir
+        # already holds the written stems, so its parent exists -- safe to open the meta file there.
         res.status, res.stage = "done", ""
-        res.title = wid
+        if item_meta is not None:
+            title = item_meta["title"] or None
+            artist = item_meta.get("artist") or None
+            uploader = item_meta.get("uploader") or None
+            duration_seconds = item_meta.get("duration_seconds") or 0
+        else:
+            # no live metadata -- best-effort parse of the raw input, then bare watch id everywhere
+            title = parsed[0] if parsed else None
+            artist = parsed[1] if parsed else None
+            uploader = None
+            duration_seconds = 0
+        res.title = build_metadata_name(wid, (parsed[0], parsed[1]) if parsed else None, "original")
+        human_meta_path = os.path.abspath(meta_path)
+        with open(human_meta_path, "w", encoding="utf-8") as fh:
+            json.dump(meta_dict(
+                watch_id=wid, source_url=source_url, title=title, artist=artist,
+                uploader=uploader, duration=duration_seconds), fh)
         res.drums_path = drums_out
         res.nodrums_path = nodrums_out
-        res.meta_path = meta_path
+        res.meta_path = human_meta_path
     except Exception as exc:  # noqa: BLE001 - record and continue across the queue
         res.status, res.stage, res.error = "error", "", str(exc)
     finally:

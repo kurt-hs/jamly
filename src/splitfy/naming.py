@@ -1,0 +1,109 @@
+"""Output filename construction for splitfy stems (pure, offline-testable).
+
+YouTube titles/metadata are user-generated and unreliable: ``%(artist)s``/``%(author)s`` are
+often empty -- e.g. the upload "Between the Buried and Me - Extremophile Elite (LIVE)" reports
+both fields as NA. Rather than trust those fields, this module derives a *human-readable* stem
+prefix from the raw title when it confidently matches an ``[Artist] - [Songname]`` shape, and
+otherwise falls back to the bare watch id so every output stays uniquely traceable.
+
+Every function here is pure (no filesystem/network) so the behaviour unit-tests offline under
+both runners. Source stays ASCII-only: parsed names are sanitized with :func:`sanitize_filename`
+before use, guaranteeing a safe filename on any platform even when the original title carries
+unicode or markup.
+"""
+from __future__ import annotations
+
+from typing import Optional, Tuple
+
+# The "X - Y" separators we trust (ASCII-only). A bare dash without surrounding spaces is usually
+# an em-dash/typo inside a single token and splitting on it would corrupt the artist name.
+_SEPARATORS = (" - ", "~")
+
+
+def parse_title_artist(title: Optional[str]) -> Optional[Tuple[str, str]]:
+    """Return ``(artist, songname)`` when ``title`` confidently matches "[Artist] - [Songname]",
+    else ``None``.
+
+    The match is deliberately conservative so we never emit a *wrong* name: both halves must be
+    non-empty after stripping (so "Song-" with no artist is rejected), the artist may not contain
+    a tab/newline and is bounded in length, and only the common " - " / "~" forms split. Titles
+    like "Song (LIVE)", "Official Audio", "ft. guest" or bare uploads return ``None`` -> fallback.
+
+    The returned halves are NOT sanitized; callers sanitize before writing to disk."""
+    if not title or "\n" in title:
+        return None
+    t = title.strip()
+    for sep in _SEPARATORS:
+        parts = t.split(sep, 1)
+        artist = parts[0].strip()
+        song = parts[1].strip() if len(parts) > 1 else ""
+        # both halves required; a tab/whitespace-laden "artist" almost always means the split was wrong
+        if not (artist and song) or "\t" in artist:
+            continue
+        if len(artist) > 80:
+            continue
+        return (artist, song)
+    return None
+
+
+def stem_prefix(wid: str, parsed: Optional[Tuple[str, str]]) -> str:
+    """Build the human-facing prefix for one stem.
+
+    With a confident parse this is ``"<Artist> - <Songname>"``; otherwise it degrades to the bare
+    watch id so outputs remain uniquely traceable on every platform (URL-safe, no spaces/specials)."""
+    from .core import sanitize_filename
+
+    if parsed:
+        artist, song = parsed
+        return "%s - %s" % (sanitize_filename(artist), sanitize_filename(song))
+    return sanitize_filename(wid)
+
+
+def build_stem_basename(wid: str, parsed: Optional[Tuple[str, str]], suffix: str) -> str:
+    """Full stem filename for one stage (``drums`` / ``no_drums``)."""
+    return "%s_%s" % (stem_prefix(wid, parsed), suffix)
+
+
+def build_metadata_name(
+    wid: str,
+    parsed: Optional[Tuple[str, str]],
+    kind: str,
+) -> str:
+    """Human-readable output filename carrying the stage tag.
+
+    When parsed -> ``"<Artist> - <Songname> | <vid> (<original>|<nodrums>|<drumonly>)"`` so the human
+    name stays distinct from the machine key (the ``|`` separator has no spaces in either half); when
+    un-parsed there is no separate name, so it's just ``"<vid> (<kind>)"`` -- a single clean token.
+    Either way the filename is shell-safe and traceable to its watch id."""
+    prefix = stem_prefix(wid, parsed)
+    tag = {
+        "original": "<original>",
+        "nodrums": "<nodrums>",
+        "drumonly": "<drumonly>",
+    }.get(kind, kind)
+    if parsed is not None:
+        return "%s | %s (%s)" % (prefix, wid[:16], tag)
+    return "%s (%s)" % (wid, tag)
+
+
+def meta_dict(
+    *,
+    watch_id: str,
+    source_url: Optional[str] = None,
+    title: Optional[str] = None,
+    artist: Optional[str] = None,
+    uploader: Optional[str] = None,
+    duration: Optional[int] = None,
+) -> dict:
+    """Structured sidecar payload for one item's ``.meta.json`` (ASCII-only keys/values).
+
+    Records the parsed metadata when available and always the watch id + source text so outputs
+    stay traceable even when YouTube exposes no usable title/artist."""
+    return {
+        "watch_id": watch_id,
+        "source_url": source_url or "",
+        "title": title or "",
+        "artist": artist or "",
+        "uploader": uploader or "",
+        "duration_seconds": duration if duration is not None else 0,
+    }
