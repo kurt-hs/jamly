@@ -141,12 +141,11 @@ def detect_ffmpeg(ffmpeg_dirs: list = None, scope_dir: str = "", additional_dirs
     for d in dirs:
         if not os.path.isdir(d):
             continue
-        ff = os.path.join(d, names[0])
-        fp = os.path.join(d, names[1])
-        has_both = os.path.isfile(ff) and os.path.isfile(fp)
-        if has_both:
+        # _dir_has_both is the single definition of "this dir holds BOTH ffmpeg + ffprobe" --
+        # reused by the curated-root scan (_scan_known_roots) so reuse never splits across two checks.
+        if _dir_has_both(d):
             return ToolStatus("ffmpeg", path=d, ok=True, note="has ffmpeg + ffprobe")
-        if os.path.isfile(ff):
+        if os.path.isfile(os.path.join(d, names[0])):
             return ToolStatus("ffmpeg", path=d, ok=False,
                               note="ffmpeg only (ffprobe missing)")
     # scoped fallback: binaries may be nested under .portable/<os>/ffmpeg/* in any subfolder
