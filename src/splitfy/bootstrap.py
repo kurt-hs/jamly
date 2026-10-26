@@ -16,23 +16,10 @@ the pipeline is runnable *as-is* on this machine.
 from __future__ import annotations
 
 import os
-import platform
 import sys
 
 from .config_state import (ConfigStore, default_config_path)
-from .core import (_abs, PLATFORM_WINDOWS, _scan_uvr_roots, which)  # noqa: E402
-
-
-def _os_family() -> str:
-    """Coarse OS family used for the portable scope layout (win/linux/macos)."""
-    if sys.platform.startswith("win"):
-        return "win"
-    machine = platform.machine().lower()
-    if any(a in machine for a in ("arm64", "aarch64")):
-        return "macos" if sys.platform == "darwin" else "linux-arm"
-    if sys.platform == "darwin":
-        return "macos"
-    return "linux"
+from .core import (_abs, PLATFORM_WINDOWS, _os_family, _scan_uvr_roots, which)  # noqa: E402
 
 
 # --------------------------------------------------------------------------- #

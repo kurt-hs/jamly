@@ -203,5 +203,43 @@ class FindFfmpegTests(unittest.TestCase):
         self.assertTrue(has_ff and has_fp)
 
 
+# --------------------------------------------------------------------------- #
+# _os_family() single source of truth (D1 entropy dedup)
+# --------------------------------------------------------------------------- #
+class OsFamilyDedupTests(unittest.TestCase):
+    """
+    _os_family() must live in ONE module (core) and be shared by bootstrap + provision.
+
+    If either module ever re-introduces its own copy, this identity assertion fails -- the whole
+    point of D1 was to remove a duplicated OS-detection function. Branch coverage is exercised via
+    patched PLATFORM_WINDOWS / platform.machine / sys.platform; only _os_family() runs inside each
+    patch so no global state leaks between cases."""
+
+    def test_single_source_of_truth(self):
+        import splitfy.core as c
+        import splitfy.provision as p
+        self.assertIs(b._os_family, c._os_family)
+        self.assertIs(p._os_family, c._os_family)
+
+    def _run_with_platform(self, win, machine, platform_name):
+        import splitfy.core as c
+        import unittest.mock as mock
+        with mock.patch("splitfy.core.PLATFORM_WINDOWS", bool(win)), \
+                mock.patch.object(c.platform, "machine", lambda m=machine: m or ""), \
+                mock.patch("splitfy.core.sys") as fake_sys:
+            fake_sys.platform = platform_name
+            return c._os_family()
+
+    def test_families_for_all_branches(self):
+        cases = [
+            (True, "x86_64", "", "win"),
+            (False, "x86_64", "", "linux"),
+            (False, "aarch64", "", "linux-arm"),
+            (False, "aarch64", "darwin", "macos"),  # darwin + arm -> macos
+        ]
+        for win, machine, platform_name, expected in cases:
+            self.assertEqual(self._run_with_platform(win, machine, platform_name), expected)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

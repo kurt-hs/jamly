@@ -18,21 +18,12 @@ import sys
 import tempfile
 import zipfile
 
-from .core import PLATFORM_WINDOWS, _abs  # noqa: E402
+from .core import (_abs, PLATFORM_WINDOWS, _os_family)  # noqa: E402
 
 
 # --------------------------------------------------------------------------- #
 # OS / architecture mapping (BtbN FFmpeg-Builds naming)
 # --------------------------------------------------------------------------- #
-def _os_family() -> str:
-    if sys.platform.startswith("win"):
-        return "win"
-    machine = platform.machine().lower()
-    if any(a in machine for a in ("arm64", "aarch64")):
-        return "macos" if sys.platform == "darwin" else "linux-arm"
-    if sys.platform == "darwin":
-        return "macos"
-    return "linux"
 
 
 def _win_arch() -> str:

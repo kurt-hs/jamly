@@ -11,6 +11,7 @@ Design notes:
 from __future__ import annotations
 
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -18,6 +19,22 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 
 PLATFORM_WINDOWS = sys.platform == "win32"
+
+
+def _os_family() -> str:
+    """Coarse OS family for portable-scope layout and asset naming (win/linux/macos).
+
+    Single source of truth -- shared by bootstrap.py and provision.py so their build/download
+    layouts agree. Returns one of ``"win"``, ``"linux"`` or ``"macos"``.
+    """
+    if PLATFORM_WINDOWS:
+        return "win"
+    machine = platform.machine().lower()
+    if any(a in machine for a in ("arm64", "aarch64")):
+        return "macos" if sys.platform == "darwin" else "linux-arm"
+    if sys.platform == "darwin":
+        return "macos"
+    return "linux"
 
 
 # --------------------------------------------------------------------------- #
