@@ -46,25 +46,34 @@ optional (its models are reused when present) rather than required.
 
 ## Route decision (§3, §6)
 
-Chosen: **ROUTE A — Demucs v4 four-stems**. `htdemucs` yields exactly the two target files and is
-what UVR5's own "Separate into stems" does under the hood. The alternative (ROUTE B, MDX23C DrumSep)
-is a fallback needing stem-merge validation; not used.
+Both inference engines produce the same four-stem split (`drums` / `bass`, `other`, `vocals`; emitted as
+`<id>_drums.wav` and `<id>_no_drums.wav`). They differ only in how that split is computed:
+
+- **Default — audio-separator (UVR5).** ``resolve_engine`` returns this when reusable Demucs `.th` weights or
+  the importable `audio_separator` package are present. It reuses UVR5's bundled weights, so results match the
+  GUI path; no extra model download beyond what UVR5 already ships.
+- **Opt-in — htdemucs (ONNX).** ``--engine htdemucs`` selects this only when `htdemucs`/`onnxruntime` are
+  installed and an `.onnx` model file is provisioned in scope. Portable across machines, but requires the flag.
+
+There is no MDX23C / DrumSep fallback: that was never part of the design. The two routes above are the only
+separation paths; `--engine auto` resolves between them at runtime via ``resolve_engine``.
 
 ### Inference engine options
 
 | Option | Engine / model | Torch? | Portable across machines? | Notes |
 | --- | --- | --- | --- | --- |
-| **Default (portable)** | ONNX Runtime + `htdemucs` `.onnx` | No | High — pure numpy+onnxruntime; CPU/DirectML/CUDA/CoreML via one provider flag; model auto-downloaded from HF on first use | Same HTDemucs family as UVR5's bundled weight → essentially identical results. Best for "just works" anywhere. |
-| Local fast path | audio-separator + torch-CUDA (reuse UVR5 `.th`) | Yes (large install) | Low — needs the model folders + a CUDA venv carried over | GUI-identical quality, fastest on RTX 4070; optional when UVR5 is present. |
+| **Default** | `audio_separator` / UVR5 reusable Demucs weights (`.th`) | Yes (large install) | Low — needs the model folders + a torch-CUDA venv carried over; auto-detected at runtime via ``resolve_engine`` | GUI-identical four-stems, fastest on GPU; this is what ``--engine auto`` selects when UVR5's weights/package are present. |
+| Portable override | ONNX Runtime + `htdemucs` `.onnx` | No | High — pure numpy+onnxruntime; CPU/DirectML/CUDA/CoreML via one provider flag; model auto-downloaded from HF on first use | Same HTDemucs family as UVR5's bundled weight → essentially identical results. Use ``--engine htdemucs`` for "just works" anywhere (requires the package + a provisioned ``.onnx``). |
 
-Recommendation: default to ONNX Runtime HTDemucs. Provider auto-detected (CUDA preferred, DirectML
-fallback). The audio-separator/UVR5 path stays as an explicit local override (`--engine uvr5`).
+Recommendation: default to the audio-separator/UVR5 path, since ``resolve_engine`` selects it when its
+reusable weights or importable package are present and no explicit engine is given. Provider is auto-detected
+(CUDA preferred, DirectML fallback). The htdemucs ONNX path stays as an opt-in override via `--engine htdemucs`.
 
 ## Architecture (§4)
 
 ```
 User / ext  --> run.py (validate+normalize) --> .portable/ scope (python, yt-dlp, ffmpeg+ffprobe, engine)
-Flow: normalize watch ID -> yt-dlp best-audio download -> demucs four-stems -> ffmpeg mix -> tag/rename
+Flow: normalize watch ID -> yt-dlp best-audio download -> stem separation (audio-separator/UVR5 by default, or htdemucs via `--engine`) -> ffmpeg mix -> tag/rename
 run.py self-provisions .portable/ on first run and reuses tools already installed.
 ```
 
