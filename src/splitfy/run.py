@@ -99,7 +99,7 @@ def _stream_download(cmd: List[str]) -> 'RunResult':
 class ItemResult:
     watch_id: str
     title: Optional[str] = None
-    status: str = "pending"      # pending|download|separate|mix|done|error
+    status: str = "pending"      # lifecycle: pending|download|separate|mix|done|error
     stage: str = ""              # which pipeline stage is in progress ("" when idle)
     drums_path: Optional[str] = None
     nodrums_path: Optional[str] = None
@@ -111,7 +111,8 @@ class ItemResult:
         return self.status == "done"
 
     @property
-    def done(self) -> bool:
+    def finished(self) -> bool:
+        # finished at all -- success ("done") OR failure ("error"); distinct from ``ok`` above.
         return self.status in ("done", "error")
 
 
@@ -245,8 +246,15 @@ def _find_ytdlp(scope_dir: str):
 
 
 def _resolve_run_env(args) -> tuple:
-    """Resolve tools + engine for one run (cheap file checks; called per item)."""
-    scope = os.environ.get("AUTOCV_SCOPE") or os.getcwd()
+    """Resolve tools + engine for one run (cheap file checks; called per item).
+
+    Scope resolution order is explicit so the CLI and server share one contract: an ``args.scope``
+    override wins when present -- that is the HTTP server's --scope, which must govern tool
+    resolution exactly as it governs where the queue file lives (see ItemServer). Otherwise fall
+    back to AUTOCV_SCOPE then cwd. The bare CLI namespace has no scope attribute, so getattr() is
+    None and ``python run.py`` behaves identically to before.
+    """
+    scope = getattr(args, "scope", None) or os.environ.get("AUTOCV_SCOPE") or os.getcwd()
     uvr_root = os.environ.get("AUTOCV_UVR_ROOT") or ""
     engine = resolve_engine(args, scope, uvr_root)
     # reuse-first: if a prior run recorded a portable ffmpeg path that still exists on disk,

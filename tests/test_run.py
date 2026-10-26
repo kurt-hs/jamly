@@ -313,6 +313,30 @@ class ResolveRunEnvReuseTests(unittest.TestCase):
             self.assertEqual(ffmpeg_dir, "/nonexistent/ffmpeg")
             ff.assert_called_once()   # no recorded path -> normal scan runs
 
+    def test_cli_without_scope_attr_uses_env_then_cwd(self):
+        # the bare CLI namespace has NO scope attribute (run.py exposes no --scope flag), so
+        # getattr() falls back to env/cwd and `python run.py` resolves tools exactly as before.
+        cli = argparse.Namespace(engine="auto", threads=0)   # deliberately no .scope
+        clean = dict(os.environ)
+        clean.pop("AUTOCV_SCOPE", None)
+        with mock.patch.dict(os.environ, clean, clear=True):
+            scope = run_mod._resolve_run_env(cli)[0]
+        self.assertEqual(scope, os.getcwd())   # portable: _resolve_run_env only reads cwd
+
+    def test_server_scope_override_governs_tool_resolution(self):
+        # ItemServer passes its --scope namespace; that same value must steer yt-dlp/ffmpeg/engine
+        # resolution so the queue file and the tools it runs against live in one place.
+        srv = argparse.Namespace(scope="/data", engine="auto", threads=0)
+        scope = run_mod._resolve_run_env(srv)[0]
+        self.assertEqual(os.path.normcase(scope), os.path.normcase("/data"))
+
+    def test_explicit_scope_beats_autocv_scope(self):
+        # an args.scope override wins over the AUTOCV_SCOPE environment variable.
+        srv = argparse.Namespace(scope="/data", engine="auto", threads=0)
+        with mock.patch.dict(os.environ, {"AUTOCV_SCOPE": "/other"}):
+            scope = run_mod._resolve_run_env(srv)[0]
+        self.assertEqual(os.path.normcase(scope), os.path.normcase("/data"))
+
 
 class FinalizeOutputTests(unittest.TestCase):
     """encode-or-copy decision for one final stem (lossy re-encode vs raw verbatim copy)."""
