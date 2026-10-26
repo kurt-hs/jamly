@@ -85,7 +85,7 @@ class NamingConsistencyTests(unittest.TestCase):
                 fh.write(b"RIFF\x00\x00\x00\x00WAVEfake-extract")
             return RunResult(args=list(cmd), returncode=0, stdout="", stderr="")
 
-        def fake_separate(_audio, engine, _workdir, threads, uvr_root=""):
+        def fake_separate(audio=None, _workdir=None, threads=0, **_rest):
             for name in ("drums", "bass", "other", "vocals"):
                 p = os.path.join(workdir, "%s.wav" % name)
                 with open(p, "wb") as fh:
@@ -146,7 +146,7 @@ class NamingConsistencyTests(unittest.TestCase):
                 fh.write(b"RIFF\x00\x00\x00\x00WAVEfake-extract")
             return RunResult(args=list(cmd), returncode=0, stdout="", stderr="")
 
-        def fake_separate(_audio, engine, _workdir, threads, uvr_root=""):
+        def fake_separate(audio=None, _workdir=None, threads=0, **_rest):
             for name in ("drums", "bass", "other", "vocals"):
                 with open(os.path.join(workdir, "%s.wav" % name), "wb") as fh:
                     fh.write(f"RIFF\x00\x00\x00\x00WAVEfake-stem-{name}".encode())
@@ -231,20 +231,20 @@ class GatherInputsTests(unittest.TestCase):
 
 
 class ResolveEngineTests(unittest.TestCase):
+    """Portable-only engine resolution: exactly one engine (the demucs PyPI CLI)."""
+
     def test_auto_uses_available_engine(self):
-        with mock.patch("splitfy.core.detect_engine", return_value="uvr5"):
-            self.assertEqual(run_mod.resolve_engine(argparse.Namespace(engine="auto"), "", ""), "uvr5")
+        with mock.patch("splitfy.core.detect_engine", return_value="htdemucs"):
+            self.assertEqual(run_mod.resolve_engine(argparse.Namespace(engine="auto"), ""), "htdemucs")
 
     def test_explicit_override_rejected_if_unavailable(self):
-        # request uvr5 but only htdemucs is available -> None (engine unusable)
+        # portable-only: requesting any engine other than the sole demucs CLI never runs -> None
         with mock.patch("splitfy.core.detect_engine", return_value="htdemucs"):
-            self.assertIsNone(run_mod.resolve_engine(argparse.Namespace(engine="uvr5"), "", ""))
+            self.assertIsNone(run_mod.resolve_engine(argparse.Namespace(engine="uvr5"), ""))
 
     def test_explicit_htdemucs_accepted_when_available(self):
         with mock.patch("splitfy.core.detect_engine", return_value="htdemucs"):
-            self.assertEqual(run_mod.resolve_engine(argparse.Namespace(engine="htdemucs"), "", ""), "htdemucs")
-
-
+            self.assertEqual(run_mod.resolve_engine(argparse.Namespace(engine="htdemucs"), ""), "htdemucs")
 class MainDryRunTests(unittest.TestCase):
     def test_dry_run_exits_zero_without_network(self):
         old = sys.stdin
@@ -299,8 +299,8 @@ class ResolveRunEnvReuseTests(unittest.TestCase):
             # assert _resolve_run_env consumes a ConfigStore-recorded ffmpeg and skips the scan.
             with mock.patch.object(run_mod, "resolve_recorded_tools", return_value={"ffmpeg": recorded_abs}), \
                  mock.patch.object(run_mod, "find_ffmpeg", side_effect=RuntimeError("must not scan when reused")), \
-                 mock.patch.object(run_mod, "resolve_engine", return_value="uvr5"):
-                _s, _e, ffmpeg_dir, _u = run_mod._resolve_run_env(argparse.Namespace(engine="auto", threads=0))
+                 mock.patch.object(run_mod, "resolve_engine", return_value="htdemucs"):
+                _s, engine, ffmpeg_dir = run_mod._resolve_run_env(argparse.Namespace(engine="auto", threads=0))
             self.assertEqual(os.path.normcase(os.path.abspath(ffmpeg_dir)),
                              os.path.normcase(recorded_abs))
 
@@ -308,8 +308,8 @@ class ResolveRunEnvReuseTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as scope:
             with mock.patch.dict(os.environ, {"AUTOCV_SCOPE": scope}), \
                  mock.patch.object(run_mod, "find_ffmpeg", return_value="/nonexistent/ffmpeg") as ff, \
-                 mock.patch.object(run_mod, "resolve_engine", return_value="uvr5"):
-                _s, _e, ffmpeg_dir, _u = run_mod._resolve_run_env(argparse.Namespace(engine="auto", threads=0))
+                 mock.patch.object(run_mod, "resolve_engine", return_value="htdemucs"):
+                _s, engine, ffmpeg_dir = run_mod._resolve_run_env(argparse.Namespace(engine="auto", threads=0))
             self.assertEqual(ffmpeg_dir, "/nonexistent/ffmpeg")
             ff.assert_called_once()   # no recorded path -> normal scan runs
 

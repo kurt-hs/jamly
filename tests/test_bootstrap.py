@@ -98,96 +98,38 @@ class YtdlpDetectionTests(unittest.TestCase):
                 del os.environ["APPDATA"]
 
 
-class DemucsWeightsTests(unittest.TestCase):
-    def _repo(self, d):
-        for n in ("htdemucs.yaml", "955717e8-8726e21a.th", "d12395a8-e57c48e6.th"):
-            _touch(os.path.join(d, n))
-
-    def test_returns_all_weights_when_yaml_present(self):
-        with tempfile.TemporaryDirectory() as d:
-            self._repo(d)
-            ws = b.demucs_weights(d)
-            self.assertEqual(ws, ["955717e8-8726e21a.th", "d12395a8-e57c48e6.th"])
-
-    def test_empty_without_yaml(self):
-        with tempfile.TemporaryDirectory() as d:
-            _touch(os.path.join(d, "some-other.yaml"))
-            self.assertEqual(b.demucs_weights(d), [])  # no htdemucs.yaml -> nothing usable
-
-    def test_empty_for_missing_repo(self):
-        self.assertEqual(b.demucs_weights("/no/such/repo/here"), [])
-
-
-class UvrDetectionTests(unittest.TestCase):
-    def _uvr_tree(self, root, with_ffmpeg=True):
-        repo = os.path.join(root, "models", "Demucs_Models", "v3_v4_repo")
-        for n in ("htdemucs.yaml", "955717e8-8726e21a.th"):
-            _touch(os.path.join(repo, n))
-        if with_ffmpeg:
-            _touch(os.path.join(root, "ffmpeg.exe") if b.PLATFORM_WINDOWS else os.path.join(root, "ffmpeg"))
-
-    def test_detect_uvr_fields(self):
-        with tempfile.TemporaryDirectory() as root:
-            self._uvr_tree(root)
-            r = b.detect_uvr(root)
-            self.assertTrue(r["uvr_exists"])
-            self.assertTrue(r["repo_exists"])
-            self.assertTrue(r["weights_file_present"])
-            self.assertTrue(r["ffmpeg_bundled"])   # ffmpeg.exe at root
-
-    def test_missing_install(self):
-        # a path that does not exist -> everything reports False/None
-        r = b.detect_uvr("/no/such/path/uvr5-install")
-        self.assertFalse(r["uvr_exists"])
-        self.assertFalse(r["repo_exists"])
-        self.assertFalse(r["weights_file_present"])
-        self.assertFalse(r["ffmpeg_bundled"])
-
-
 class MainGateTests(unittest.TestCase):
-    """Exercise main()'s critical-gate logic with throwaway temp UVR roots."""
+    """main()'s portable readiness gate: python + (yt-dlp OR htdemucs repro) + ffmpeg+ffprobe."""
 
-    @staticmethod
-    def _provision(root):
-        # weights repo + ffmpeg+ffprobe placed directly in root (main scans the UVR root)
-        repo = os.path.join(root, "models", "Demucs_Models", "v3_v4_repo")
-        for n in ("htdemucs.yaml", "955717e8-8726e21a.th"):
-            _touch(os.path.join(repo, n))
-        _make_bin_dir(root)
+    def _ok(self, ok=True):
+        # main() prints each summarize entry via report(); the mock must therefore mimic a ToolStatus.
+        reasons = ["reason"] if not ok else []
+        return type("T", (), {
+            "ok": ok, "name": "", "path": None, "reasons": reasons,
+            "report": lambda *a, **k: ("ok" if ok else "") + "; ".join(reasons),
+        })()
 
-    @staticmethod
-    def _weights_only(root):
-        repo = os.path.join(root, "models", "Demucs_Models", "v3_v4_repo")
-        for n in ("htdemucs.yaml", "955717e8-8726e21a.th"):
-            _touch(os.path.join(repo, n))
+    def test_ready_when_all_detected(self):
+        # python + yt-dlp + ffmpeg all detected -> ready to run (rc 0). argv is ignored by portable main.
+        import unittest.mock as mock
+        with redirect_stdout(io.StringIO()):
+            with mock.patch.object(b, "detect_system_python", return_value=self._ok(True)),                  mock.patch.object(b, "find_ytdlp", return_value=self._ok(True)),                  mock.patch.object(b, "detect_ffmpeg", return_value=self._ok(True)):
+                rc = b.main(0)
+        self.assertEqual(rc, 0)
 
-    def test_ready_when_ffprobe_present(self):
-        with tempfile.TemporaryDirectory() as root:
-            self._provision(root)
-            old = dict(os.environ)
-            os.environ["AUTOCV_UVR_ROOT"] = root
-            try:
-                with redirect_stdout(io.StringIO()):
-                    rc = b.main()
-            finally:
-                os.environ.clear()
-                os.environ.update(old)
-            self.assertEqual(rc, 0)
+    def test_not_ready_without_ffmpeg(self):
+        # ffmpeg+ffprobe missing -> blocked (rc 3), even though repro + python are present.
+        import unittest.mock as mock
+        with mock.patch.object(b, "detect_ffmpeg", return_value=self._ok(False)),              mock.patch.object(b, "detect_system_python", return_value=self._ok(True)),              mock.patch.object(b, "find_ytdlp", return_value=self._ok(True)):
+            rc = b.main(0)
+        self.assertEqual(rc, 3)
 
-    def test_not_ready_without_ffprobe(self):
-        with tempfile.TemporaryDirectory() as root:
-            self._weights_only(root)   # python + weights ok, but NO ffmpeg/ffprobe
-            old = dict(os.environ)
-            os.environ["AUTOCV_UVR_ROOT"] = root
-            os.environ["AUTOCV_SCOPE"] = root   # isolated scope: no portable ffmpeg here
-            try:
-                with redirect_stdout(io.StringIO()):
-                    rc = b.main()
-            finally:
-                os.environ.clear()
-                os.environ.update(old)
-            self.assertEqual(rc, 3)   # blocked on ffmpeg+ffprobe
-
+    def test_ready_when_htdemucs_available(self):
+        # yt-dlp absent but the demucs CLI is available -> has_repro holds via detect_engine().
+        import unittest.mock as mock
+        with mock.patch.object(b, "detect_ffmpeg", return_value=self._ok(True)),              mock.patch.object(b, "detect_system_python", return_value=self._ok(True)),              mock.patch.object(b, "find_ytdlp", return_value=self._ok(False)),              mock.patch.object(b, "detect_engine", return_value=b.ENGINE_HTDEMUCS):
+            rc = b.main(0)
+        self.assertEqual(rc, 0)
 
 class FindFfmpegTests(unittest.TestCase):
     def test_none_for_empty_scope(self):

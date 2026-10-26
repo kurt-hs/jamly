@@ -1,7 +1,6 @@
 """Unit tests for core.py command builders + pure helpers (no network/subprocess)."""
 import os
 import sys
-import tempfile
 import unittest
 
 
@@ -11,7 +10,7 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 import splitfy.core as core  # noqa: E402 (module alias for core.X attribute access)
 from splitfy.core import (  # noqa: E402
-    build_demucs_four_stems_cmd,
+    build_htdemucs_four_stems_cmd,
     build_ffmpeg_mix_cmd, build_ytdlp_extract_cmd, ensure_output_dir,
     sanitize_filename, run, which, _abs, _exists_exe,
 )
@@ -47,33 +46,25 @@ class YtdlpCmdTests(unittest.TestCase):
 
 
 class DemucsCmdTests(unittest.TestCase):
-    def test_four_stems_args(self):
-        cmd = build_demucs_four_stems_cmd(
-            python_exe="python.exe", input_audio=r"C:\in.wav",
-            workdir=r"C:\work\separated", repo=r"C:\repo",
-            weights_name="955717e8-8726e21a", device=None, threads=0)
-        self.assertIn("htdemucs", cmd)
-        self.assertIn("--four-stems", cmd)
-        self.assertIn("--input", cmd)
-        self.assertIn("C:\\in.wav", cmd)
-        self.assertTrue(cmd[-2:], ["-o", "C:\\work\\separated"])
-        self.assertNotIn("--device", cmd)          # auto when None
+    """Four-stem separation command for the portable torch-based `demucs` PyPI CLI."""
 
-    def test_device_override(self):
-        cmd = build_demucs_four_stems_cmd(python_exe="python.exe", input_audio="in.wav",
-                                           workdir="w", repo="", weights_name="955717e8-8726e21a",
-                                           device="cuda", threads=0)
-        self.assertIn("--device", cmd)
-        self.assertEqual(cmd[cmd.index("--device") + 1], "cuda")
+    def test_four_stems_args(self):
+        cmd = build_htdemucs_four_stems_cmd(python_exe="python.exe", input_audio="in.wav", workdir="w")
+        self.assertIn("htdemucs", cmd)         # -n/--name selects the model
+        self.assertIn("--audio", cmd)          # --audio names the source file
+        self.assertEqual(cmd[cmd.index("--out") + 1], "w")   # --out sets the output dir
+        # portable-only: no per-device override flag (auto on every host), and NO --four-stems flag
+        self.assertNotIn("--device", cmd)
+        self.assertNotIn("--four-stems", cmd)
+
+    def test_no_repo_means_official_model(self):
+        # portable-only: an empty repo means the official PyPI model, so no --repo flag is emitted
+        cmd = build_htdemucs_four_stems_cmd(python_exe="python.exe", input_audio="in.wav", workdir="w")
+        self.assertNotIn("--repo", cmd)
 
     def test_threads_override(self):
-        cmd = build_demucs_four_stems_cmd(python_exe="python.exe", input_audio="in.wav",
-                                           workdir="w", repo="", weights_name="955717e8-8726e21a",
-                                           device=None, threads=4)
-        self.assertEqual(cmd[cmd.index("--threads") + 1], "4")
-
-
-class FfmpegCmdTests(unittest.TestCase):
+        cmd = build_htdemucs_four_stems_cmd(python_exe="python.exe", input_audio="in.wav", workdir="w", threads=4)
+        self.assertEqual(cmd[cmd.index("-j") + 1], "4")   # -j/--jobs sets the worker countclass FfmpegCmdTests(unittest.TestCase):
     def test_mix_non_drum_stems(self):
         cmd = build_ffmpeg_mix_cmd("ffmpeg.exe", "bass.wav", "other.wav", "vocals.wav", "out.wav")
         self.assertEqual(cmd[0], "ffmpeg.exe")
@@ -218,56 +209,24 @@ class AudioFormatCmdTests(unittest.TestCase):
 
 
 class DetectEngineTests(unittest.TestCase):
-    """detect_engine() / _scan_uvr_roots() availability checks (no heavy imports)."""
+    """detect_engine() availability check for the single separation engine (no heavy imports)."""
 
-    WEIGHT = "955717e8-8726e21a.th"       # filename only
-    MARKER_DIR = os.path.join("models", "Demucs_Models", "v3_v4_repo")
-
-    def _make_weight_root(self):
-        base = tempfile.mkdtemp(prefix="uvr5_")
-        repo = os.path.join(base, self.MARKER_DIR)
-        os.makedirs(repo, exist_ok=True)
-        with open(os.path.join(repo, self.WEIGHT), "wb") as fh:
-            fh.write(b"fake-weights")
-        return base
-
-    def test_env_root_marker_detected_as_uvr5(self):
+    def test_returns_htdemucs_when_demucs_installed(self):
         import unittest.mock as mock
-        root = self._make_weight_root()
-        with mock.patch.dict(os.environ, {"AUTOCV_UVR_ROOT": root}, clear=False), \
-             mock.patch.object(core, "_scan_uvr_roots", return_value=[root]):
-            self.assertEqual(core.detect_engine(), core.ENGINE_UVR5)
+        with mock.patch.object(core, "_dir_has_any", return_value=True) as m:
+            self.assertEqual(core.detect_engine(), core.ENGINE_HTDEMUCS)
+            args = m.call_args[0][1]
+            self.assertEqual(args, ("demucs",))
 
-    def test_scan_includes_explicit_env_root(self):
+    def test_returns_none_when_demucs_missing(self):
         import unittest.mock as mock
-        root = self._make_weight_root()
-        with mock.patch.dict(os.environ, {"AUTOCV_UVR_ROOT": root}, clear=False), \
-             mock.patch.object(core, "_dir_has_any", return_value=False):
-            # _scan must surface the explicit env override regardless of weights
-            roots = core._scan_uvr_roots()
-            self.assertIn(os.path.abspath(root), roots)
+        with mock.patch.object(core, "_dir_has_any", return_value=False):
+            self.assertIsNone(core.detect_engine())
 
-    def test_no_weights_or_pkg_is_not_uv5(self):
+    def test_no_fallback_to_other_engines(self):
+        # portable-only: a missing demucs package is not treated as another engine being usable
         import unittest.mock as mock
-        with mock.patch.object(core, "_scan_uvr_roots", return_value=[]), \
-             mock.patch.object(core, "_dir_has_any", return_value=False):
-            res = core.detect_engine()
-            self.assertNotEqual(res, core.ENGINE_UVR5)
-
-    def test_discovery_finds_appdata_programs_root(self):
-        # On this box the UVR5 GUI ships at AppData\Local\Programs<name> with weights present.
-        import unittest.mock as mock
-        home = os.environ.get("HOME") or (os.environ.get("USERPROFILE") or "")
-        prog_apps = os.path.join(_abs(home), "AppData", "Local", "Programs")
-        if not os.path.isdir(prog_apps):
-            self.skipTest(r"no AppData\Local\Programs to scan")
-        with mock.patch.dict(os.environ, clear=False):
-            roots = core._scan_uvr_roots()
-            # explicit env override (if any) is always surfaced; otherwise the bounded walk
-            # of AppData\Local\Programs should surface the UVR5 GUI dir when weights are present
-            if not os.environ.get("AUTOCV_UVR_ROOT"):
-                expected = os.path.join(prog_apps, "Ultimate Vocal Remover")
-                self.assertIn(expected, roots)
-                self.assertTrue(any(
-                    os.path.isfile(os.path.join(_abs(r), core.DEMUCS_REPO_SUBDIR,
-                                                core.DEMUCS_WEIGHT_FILE)) for r in roots))
+        with mock.patch.object(core, "_dir_has_any", return_value=False) as m:
+            self.assertIsNone(core.detect_engine())
+            args = m.call_args[0][1]
+            self.assertEqual(args, ("demucs",))

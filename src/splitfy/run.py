@@ -14,7 +14,7 @@ Heavy/networked steps are delegated to core/provision; this module's own logic -
 gathering/dedup, output naming, stage command building, per-item status, dry-run preview, and CLI
 wiring -- is pure or unit-testable without GPU/network.
 
-Environment knobs (see bootstrap.py): AUTOCV_SCOPE, AUTOCV_UVR_ROOT.
+Environment knobs (see bootstrap.py): AUTOCV_SCOPE.
 """
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ from .normalize import normalize_inputs_full, extract_watch_id, Input
 from .core import (
     AUDIO_FORMATS, DEFAULT_OUTPUT_FORMAT, FORMAT_WAV,
     build_stem_encode_cmd,
-    ENGINE_UVR5, ENGINE_HTDEMUCS,
+    ENGINE_HTDEMUCS,
     RunResult, _abs, PLATFORM_WINDOWS, run as _run, sanitize_filename,
     tool_source,
 )
@@ -198,13 +198,21 @@ def gather_inputs(args) -> List[Input]:
     return normalize_inputs_full(sources)
 
 
-def resolve_engine(args, scope_dir: str, uvr_root: str) -> Optional[str]:
-    """Pick a usable engine. `args.engine` overrides auto-selection; returns None if none."""
+def resolve_engine(args, scope_dir: str) -> Optional[str]:
+    """Pick a usable engine. `args.engine` overrides auto-selection; returns None if none.
+
+    Portable-only: there is exactly one engine (the demucs PyPI CLI). Auto resolves to
+    ``ENGINE_HTDEMUCS`` when the package is available and ``None`` otherwise; an explicit choice
+    must name that same engine -- any other value never runs, so a stale/unknown selection degrades
+    to None rather than executing."""
     from .core import detect_engine as cde
     chosen = getattr(args, "engine", "auto")
-    if chosen != "auto" and chosen in (ENGINE_UVR5, ENGINE_HTDEMUCS):
-        return chosen if cde(scope_dir=scope_dir, uvr_root=uvr_root) == chosen else None
-    return cde(scope_dir=scope_dir, uvr_root=uvr_root)
+    if chosen == "auto":
+        return cde(scope_dir=scope_dir)
+    # only the demucs CLI engine exists; an explicit choice must name it AND be available
+    if chosen == ENGINE_HTDEMUCS:
+        return ENGINE_HTDEMUCS if cde(scope_dir=scope_dir) else None
+    return None
 
 
 def make_workdir() -> str:
@@ -255,14 +263,13 @@ def _resolve_run_env(args) -> tuple:
     None and ``python run.py`` behaves identically to before.
     """
     scope = getattr(args, "scope", None) or os.environ.get("AUTOCV_SCOPE") or os.getcwd()
-    uvr_root = os.environ.get("AUTOCV_UVR_ROOT") or ""
-    engine = resolve_engine(args, scope, uvr_root)
+
+    engine = resolve_engine(args, scope)
     # reuse-first: if a prior run recorded a portable ffmpeg path that still exists on disk,
     # prefer it here so we skip the broader PATH/app scan (resolve_recorded_tools returns {} when
     # nothing usable is recorded -> find_ffmpeg(scope) runs unchanged).
     ffmpeg_dir = resolve_recorded_tools(scope).get("ffmpeg") or find_ffmpeg(scope)
-    # uvr_root is returned (not just used locally) so process_one can pass it straight to core.separate_stems
-    return scope, engine, ffmpeg_dir, uvr_root
+    return scope, engine, ffmpeg_dir
 
 
 def stem_output_paths(output_dir: str, watch_id: str, fmt: str,
@@ -331,7 +338,7 @@ def process_one(wid: str, args, progress=None, source_url: Optional[str] = None)
     audio_path = None
     stems: Dict[str, str] = {}
     try:
-        scope, engine, ffmpeg_dir, uvr_root = _resolve_run_env(args)
+        scope, engine, ffmpeg_dir = _resolve_run_env(args)
         if progress:
             progress(wid, "pending", 0, 0)
         ytdlp_exe = _find_ytdlp(scope)
@@ -345,7 +352,7 @@ def process_one(wid: str, args, progress=None, source_url: Optional[str] = None)
             raise RuntimeError("yt-dlp extract produced no audio file")
 
         res.status, res.stage = "separate", "separate"
-        stems = separate(audio_path, engine, workdir, args.threads or 0, uvr_root=uvr_root)
+        stems = separate(audio_path, workdir, args.threads or 0)
         drums = stems.get("drums")
         if not drums:
             raise RuntimeError("no 'drums' stem produced by separation")
@@ -413,7 +420,7 @@ def run_pipeline(inputs: List[Input], args, progress=None) -> List[ItemResult]:
     time and save/resume incrementally. `progress(wid, stage, idx, total)` is called before
     each heavy step (optional hook)."""
     scope = os.environ.get("AUTOCV_SCOPE") or os.getcwd()
-    engine = resolve_engine(args, scope, os.environ.get("AUTOCV_UVR_ROOT") or "")
+    engine = resolve_engine(args, scope)
     print("splitfy: %d input(s), engine=%s" % (len(inputs), engine or "n/a"))
 
     results = []
@@ -426,9 +433,10 @@ def run_pipeline(inputs: List[Input], args, progress=None) -> List[ItemResult]:
     return results
 
 
-def separate(audio_path, engine, workdir, threads, uvr_root=""):
+def separate(audio_path, workdir, threads=0):
+    # portable-only: exactly one demucs engine (htdemucs) via the official CLI; see core.separate_stems.
     from .core import separate_stems as ss
-    return ss(audio=audio_path, engine=engine, workdir=workdir, threads=threads or 0, uvr_root=uvr_root)
+    return ss(audio=audio_path, workdir=workdir, threads=threads)
 
 
 def ffmpeg_exe_for(ffmpeg_dir: str) -> str:
@@ -588,7 +596,7 @@ def main(argv=None) -> int:
     ytdlp_path = _find_ytdlp(scope_dir)
     ffmpeg_dir = find_ffmpeg(scope_dir)
     describe_tools(ytdlp_path, ffmpeg_dir)
-    engine = resolve_engine(args, scope_dir, os.environ.get("AUTOCV_UVR_ROOT") or "")
+    engine = resolve_engine(args, scope_dir)
     _log.step("engine=%s" % (engine or "none available"))
 
     # drive the queue one item at a time: mark done + save after each (resumable)

@@ -34,26 +34,6 @@ class HtdemucsBuilderTests(unittest.TestCase):
         self.assertNotIn("-j", cmd)
 
 
-class Uvr5BuilderTests(unittest.TestCase):
-    def _cmd(self, repo=""):
-        return c.build_demucs_four_stems_cmd("python", "song.wav", "/w", repo=repo, threads=3)
-
-    def test_repo_flag_included_when_given(self):
-        cmd = self._cmd(repo="/models/Demucs_Models/v3_v4_repo")
-        idx = cmd.index("--repo")
-        self.assertEqual(cmd[idx + 1], "/models/Demucs_Models/v3_v4_repo")
-
-    def test_no_repo_flag_when_empty(self):
-        cmd = self._cmd(repo="")
-        self.assertNotIn("--repo", cmd)
-
-    def test_four_stems_and_output_present(self):
-        cmd = self._cmd()
-        self.assertIn("--four-stems", cmd)
-        self.assertIn("song.wav", cmd)
-        self.assertEqual(cmd[cmd.index("-o") + 1], "/w")
-
-
 class LocateStemsTests(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.mkdtemp()
@@ -98,7 +78,7 @@ class HtdemucsRunnerTests(unittest.TestCase):
              mock.patch("splitfy.core.find_python", return_value="python"), \
              mock.patch.object(c, "_locate_stems", return_value=fake), \
              mock.patch.object(c, "run") as run_mock:
-            c.separate_stems("song.wav", engine=c.ENGINE_HTDEMUCS, uvr_root="")
+            c.separate_stems("song.wav", engine=c.ENGINE_HTDEMUCS)
         # module is `demucs`, subcommand `separate` -- NOT the removed htdemucs four-stems entry point
         self.assertEqual(run_mock.call_args.args[0][1:4], ["-m", "demucs", "separate"])
         idx = run_mock.call_args.args[0].index("-n")
@@ -111,24 +91,27 @@ class HtdemucsRunnerTests(unittest.TestCase):
         with self.assertRaises(RuntimeError) as ctx, \
              mock.patch("splitfy.core._dir_has_any", return_value=False), \
              mock.patch("splitfy.core.find_python", return_value="python"):
-            c.separate_stems("song.wav", engine=c.ENGINE_HTDEMUCS, uvr_root="")
+            c.separate_stems("song.wav", engine=c.ENGINE_HTDEMUCS)
         self.assertIn("demucs package is not installed", str(ctx.exception))
 
 
 class SeparateStemsFailureTests(unittest.TestCase):
-    def test_unknown_engine_raises_valueerror_before_any_run(self):
-        # real env: a python interpreter exists; bogus engine hits the else branch
-        with self.assertRaises(ValueError):
-            c.separate_stems("song.wav", engine="bogus")
+    """Portable-only failure paths: always the demucs PyPI CLI, no engine dispatch."""
 
     def test_no_python_raises_runtimeerror(self):
         import unittest.mock as m
-        with m.patch("splitfy.core.find_python", return_value=None), \
-             m.patch("splitfy.core._dir_has_any", return_value=True):
+        with m.patch("splitfy.core.find_python", return_value=None),              m.patch("splitfy.core._dir_has_any", return_value=True):
             with self.assertRaises(RuntimeError) as ctx:
-                c.separate_stems("song.wav", engine=c.ENGINE_UVR5, uvr_root="/x")
+                c.separate_stems("song.wav")
         self.assertIn("no python interpreter", str(ctx.exception))
 
+    def test_missing_package_raises_runtimeerror(self):
+        # availability gate fails first (mocked no demucs dir) -> RuntimeError names the package
+        import unittest.mock as m
+        with m.patch("splitfy.core._dir_has_any", return_value=False),              m.patch("splitfy.core.find_python", return_value="python"):
+            with self.assertRaises(RuntimeError) as ctx:
+                c.separate_stems("song.wav")
+        self.assertIn("demucs package is not installed", str(ctx.exception))
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

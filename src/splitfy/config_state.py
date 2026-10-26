@@ -9,10 +9,9 @@ every launch -- and report which tool came from an existing install vs. freshly 
       "version": 1,
       "tools": {
         "ffmpeg": {"paths": ["/abs/dir-with-both"], "preferred": true},
-        "yt-dlp": {"paths": ["/abs/yt-dlp.exe"]},
-        "uvr_root": "/abs/UVR5-install"
+        "yt-dlp": {"paths": ["/abs/yt-dlp.exe"]}
       },
-      "overrides": {...}   # user-specified roots / flags (e.g. AUTOCV_UVR_ROOT)
+      "overrides": {...}   # user-specified tool flags and override keys
     }
 
 A missing or invalid file -> empty :class:`ConfigStore` (no crash); callers treat that as
@@ -30,7 +29,7 @@ def _abs(path: str) -> str:
 
 
 DEFAULT_VERSION = 1
-_TOOLS = ("ffmpeg", "yt-dlp", "uvr_root")
+_TOOLS = ("ffmpeg", "yt-dlp")
 
 
 def default_config_path(scope_dir: str = "") -> str:
@@ -113,7 +112,7 @@ class ConfigStore:
         return entry
 
     def set_override(self, key: str, value) -> None:
-        """Record a user override (e.g. the UVR5 root / ffmpeg location they chose)."""
+        """Record a user-chosen override key/value for this host."""
         self._data.setdefault("overrides", {})[key] = value
 
     # -- persistence ---------------------------------------------------------- #
@@ -134,7 +133,7 @@ if __name__ == "__main__":
     print("config path:", store.path)
     # portable demo values only — no hard-coded username/device paths
     store.record("ffmpeg", ["<user>/.portable/win64/ffmpeg"], preferred=True)
-    store.set_override("AUTOCV_UVR_ROOT", "<user>%AppData%\\Local\\Programs\\Ultimate Vocal Remover")
+    store.set_override("ffmpeg.path", "<user>/.portable/win64/ffmpeg")
     store.save()
     reloaded = ConfigStore.from_path(store.path)
     assert not reloaded.empty and reloaded.get_paths("ffmpeg") == ["<user>/.portable/win64/ffmpeg"]

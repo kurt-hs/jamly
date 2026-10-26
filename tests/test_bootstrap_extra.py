@@ -52,13 +52,13 @@ class ScanKnownRootsTests(unittest.TestCase):
     def test_ffmpeg_needs_both(self):
         only = tempfile.mkdtemp()
         _bin_dir_with_ffmpeg_only(only)
-        r = b._scan_known_roots(additional_dirs=[only], uvr_scan=False)
+        r = b._scan_known_roots(additional_dirs=[only])
         self.assertNotIn(only, r["ffmpeg"])  # ffmpeg-only dir is never reported
 
     def test_both_binaries_are_reported(self):
         good = tempfile.mkdtemp()
         _bin_dir_with_both(good)
-        r = b._scan_known_roots(additional_dirs=[good], uvr_scan=False)
+        r = b._scan_known_roots(additional_dirs=[good])
         self.assertIn(good, r["ffmpeg"])
 
     def test_first_good_additional_dir_wins_for_ffmpeg(self):
@@ -66,7 +66,7 @@ class ScanKnownRootsTests(unittest.TestCase):
         _bin_dir_with_both(good)
         partial = tempfile.mkdtemp()
         _bin_dir_with_ffmpeg_only(partial)  # only ffmpeg -> not reusable
-        r = b._scan_known_roots(additional_dirs=[partial, good], uvr_scan=False)  # isolate from real-box installs
+        r = b._scan_known_roots(additional_dirs=[partial, good])  # isolate from real-box installs
         self.assertIn(good, r["ffmpeg"])          # a dir shipping BOTH binaries is reported as reusable
         self.assertNotIn(partial, r["ffmpeg"])    # a dir with only ffmpeg is NOT
 
@@ -75,7 +75,7 @@ class ScanKnownRootsTests(unittest.TestCase):
         port = os.path.join(scope, ".portable", "yt-dlp")
         exe = _yt_dlp_exe_path(port)
         _touch(exe)
-        r = b._scan_known_roots(scope_dir=scope, uvr_scan=False)
+        r = b._scan_known_roots(scope_dir=scope)
         # the standalone yt-dlp shipped under scope/.portable/yt-dlp is reported as a target
         self.assertTrue(any("yt-dlp" in os.path.basename(x) for x in r["yt-dlp"]))
 
@@ -85,8 +85,10 @@ class ScanKnownRootsTests(unittest.TestCase):
         os.environ["APPDATA"] = appdata
         try:
             _touch(os.path.join(appdata, "yt-dlp_win_x86", "yt-dlp.exe"))
-            r = b._scan_known_roots(uvr_scan=False)  # isolate the standalone probe from real-box installs
-            self.assertTrue(any("yt-dlp" in os.path.basename(p) for p in r["yt-dlp"]))
+            # the AppData standalone yt-dlp probe must find it under the mocked APPDATA
+            r = b._scan_known_roots(additional_dirs=[])
+            self.assertTrue(any("yt-dlp" in os.path.basename(x) for x in r["yt-dlp"]))   # isolate the standalone probe from real-box installs
+
         finally:
             os.environ.clear()
             os.environ.update(old)
@@ -96,7 +98,7 @@ class ScanKnownRootsTests(unittest.TestCase):
         _bin_dir_with_both(lp)  # a curated app dir shipping BOTH binaries -> reusable
         with mock.patch.object(b, "_curated_app_roots", return_value=[lp]), \
              mock.patch.object(b, "which", return_value=None):   # isolate PATH-first probe too
-            r = b._scan_known_roots(uvr_scan=False)  # isolate the curated probe from real-box installs
+            r = b._scan_known_roots(additional_dirs=[])   # isolate the curated probe from real-box installs
         self.assertEqual(r["ffmpeg"], [lp])  # a dir shipping BOTH binaries is reported as reusable
         self.assertTrue(os.path.isdir(lp))
 
@@ -105,24 +107,15 @@ class ScanKnownRootsTests(unittest.TestCase):
         _bin_dir_with_ffmpeg_only(lp)  # ffmpeg only -> not reusable for our yt-dlp build
         with mock.patch.object(b, "_curated_app_roots", return_value=[lp]), \
              mock.patch.object(b, "which", return_value=None):   # isolate PATH-first probe too
-            r = b._scan_known_roots(uvr_scan=False)  # isolate the curated probe from real-box installs
+            r = b._scan_known_roots(additional_dirs=[])   # isolate the curated probe from real-box installs
         self.assertEqual(r["ffmpeg"], [])  # a dir with only ffmpeg is NOT reported as reusable
-
-    def test_uvr_root_discovered(self):
-        with tempfile.TemporaryDirectory() as root:
-            repo = os.path.join(root, "models", "Demucs_Models", "v3_v4_repo")
-            for n in ("htdemucs.yaml", "955717e8-8726e21a.th"):
-                _touch(os.path.join(repo, n))
-            with mock.patch.object(b, "_scan_uvr_roots", return_value=[root]):
-                r = b._scan_known_roots(uvr_scan=True)
-            self.assertIn(root, r["uvr_root"])
 
     def test_result_keys(self):
         with tempfile.TemporaryDirectory() as scope:
             port = os.path.join(scope, ".portable", "yt-dlp")
             _touch(_yt_dlp_exe_path(port))
-            r = b._scan_known_roots(scope_dir=scope, uvr_scan=False)
-            self.assertEqual(set(r.keys()), {"ffmpeg", "yt-dlp", "uvr_root"})
+            r = b._scan_known_roots(scope_dir=scope)
+            self.assertEqual(set(r.keys()), {"ffmpeg", "yt-dlp"})
 
 
 class FindKnownRootsCacheTests(unittest.TestCase):
@@ -136,11 +129,10 @@ class FindKnownRootsCacheTests(unittest.TestCase):
         return os.path.join(scope, "splitfy.json")
 
     def setUp(self):
-        self._uvr = mock.patch.object(b, "_scan_uvr_roots", return_value=[])
-        self._uvr.start()
+        pass
 
     def tearDown(self):
-        self._uvr.stop()
+        pass
 
     def test_first_call_scans_then_caches(self):
         with tempfile.TemporaryDirectory() as scope:

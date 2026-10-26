@@ -228,30 +228,7 @@ def build_ytdlp_extract_cmd(
     return cmd
 
 
-def build_demucs_four_stems_cmd(
-    python_exe: str,
-    input_audio: str,
-    workdir: str,
-    repo: str,
-    weights_name: str = "955717e8-8726e21a",
-    device: Optional[str] = None,
-    threads: int = 0,
-) -> List[str]:
-    """audio-separator Demucs v4 four-stems (reuses UVR5's bundled `.th` weights).
 
-    Emits <workdir>/separated/<model>/<track>/{drums,bass,other,vocals}.wav.
-    `device=None` -> let audio-separator auto-detect; "cuda"/"directml" override.
-    """
-    cmd = [str(python_exe), "-m", "audio_separator.demucs.separate"]
-    cmd += ["--model", "htdemucs", "--name", str(weights_name)]
-    if repo:
-        cmd += ["--repo", str(repo)]
-    cmd += ["--four-stems", "--input", str(input_audio), "-o", str(workdir)]
-    if device is not None:
-        cmd += ["--device", str(device)]
-    if threads and threads > 0:
-        cmd += ["--threads", str(threads)]
-    return cmd
 
 
 # --------------------------------------------------------------------------- #
@@ -329,15 +306,12 @@ def ensure_output_dir(path: str) -> str:
 
 
 # --------------------------------------------------------------------------- #
-# separation engines (htdemucs ONNX vs UVR5 audio-separator) + four-stem runner
+# stem separation. Portable-only: there is a single path -- the torch-based `demucs` PyPI CLI
+# (`python -m demucs separate`). No UVR5/audio-separator reuse, no reused `.th` weights, and no
+# onnxruntime model detection.
 # --------------------------------------------------------------------------- #
 ENGINE_AUTO = "auto"
-ENGINE_UVR5 = "uvr5"      # audio-separator using the reused UVR5 `.th` weights
-ENGINE_HTDEMUCS = "htdemucs"  # four-source separation via the official `demucs` PyPI CLI (torch-based)
-
-# Demucs four-stem weight repo shipped inside the UVR5 GUI (audio-separator maps these .th files).
-DEMUCS_REPO_SUBDIR = os.path.join("models", "Demucs_Models", "v3_v4_repo")
-DEMUCS_WEIGHT_FILE = "955717e8-8726e21a.th"  # HTDemucs weight file inside that repo
+ENGINE_HTDEMUCS = "htdemucs"  # the only separation engine; four-source via the official `demucs` CLI
 
 
 def _site_packages() -> str:
@@ -352,115 +326,18 @@ def _site_packages() -> str:
     return ""
 
 
-def _env_roots() -> list:
-    """Return explicit install-root overrides from env, if any."""
-    out = []
-    for key in ("AUTOCV_UVR_ROOT", "UVR5_ROOT", "UVR5_PATH"):
-        val = os.environ.get(key)
-        if val and os.path.isdir(os.path.expanduser(val)):
-            out.append(os.path.abspath(os.path.expanduser(val)))
-    return out
 
 
-def _scan_uvr_roots() -> list:
-    """Best-effort discovery of UVR5 / audio-separator install roots (no heavy imports).
 
-    A usable local engine is signalled by the Demucs ``.th`` weight repo shipped inside the
-    UVR5 GUI, or an importable ``audio_separator`` package in Python site-packages. Returns a
-    de-duplicated, ordered list of candidate directories. Pure file checks at bounded depth.
+def detect_engine(scope_dir: str = "") -> Optional[str]:
+    """Availability check for the single separation engine (no heavy imports).
+
+    Returns ``ENGINE_HTDEMUCS`` when the torch-based `demucs` PyPI CLI is importable from site-packages,
+    else ``None``. Portable-only: there is no local UVR5/audio-separator reuse and no onnxruntime model
+    detection -- a missing package means separation is not possible rather than falling back to another engine.
     """
-    markers = DEMUCS_REPO_SUBDIR
-    weight_file = os.path.join(markers, DEMUCS_WEIGHT_FILE)
-    found = []  # unique abspaths
-    seen = set()
-
-    def _add(path):
-        ap = os.path.abspath(os.path.expanduser(path))
-        if not os.path.isdir(ap) or ap in seen:
-            return
-        seen.add(ap)
-        found.append(ap)
-
-    uvr_names = ("Ultimate Vocal Remover", "Ultimate-Vocal-Remover")
-    # Portability: both lookups use os.environ. os.Getenv exists only on POSIX, so calling it here
-    # raises AttributeError under Windows -- and the HOME short-circuit below can hide that when HOME
-    # is set (interactive shells) but not under a debugger launch that omits it.
-    home = os.environ.get("HOME", "") or os.path.join(os.environ.get("USERPROFILE", ""), "")
-
-    def _has_weights(root):
-        return bool(
-            os.path.join(_abs(root), markers) and
-            os.path.isfile(os.path.join(_abs(root), weight_file))
-        )
-
-    # 1. explicit env overrides (highest priority)
-    for r in _env_roots():
-        _add(r)
-
-    # 2. the UVR5 app name as a direct marker under common install roots
-    scan_dirs = []
-    if os.path.isdir(_abs(home)):
-        for d in (
-            os.path.join(_abs(home), "AppData", "Local"),
-            os.path.join(_abs(home), "AppData", "Roaming"),
-            os.environ.get("ProgramFiles", ""),
-            os.environ.get("ProgramFiles(x86)", ""),
-        ):
-            if os.path.isdir(d):
-                scan_dirs.append(d)
-    prog_apps = os.path.join(_abs(home), "AppData", "Local", "Programs")
-
-    # 3. AppData\Local\Programs subtree (where UVR5 GUI typically installs)
-    for name in uvr_names:
-        _add(os.path.join(prog_apps, name))
-
-    # 4. bounded walk of scan_dirs (depth <= 2) for the weight repo or package marker
-    def _bounded(root):
-        try:
-            for dp, dn, fn in os.walk(os.path.join(_abs(root)), topdown=True):
-                if len(dp.split(os.sep)) > 3:  # depth guard
-                    continue
-                if _has_weights(dp) or any(n in dn for n in uvr_names):
-                    _add(dp)
-        except OSError:
-            pass
-    for d in scan_dirs + ([prog_apps] if os.path.isdir(prog_apps) else []):
-        try:
-            _bounded(d)
-        except OSError:
-            pass
-    return found
-
-
-def detect_engine(scope_dir: str = "", uvr_root: str = "") -> Optional[str]:
-    """Pure availability check for a usable four-stem engine (no heavy imports).
-
-    Returns "htdemucs", "uvr5", or None. `scope_dir`/`uvr_root` let callers point at an
-    already-provisioned onnx model dir and/or the UVR5 install that ships `.th` weights.
-    """
-    # reusable Demucs weights: explicit root, env roots, or discovered install roots
-    weight_file = os.path.join(DEMUCS_REPO_SUBDIR, DEMUCS_WEIGHT_FILE)
-    if uvr_root:
-        uvr_roots = [os.path.abspath(os.path.expanduser(uvr_root))]
-    else:
-        uvr_roots = _scan_uvr_roots() or []
-
-    weights_present = any(
-        os.path.isfile(os.path.join(_abs(b), weight_file)) for b in uvr_roots
-    )
-    sep_pkg = _dir_has_any(_site_packages(), ("audio_separator",))
-
-    # uvr5 / audio-separator path: reusable Demucs weights present, or the importable package exists
-    if weights_present or sep_pkg:
-        return ENGINE_UVR5
-
-    # htdemucs ONNX path: package installed AND a model file provisioned somewhere
-    if _dir_has_any(_site_packages(), ("htdemucs", "onnxruntime")):
-        model_dir = scope_dir if scope_dir else ""
-        for root, _dirs, files in os.walk(model_dir):
-            for f in files:
-                if f.endswith(".onnx"):
-                    return ENGINE_HTDEMUCS
+    if _dir_has_any(_site_packages(), ("demucs",)):
+        return ENGINE_HTDEMUCS
     return None
 
 
@@ -521,12 +398,13 @@ def separate_stems(
     workdir: str = "",
     threads: int = 0,
     python_exe: Optional[str] = None,
-    uvr_root: str = "",
 ) -> dict:
     """Separate `audio` into four stems; return {track: abs_path} for the WAVs found.
 
-    Raises RuntimeError (with last stderr lines) if separation fails or no usable engine
-    is available. Heavy imports are lazy so importing this module never pulls torch.
+    Portable-only: always runs the torch-based `demucs` PyPI CLI (`python -m demucs separate`). No UVR5/
+    audio-separator reuse and no local `.th` weights -- separation fetches its own weights on demand. Raises
+    RuntimeError (with last stderr lines) if separation fails or the demucs package is not installed. Heavy
+    imports are lazy so importing this module never pulls torch.
     """
     py = python_exe or find_python()
     if not py:
@@ -534,30 +412,16 @@ def separate_stems(
     workdir = _abs(workdir) if workdir else os.path.join(_abs(os.getcwd()), "stems", _sanitize(audio))
     os.makedirs(workdir, exist_ok=True)
 
-    if engine in (ENGINE_AUTO, ENGINE_HTDEMUCS):
-        # The maintained Demucs v4 CLI lives in the `demucs` PyPI package (torch-based); detect it by
-        # its site-packages directory rather than a now-removed onnxruntime variant. Lightweight and
-        # import-free so importing this module never pulls torch.
-        if not (_dir_has_any(_site_packages(), ("demucs",))):
-            raise RuntimeError("engine 'htdemucs' selected but the demucs package is not installed")
-        cmd = build_htdemucs_four_stems_cmd(py, audio, workdir, threads=threads)
-        res = run(cmd)
-        if not res.ok:
-            _print_tail(res.stderr)
-            raise RuntimeError("demucs four-stem separation failed (exit %d): %s" % (res.returncode, " ".join(cmd[:4])))
+    # The maintained Demucs v4 CLI lives in the `demucs` PyPI package (torch-based); detect it by its
+    # site-packages directory. Lightweight and import-free so importing this module never pulls torch.
+    if not (_dir_has_any(_site_packages(), ("demucs",))):
+        raise RuntimeError("the demucs package is not installed; run `pip install demucs` to enable four-stem separation")
 
-    elif engine in (ENGINE_AUTO, ENGINE_UVR5):
-        if not (_dir_has_any(_site_packages(), ("audio_separator",))):
-            raise RuntimeError("engine 'uvr5' selected but the audio-separator package is not installed")
-        r = os.path.abspath(os.path.expanduser(uvr_root)) if uvr_root else ""
-        repo = os.path.join(r, "models", "Demucs_Models", "v3_v4_repo") if r else ""
-        cmd = build_demucs_four_stems_cmd(py, audio, workdir, repo=repo, threads=threads)
-        res = run(cmd)
-        if not res.ok:
-            _print_tail(res.stderr)
-            raise RuntimeError("audio-separator four-stems failed (exit %d): %s" % (res.returncode, " ".join(cmd[:4])))
-    else:
-        raise ValueError("unknown engine: %r" % (engine,))
+    cmd = build_htdemucs_four_stems_cmd(py, audio, workdir, threads=threads)
+    res = run(cmd)
+    if not res.ok:
+        _print_tail(res.stderr)
+        raise RuntimeError("demucs four-stem separation failed (exit %d): %s" % (res.returncode, " ".join(cmd[:4])))
 
     stems = _locate_stems(workdir)
     if len(stems) < 4:
@@ -569,8 +433,3 @@ def _sanitize(audio: str) -> str:
     # reuse core's own path-safety helper (no cross-module import needed)
     return sanitize_filename(audio or "audio")
 
-
-# UVR5 install root default is resolved by the caller; expose a helper to build its repo path.
-def uvr_repo_path(uvr_root: str = "") -> str:
-    root = os.path.abspath(os.path.expanduser(uvr_root)) if uvr_root else ""
-    return os.path.join(root, "models", "Demucs_Models", "v3_v4_repo") if root else ""
