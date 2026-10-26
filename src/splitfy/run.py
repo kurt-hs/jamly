@@ -208,16 +208,11 @@ def make_workdir() -> str:
 def locate_extracted(workdir: str) -> Optional[str]:
     """Return the extracted audio file path from yt-dlp's output template.
 
-    Prefers an explicitly-named ``audio.*`` extract (legacy templates); otherwise falls back to
-    the single regular file present -- which is enough because extraction runs before any stem
-    files exist, so workdir holds exactly one file at this point. Note: only a full path is passed
-    to os.path.isfile; passing the bare name would test the wrong thing and always return None."""
-    for n in sorted(os.listdir(workdir)):
-        if (n.startswith("audio") and (n.endswith((".wav", ".flac", ".alac")) or "." in n)) or os.path.isfile(os.path.join(workdir, n)):
-            return _abs(os.path.join(workdir, n))
-    files = [os.path.join(workdir, f) for f in os.listdir(workdir)
-             if os.path.isfile(os.path.join(workdir, f))]
-    return files[0] if len(files) == 1 else None
+    Extraction runs before any stem files exist, so ``workdir`` holds exactly one file -- the
+    extracted audio. Return it (sorted for determinism); ``None`` when there is no regular file.
+    No format preference: yt-dlp chose the container and we take whatever single file it wrote."""
+    files = sorted(f for f in os.listdir(workdir) if os.path.isfile(os.path.join(workdir, f)))
+    return _abs(os.path.join(workdir, files[0])) if files else None
 
 
 # --------------------------------------------------------------------------- #

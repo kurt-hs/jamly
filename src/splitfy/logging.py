@@ -214,22 +214,3 @@ class Logger:
             sys.stdout.write("\r" + " " * 40 + "\r")
             sys.stdout.flush()
         return done
-
-    def stream(self, label: str, read_lines, on_line=None) -> None:
-        """Stream subprocess output line-by-line under a spinner for live download progress.
-
-        ``read_lines`` yields decoded text lines as they arrive; ``on_line`` (optional) is called with
-        each raw line so callers can react (e.g. highlight a `[download] 95%` bar). Never raises: any
-        read error just stops the stream and returns.
-        """
-        if self.quiet or not callable(read_lines):
-            return
-        try:
-            for line in read_lines():
-                if on_line:
-                    on_line(line)
-                # Route through the injected stream (captured/redirected when set) so live progress
-                # is overridable and testable, not hardcoded to sys.stdout.
-                self._write(self._c(line.rstrip("\n"), "blue"))
-        except Exception as exc:  # noqa: BLE001 - a broken pipe must not crash the run
-            self.warn("stream interrupted (%s)" % exc)
