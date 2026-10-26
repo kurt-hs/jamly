@@ -204,15 +204,21 @@ def build_ytdlp_extract_cmd(
     url: str,
     output_template: str = "%(title)s.%(ext)s",
     ffmpeg_dir: str = "",
+    suppress_subs: bool = True,
 ) -> List[str]:
     """yt-dlp best-audio extraction; container decided natively by the stream.
 
-    NOTE: this box ships a custom yt-dlp build that rejects `--no-subs`, so it is NOT passed.
-    `--ffmpeg-location` must point at a dir containing BOTH ffmpeg.exe and ffprobe.exe, else the
-    mux step is intermittent (see DESIGN.md section 7).
+    ``suppress_subs`` is an explicit knob (not a hidden per-host assumption): when True the tool
+    asks yt-dlp to skip subtitle downloads for this lossless-audio pipeline. It defaults True so
+    every host behaves identically; pass False only if your specific build rejects the flag -- see
+    DESIGN.md section 7.
     """
     cmd = [str(ytdlp_exe), str(url)]
+    if suppress_subs:
+        cmd += ["--no-subs"]
     if ffmpeg_dir:
+        # a dir with only ffmpeg.exe works for some yt-dlp builds but not this one; pass a dir
+        # that ships BOTH ffmpeg.exe and ffprobe.exe (see DESIGN.md section 7).
         cmd += ["--extract-audio", "--audio-format", "best", "--audio-quality", "0",
                 "--ffmpeg-location", str(ffmpeg_dir)]
     else:

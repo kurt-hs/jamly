@@ -252,5 +252,6 @@ class IntegrityTests(unittest.TestCase):
             # expected asset name is platform-derived (not hard-coded), matching provision()'s own
             # build_asset_name call for this box's os/arch.
             osf = b._os_family()
-            exp_arch = {"win": p._win_arch(), "linux": p._linux_arch()}.get(osf)
+            # expected asset name matches provision()'s own _ffmpeg_arch + build_asset_name call
+            exp_arch = p._ffmpeg_arch()
             self.assertEqual(recorded["asset"], p.build_asset_name(osf, exp_arch))

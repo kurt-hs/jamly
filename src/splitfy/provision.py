@@ -18,6 +18,7 @@ import platform
 import sys
 import tempfile
 import zipfile
+from typing import Optional
 
 from .core import (_abs, PLATFORM_WINDOWS, _os_family)  # noqa: E402
 from splitfy.config_state import ConfigStore   # noqa: E402
@@ -46,6 +47,19 @@ def _linux_arch() -> str:
     if any(a in machine for a in ("arm64", "aarch64")):
         return "linux-arm"
     return "linux"
+
+
+def _ffmpeg_arch() -> Optional[str]:
+    """BtbN static-build arch for this platform, or None when no ffmpeg build ships.
+
+    Only Windows and Linux (x86_64 / arm64) are published; macOS gets ``None`` so callers do not
+    fabricate an asset URL for a platform with nothing upstream to download."""
+    osf = _os_family()
+    if osf == "win":
+        return _win_arch()
+    if osf in ("linux", "linux-arm"):
+        return _linux_arch()
+    return None
 
 
 def build_asset_name(osf: str, arch: str) -> str:
@@ -317,9 +331,9 @@ def provision(scope_dir: str = "", existing_dirs=None) -> dict:
              "sources": {tool: 'reused'|'downloaded'|'missing'}}.
     """
     osf = _os_family()
-    # macOS/unknown platforms share the generic tar.xz asset name, so only win/linux need an
-    # explicit arch; fall back to None instead of raising KeyError when osf is not in {"win", "linux"}.
-    arch = {"win": _win_arch(), "linux": _linux_arch()}[osf] if osf in ("win", "linux") else None
+    # BtbN publishes ffmpeg only for Windows and Linux (x86_64 / arm64); macOS gets None so we do
+    # not fabricate an asset URL. Reuse of an already-provisioned build is checked first below.
+    arch = _ffmpeg_arch()
     dest_dir = os.path.join(_abs(os.path.expanduser(scope_dir)) if scope_dir else _abs(os.getcwd()),
                             ".portable", osf, "ffmpeg")
     existing_dirs = list(existing_dirs) if existing_dirs else []
@@ -340,6 +354,13 @@ def provision(scope_dir: str = "", existing_dirs=None) -> dict:
 
     for tool in ("ffmpeg", "ffprobe"):
         sources.setdefault(tool, "downloaded")
+
+    if not arch:
+        # no ffmpeg static build ships for this platform -> cannot self-provision; report clearly
+        for tool in ("ffmpeg", "ffprobe"):
+            sources[tool] = "unsupported"
+        return {"provisioned": False, "dir": None, "downloaded": False,
+                "sources": dict(sources)}
 
     name = build_asset_name(osf, arch)
     url = base_url() + name

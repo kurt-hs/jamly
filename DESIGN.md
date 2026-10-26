@@ -122,6 +122,11 @@ raw WAV is verbatim (copy, no encoder).
 | audio-separator | Headless package driving UVR5's Demucs/MDXC models. Recognizes UVR5's bundled `.th` weights — reuse the installed HTDemucs weight directly, no canonical `.pt` re-download. |
 | ffmpeg / ffprobe | Bundled at `%USERPROFILE%\AppData\Local\Programs\Ultimate Vocal Remover\ffmpeg.exe`. No `ffprobe.exe` reachable anywhere; point yt-dlp's `--ffmpeg-location` at a dir with BOTH, or verify exit code + output path on intermittent ffmpeg-only success. |
 
+> The shared extractor now defaults to injecting `--no-subs` (portable correct). This box's custom
+> yt-dlp rejects it, so local CLI runs must set `AUTOCV_SUPPRESS_SUBS=0` (env escape-hatch; default
+> None keeps every other host identical). Provisioning ffmpeg for macOS is unsupported upstream —
+> no static build ships, so that platform falls back to PATH detection / system ffmpeg.
+
 ## Durable / portable scope (§10)
 
 A single folder that self-heals on any host: reuse what is installed, download & install the rest

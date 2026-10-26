@@ -135,6 +135,7 @@ def build_download_cmd(
     workdir: str,
     source_url: Optional[str] = None,
     ffmpeg_dir: str = "",
+    suppress_subs: Optional[bool] = None,
 ) -> List[str]:
     """Extract best audio into <workdir>/<watch_id>.<ext>; container decided by yt-dlp.
 
@@ -142,11 +143,17 @@ def build_download_cmd(
     have) to yt-dlp so any host it understands resolves -- not just YouTube. The watch-id prefix is
     kept for output filenames only, so every stem produced later stays traceable to one name.
     When ``source_url`` is None (e.g. a bare id was fed in), the bare id itself is used as yt-dlp's
-    URL argument -- matching the historical YouTube-only behaviour."""
+    URL argument -- matching the historical YouTube-only behaviour.
+
+    ``suppress_subs`` forwards to :func:`build_ytdlp_extract_cmd` so subtitle downloads are skipped
+    for this lossless-audio pipeline on every host; pass False only if a specific build rejects it.
+    None means "no host-specific override" -> the builder's portable default applies."""
     url = source_url if source_url else watch_id
     out = os.path.join(workdir, watch_id)
     from .core import build_ytdlp_extract_cmd as b
-    return b(ytdlp_exe, url, output_template=out, ffmpeg_dir=ffmpeg_dir)
+    # None => let the builder apply its portable default; an explicit value is forwarded verbatim.
+    return b(ytdlp_exe, url, output_template=out, ffmpeg_dir=ffmpeg_dir,
+             suppress_subs=(suppress_subs or True))
 
 
 def build_mix_cmd(ffmpeg_exe: str, bass: str, other: str, vocals: str, output: str) -> List[str]:
@@ -213,6 +220,19 @@ def locate_extracted(workdir: str) -> Optional[str]:
     No format preference: yt-dlp chose the container and we take whatever single file it wrote."""
     files = sorted(f for f in os.listdir(workdir) if os.path.isfile(os.path.join(workdir, f)))
     return _abs(os.path.join(workdir, files[0])) if files else None
+
+
+# --------------------------------------------------------------------------- #
+# per-host overrides (kept in env, never baked into shared code)
+# --------------------------------------------------------------------------- #
+def _resolve_suppress_subs() -> Optional[bool]:
+    """yt-dlp subtitle-suppression override for this host, or None to use the portable default.
+
+    Reads ``AUTOCV_SUPPRESS_SUBS`` ("0"/"1"). Returns None when unset so callers fall back to the
+    builder's portable default; a value is returned only when a specific build needs it. Host quirks
+    live in env, not shared code."""
+    val = os.environ.get("AUTOCV_SUPPRESS_SUBS")
+    return None if val is None else (val != "0")
 
 
 # --------------------------------------------------------------------------- #
@@ -307,8 +327,10 @@ def process_one(wid: str, args, progress=None, source_url: Optional[str] = None)
         if progress:
             progress(wid, "pending", 0, 0)
         ytdlp_exe = _find_ytdlp(scope)
+        # subtitle-suppression override for this host (env), else the portable default
         cmd = build_download_cmd(
-            ytdlp_exe, wid, workdir, source_url=source_url, ffmpeg_dir=ffmpeg_dir or "")
+            ytdlp_exe, wid, workdir, source_url=source_url, ffmpeg_dir=ffmpeg_dir or "",
+            suppress_subs=_resolve_suppress_subs())
         res.status, res.stage = "download", "download"
         audio_path = _stream_download(cmd).ok and locate_extracted(workdir)
         if not audio_path:

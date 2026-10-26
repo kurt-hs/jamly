@@ -24,18 +24,25 @@ class YtdlpCmdTests(unittest.TestCase):
         self.assertEqual(cmd[0], "yt-dlp.exe")
         self.assertIn("--extract-audio", cmd)
         self.assertEqual(cmd[-2:], ["-o", "%(title)s.%(ext)s"])
-        # --ffmpeg-location must be present (this box's custom build requires it)
+        # --ffmpeg-location must be present so the mux step has BOTH ffmpeg + ffprobe
         self.assertIn("C:\\f\\ffmpeg", cmd)
+        # portable default suppresses subtitle downloads on every host
+        self.assertIn("--no-subs", cmd)
 
     def test_without_ffmpeg_location(self):
         cmd = build_ytdlp_extract_cmd("yt-dlp.exe", "https://youtu.be/dQw4w9WgXcQ")
         self.assertTrue(cmd[0].endswith("yt-dlp.exe"))
         self.assertIn("--audio-format", cmd)
         self.assertNotIn("--ffmpeg-location", cmd)
+        # portable default suppresses subtitle downloads
+        self.assertIn("--no-subs", cmd)
 
-    def test_no_subs_never_injected(self):
-        # this box's yt-dlp rejects --no-subs; assert it is never added by the builder
+    def test_suppress_subs_default_and_override(self):
+        # default: skip subtitle downloads for this lossless-audio pipeline on every host
         cmd = build_ytdlp_extract_cmd("yt-dlp.exe", "https://youtu.be/dQw4w9WgXcQ")
+        self.assertIn("--no-subs", cmd)
+        # a specific build that rejects the flag -> opt out explicitly
+        cmd = build_ytdlp_extract_cmd("yt-dlp.exe", "https://youtu.be/dQw4w9WgXcQ", suppress_subs=False)
         self.assertNotIn("--no-subs", cmd)
 
 
