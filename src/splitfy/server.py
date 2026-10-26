@@ -67,6 +67,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--server-token", default=None,
                    help="Shared secret that gates POST /add (env: SPLITFY_SERVER_TOKEN); "
                         "required to bind off-loopback")
+    # shared with the CLI so --replace-existing means exactly the same thing on both entry points
+    p.add_argument("--replace-existing", action="store_true",
+                   help="Overwrite existing output files instead of skipping")
     return p
 
 

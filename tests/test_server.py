@@ -432,5 +432,19 @@ class S2WriteAuthTests(unittest.TestCase):
             _cleanup(srv, qpath, threads)
 
 
+class ServerArgParseTests(unittest.TestCase):
+    """The server must expose the same flags as the CLI, so shared process_one code never crashes
+    on an unexpected attribute. --replace-existing in particular is read unconditionally by
+    run.process_one's finally; a missing attr there would crash every item on the server."""
+
+    def test_server_parser_carries_replace_existing_by_default(self):
+        args = build_parser().parse_args([])
+        self.assertFalse(args.replace_existing)   # parity with the CLI default (wipe after each item)
+
+    def test_server_parser_honors_replace_existing_flag(self):
+        args = build_parser().parse_args(["--replace-existing"])
+        self.assertTrue(args.replace_existing)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
