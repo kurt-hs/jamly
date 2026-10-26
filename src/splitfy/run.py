@@ -69,18 +69,20 @@ def ensure_utf8_output(streams=None):
 
 
 def _stream_download(cmd: List[str]) -> 'RunResult':
-    """Run the yt-dlp extraction live so its ``[download]`` progress streams to the terminal.
+    """Stream the yt-dlp extraction live so its ``[download] X% ...`` progress shows in real time.
 
-    Returns the :class:`core.RunResult`. Any final ``[download] X% (a/b)`` telemetry is parsed into a
-    compact bar printed via the logger. Never raises -- callers inspect ``res.ok`` / the audio path."""
+    Output is written to the terminal (NOT captured -- RunResult.stdout/.stderr are empty, so
+    success is decided by returncode). A compact bar is drawn for each line carrying download
+    telemetry via ``on_line``. Never raises -- callers inspect ``res.ok`` / the audio path."""
     from .core import run as _run_streamed
-    res = _run_streamed(cmd, stream=True)
-    if not res.ok or not (res.stdout or "").strip():
-        raise RuntimeError("yt-dlp produced no output")
-    prog = Logger.parse_download_progress(res.stdout)
-    if prog and prog.get("pct"):
-        bar = Logger.render_bar(prog["pct"], prog.get("dl"), prog.get("total"))
-        _log.note(bar + "   (extracted to audio.<ext>)")
+
+    def _render_progress(line: str) -> None:
+        prog = Logger.parse_download_progress(line)
+        if prog and prog.get("pct"):
+            bar = Logger.render_bar(prog["pct"], prog.get("dl"), prog.get("total"))
+            _log.note(bar + "   (extracting audio)")
+
+    res = _run_streamed(cmd, stream=True, on_line=_render_progress)
     return res
 
 

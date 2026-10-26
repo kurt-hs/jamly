@@ -131,16 +131,16 @@ def run(args: List[str], check: bool = False, capture: bool = True,
         stream: bool = False, on_line=None) -> RunResult:
     """Run `args` as a list (no shell). Returns the completed process.
 
-    Default behaviour is unchanged. Two optional flags add friendly output for long steps:
-      * ``stream=True`` writes subprocess stdout/stderr live to the terminal so yt-dlp's own
-        ``[download] 95% ...`` progress shows in real time (output is still captured and returned).
-      * ``on_line(line)`` is called with each decoded line during streaming; callers can react
-        (e.g. render a download bar). Never raises -- tool-not-found and read errors are surfaced as
-        the process result so callers can inspect returncode and continue (e.g. across a queue).
+    Default behaviour is unchanged. ``stream=True`` writes subprocess stdout/stderr live to the
+    terminal so yt-dlp's own ``[download] 95% ...`` progress shows in real time; when streaming, output
+    is NOT captured (RunResult.stdout / .stderr are empty -- inspect returncode instead). The optional
+    ``on_line(line)`` callback fires with each decoded line during streaming so callers can react
+    (e.g. render a download bar); it never raises.
     """
     cmd = [str(a) for a in args]
     try:
-        if stream and not capture:
+        if stream:
+            # Live mode: pump stdout/stderr to the terminal as they arrive, then wait.
             proc = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
 
@@ -156,11 +156,17 @@ def run(args: List[str], check: bool = False, capture: bool = True,
 
             _pump()
             returncode = proc.wait()
+            if check and returncode != 0:
+                raise RuntimeError("command failed (exit %d): %s" % (returncode, " ".join(cmd[:4])))
+            # Live mode captured nothing into text buffers -- report empty strings (never the live
+            # pipe handle) so RunResult stays a plain string view for callers.
+            return RunResult(args=cmd, returncode=returncode, stdout="", stderr="")
         else:
             proc = subprocess.run(cmd, capture_output=capture, text=True)
     except FileNotFoundError as exc:  # tool path is wrong / not found
         return RunResult(args=cmd, returncode=-1, stdout="", stderr="NOT FOUND: %s" % " ".join(cmd[:3]))
     if check and proc.returncode != 0:
+        # Streamed output already went to the terminal live; only tail captured stderr.
         _print_tail(proc.stderr)
         raise RuntimeError("command failed (exit %d): %s" % (proc.returncode, " ".join(cmd[:4])))
     return RunResult(args=cmd, returncode=proc.returncode, stdout=proc.stdout or "", stderr=proc.stderr or "")

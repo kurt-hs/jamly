@@ -14,6 +14,9 @@ Endpoints:
 
 Stdlib only. Heavy steps are delegated to run.process_one (yt-dlp + ffmpeg/GPU required on
 PATH/scope); the HTTP layer itself is exercised in tests with a fake process_one."""
+from __future__ import annotations   # noqa: F401  (makes all annotations lazy strings; needed so
+                                     # ``X | None`` in instance-attr annotations works on 3.9+,
+                                     # matching pyproject's requires-python = ">=3.9")
 import argparse
 import json
 import os

@@ -131,6 +131,56 @@ class RunTests(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("NOT FOUND", r.stderr)
 
+    def test_run_streams_live_and_buffers_empty(self):
+        # Live mode writes output to the terminal (observed via on_line) and captures nothing into
+        # text buffers; RunResult.stdout must stay a plain empty string, never the live pipe handle.
+        seen = []
+        script = "import sys; print('a'); print('[download] 95% (1/2)')"
+        r = run([sys.executable, "-c", script], stream=True, on_line=seen.append)
+        self.assertEqual(seen, ["a\n", "[download] 95% (1/2)\n"])   # one call per decoded line
+        self.assertEqual(r.returncode, 0)
+        self.assertIsInstance(r.stdout, str) and self.assertEqual(r.stdout, "")
+        self.assertIsInstance(r.stderr, str) and self.assertEqual(r.stderr, "")
+
+    def test_run_stream_check_raises_on_failure(self):
+        # check=True + non-zero exit must raise even in live-stream mode (output already streamed).
+        raised = False
+        try:
+            run([sys.executable, "-c", "import sys; sys.exit(3)"], stream=True, check=True)
+        except RuntimeError as exc:
+            raised = True
+            self.assertIn("exit 3", str(exc))
+        self.assertTrue(raised, "streamed failing command with check=True must raise")
+
+    def test_run_stream_on_line_fires_per_line(self):
+        seen = []
+        run([sys.executable, "-c", "import sys; print('a'); print('b')"],
+             stream=True, on_line=seen.append)
+        self.assertEqual(seen, ["a\n", "b\n"])   # one call per decoded line
+
+    def test_run_stream_returns_empty_string_buffers(self):
+        r = run([sys.executable, "-c", "print('hi')"], stream=True)
+        self.assertIsInstance(r.stdout, str) and self.assertEqual(r.stdout, "")
+        self.assertIsInstance(r.stderr, str) and self.assertEqual(r.stderr, "")
+        self.assertEqual(r.returncode, 0)
+
+    def test_run_non_stream_still_captures(self):
+        # Non-streaming runs (the unchanged default contract) capture into buffers.
+        r = run([sys.executable, "-c", "import sys; print('captured')"], capture=True)
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("captured\n", r.stdout)
+
+    def test_run_stream_live_script(self):
+        # stream=True runs a real interpreter subprocess and pumps its stdout/stderr to the terminal.
+        seen = []
+        script = "import sys; print('a'); print('[download] 95% (1/2)')"
+        r = run([sys.executable, "-c", script], stream=True, on_line=seen.append)
+        self.assertEqual(seen, ["a\n", "[download] 95% (1/2)\n"])
+        self.assertEqual(r.returncode, 0)
+        # live mode captures nothing into text buffers; RunResult stays a plain empty-string view.
+        self.assertIsInstance(r.stdout, str) and self.assertEqual(r.stdout, "")
+        self.assertIsInstance(r.stderr, str) and self.assertEqual(r.stderr, "")
+
 
 class AudioFormatCmdTests(unittest.TestCase):
     """build_stem_encode_cmd: lossy re-encode vs raw verbatim-copy decision."""
