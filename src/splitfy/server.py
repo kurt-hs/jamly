@@ -31,6 +31,24 @@ from splitfy.watch_queue import WatchQueue, default_queue_path
 from .core import AUDIO_FORMATS, DEFAULT_OUTPUT_FORMAT
 from .run import ItemResult, process_one
 
+# hosts that keep the queue reachable only by local processes; binding anywhere else is an explicit
+# opt-in (and, with S2 hardening, additionally requires a server token). Empty host -> loopback.
+def _is_loopback_host(host: str) -> bool:
+    if not host:
+        return True
+    h = host.strip().lower()
+    return h in ("127.0.0.1", "localhost", "::1")
+
+
+def _authorized(header: str, token: str) -> bool:
+    """True when `header` carries a Bearer token matching `token` (scheme case-insensitive)."""
+    if not header or not token:
+        return False
+    parts = header.split(None, 1)
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        return False
+    return parts[1].strip() == token
+
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="splitfy HTTP status server (shares the queue protocol)")
@@ -43,6 +61,12 @@ def build_parser() -> argparse.ArgumentParser:
                    help=("Final audio format; 'wav' = lossless/raw WAVs, '%s' = reasonably-encoded lossy (default)"
                          % DEFAULT_OUTPUT_FORMAT))
     p.add_argument("--idle-wait-s", type=float, default=2.0, help="Block this long when the queue is empty")
+    # write-auth secret for POST /add: shared between this server and any client that enqueues
+    # with it (also settable via env SPLITFY_SERVER_TOKEN). With no token configured, writes are
+    # accepted as before; once one is set, every /add must carry a matching Authorization header.
+    p.add_argument("--server-token", default=None,
+                   help="Shared secret that gates POST /add (env: SPLITFY_SERVER_TOKEN); "
+                        "required to bind off-loopback")
     return p
 
 
@@ -91,9 +115,26 @@ class ItemServer:
             "completed": [],
         }
 
+        # write-auth secret shared between this server and any client that enqueues with it.
+        # env is authoritative (it crosses process boundaries); --server-token overrides for a
+        # single instance. Empty -> no auth required (legacy behaviour).
+        # --server-token is an explicit opt-in and overrides the environment; env is the fallback.
+        self._token = getattr(args, "server_token", None) or os.environ.get("SPLITFY_SERVER_TOKEN")
+
         self._stop = threading.Event()
+        # True only while start() has launched serve_forever(); stop() uses it to avoid blocking
+        # on a server that was bound in __init__ but never served (BaseServer.shutdown would then
+        # wait forever for the poller's shutdown event, which is only set by a running poller).
+        self._serving: bool = False
         self._server: _SilentServer | None = None
         self._worker: threading.Thread | None = None
+        # S2 hardening: refuse to bind anywhere reachable beyond the local host unless a token is
+        # configured. Without one, an unauthenticated client could add items over the network.
+        if not _is_loopback_host(self.args.host) and not self._token:
+            raise ValueError(
+                "binding %r:%d off-loopback requires --server-token (env: SPLITFY_SERVER_TOKEN); "
+                "set it to allow non-loopback binds" % (self.args.host,
+                                                        max(0, getattr(self.args, "port", 0))))
         # bind the HTTP server eagerly (deterministic port for tests; resumable status)
         self._server = _SilentServer((self.args.host, max(0, getattr(self.args, "port", 0))),
                                      QueueStatusHandler)
@@ -168,6 +209,7 @@ class ItemServer:
 
     def start(self) -> None:
         """Launch the worker thread and serve HTTP. Binding happens in __init__."""
+        self._serving = True
         self._worker = threading.Thread(target=self._loop, name="autoconvert-worker", daemon=True)
         self._worker.start()
         self._server.serve_forever()
@@ -176,8 +218,13 @@ class ItemServer:
         if self._stop.is_set():
             return
         self._stop.set()
-        if self._server is not None:
-            self._server.shutdown()
+        server = self._server
+        if server is not None:
+            # Only wait for the poller when we actually started serving; otherwise just release
+            # the socket (a never-started server's shutdown would block forever on __is_shut_down).
+            if getattr(server, "_serving", False):
+                server.shutdown()
+            server.server_close()
             self._server.server_close()
 
 
@@ -264,8 +311,21 @@ class QueueStatusHandler(BaseHTTPRequestHandler):
         if path != "/add":
             self._send_json({"error": "unknown endpoint"}, status=404)
             return
+        # read the request body up front so a rejected write never leaves unread bytes on a keep-alive socket
         length = int(self.headers.get("Content-Length", 0) or 0)
         raw = self.rfile.read(length) if length else b""
+        # S2 hardening: when a server token is configured, reject writes without it before touching the queue.
+        s = self._server_obj
+        if s._token and not _authorized(self.headers.get("Authorization", ""), s._token):
+            body = json.dumps({"error": "authorization required"}).encode("utf-8")
+            self.send_response(401)
+            self._cors()
+            self.send_header("Content-Type", "application/json")
+            self.send_header("WWW-Authenticate", 'Bearer realm="splitfy-server"')
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)   # body must be written to match Content-Length
+            return
         try:
             payload = json.loads(raw.decode("utf-8")) if raw.strip() else {}
             inputs = [str(i).strip() for i in (payload.get("inputs") or [])]
@@ -297,6 +357,12 @@ class QueueStatusHandler(BaseHTTPRequestHandler):
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
     srv = ItemServer(args)
+    if not _is_loopback_host(args.host):
+        # loud opt-in: anyone who can reach this host can read queue status; only writes are gated
+        # by the token, so make the exposure unmistakable.
+        print("WARNING: bound off-loopback (host=%s); the server is reachable over the network. "
+              "Set SPLITFY_SERVER_TOKEN to require auth on POST /add." % args.host,
+              file=sys.stderr)
     print("splitfy server: listening on http://%s:%d  (queue=%s)" % (args.host, args.port, srv.queue_path))
     try:
         srv.start()

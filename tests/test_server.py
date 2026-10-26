@@ -37,7 +37,7 @@ from urllib.request import Request, urlopen
 from urllib.error import URLError
 import http.client
 
-from splitfy.server import ItemServer, build_parser
+from splitfy.server import ItemServer, _is_loopback_host, build_parser
 
 
 class _FakeResult:
@@ -68,23 +68,31 @@ def _server_module():
     return _smod
 
 
-def _start_server(idle_wait_s=0.0):
+def _start_server(idle_wait_s=0.0, token=None):
     """Construct an ItemServer bound to a free ephemeral port; start its worker AND HTTP serving.
 
     Returns (server, port). ``ItemServer.start()`` launches the queue-worker thread and blocks in
     ``serve_forever();`` we run it from a dedicated daemon thread so the test body can finish while
     both loops keep running. Each instance gets its own isolated queue file in a temp dir so tests
-    never share state via the default cwd queue path.
+    never share state via the default cwd queue path. Pass ``token`` to spin up a server that gates
+    POST /add with a shared bearer secret (S2 hardening).
     """
     # pure string path (never create+remove an on-disk file -> no Windows handle-lock race).
     # from_path() treats a missing file as an empty queue until .save() is called.
     qpath = os.path.join(tempfile.gettempdir(), "autocv-test-queue-%s.json" % uuid.uuid4().hex)
-    args = build_parser().parse_args(["--port", "0", "--idle-wait-s", str(idle_wait_s), "--queue", qpath])
+    argv = ["--port", "0", "--idle-wait-s", str(idle_wait_s), "--queue", qpath]
+    if token is not None:
+        argv += ["--server-token", token]
+    args = build_parser().parse_args(argv)
     srv = ItemServer(args)  # binds eagerly; the assigned port is in _server.server_address[1]
-    worker_t = threading.Thread(target=srv._loop, name="test-worker")
-    server_t = threading.Thread(target=srv._server.serve_forever, name="test-server")
+    # daemon=True so a lingering/failed teardown can never block pytest from exiting.
+    worker_t = threading.Thread(target=srv._loop, name="test-worker", daemon=True)
+    server_t = threading.Thread(target=srv._server.serve_forever, name="test-server", daemon=True)
     worker_t.start()
     server_t.start()  # serve_forever blocks this thread until stop(); captured for clean join
+    # serve_forever is running on server_t; mark serving so stop() does a bounded shutdown()
+    # (waits for the poller to signal) instead of closing the socket mid-poll.
+    srv._serving = True
     return srv, srv._server.server_address[1], qpath, worker_t, server_t
 
 
@@ -95,6 +103,22 @@ def _add_items(base_url, inputs, titles=None):
     req.add_header("Content-Type", "application/json")
     with urlopen(req, timeout=10) as resp:  # context manager (http.client); safe on Windows
         return json.loads(resp.read().decode("utf-8"))
+
+
+def _post(port, inputs=None, titles=None, auth=None):
+    """POST ``/add`` via http.client; return ``(status, parsed_body)`` and never raise on non-2xx."""
+    data = json.dumps({"inputs": list(inputs or []), "titles": list(titles or [])}).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    if auth is not None:
+        headers["Authorization"] = auth
+    c = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    try:
+        c.request("POST", "/add", body=data, headers=headers)
+        r = c.getresponse()
+        raw = r.read().decode("utf-8", "replace")
+        return r.status, (json.loads(raw) if raw.strip() else None)
+    finally:
+        c.close()
 
 
 def _poll_status(base_url):
@@ -270,6 +294,142 @@ class ServerIntegrationTests(unittest.TestCase):
                     c.close()
             finally:
                 _cleanup(srv, qpath, threads)
+
+
+
+class _LoopbackHostTests(unittest.TestCase):
+    """``_is_loopback_host`` maps the bind host to a loopback/no-auth default."""
+
+    def test_loopback_hosts_are_trusted(self):
+        for host in ("127.0.0.1", "localhost", "::1"):
+            self.assertTrue(_is_loopback_host(host), "%s should be loopback" % host)
+
+    def test_empty_host_defaults_to_loopback(self):
+        # fail-safe: an empty/absent host must never silently widen to all interfaces.
+        self.assertTrue(_is_loopback_host(""))
+
+    def test_exposed_hosts_are_not_loopback(self):
+        for host in ("0.0.0.0", "192.168.1.5", "[::]", "example.com"):
+            self.assertFalse(_is_loopback_host(host), "%s should be treated as exposed" % host)
+
+    def test_case_and_whitespace_insensitive(self):
+        self.assertTrue(_is_loopback_host("  LOCALHOST "))
+        self.assertTrue(_is_loopback_host("127.0.0.1\t"))
+
+
+class ItemServerBindGuardTests(unittest.TestCase):
+    """Binding off-loopback is an explicit opt-in that requires a server token (S2)."""
+
+    def _srv(self, host="0.0.0.0", port=0, token=None):
+        args = build_parser().parse_args(["--host", host, "--port", str(port),
+                                          "--queue", os.path.join(tempfile.gettempdir(),
+                                                                  "autocv-bind-guard-%s.json" % uuid.uuid4().hex)])
+        if token is not None:
+            args.server_token = token
+        return ItemServer(args)
+
+    def test_off_loopback_without_token_is_rejected(self):
+        with self.assertRaises(ValueError) as ctx:
+            self._srv(host="0.0.0.0", port=0, token=None)
+        self.assertIn("server-token", str(ctx.exception))
+
+    def test_off_loopback_with_token_binds(self):
+        srv = self._srv(host="0.0.0.0", port=0, token="sekret")   # must NOT raise -> binds eagerly
+        try:
+            self.assertEqual(srv._server.server_address[0], "0.0.0.0")
+            self.assertEqual(srv._token, "sekret")
+        finally:
+            srv.stop()
+
+    def test_loopback_bind_allowed_without_token(self):
+        # the default path: loopback needs no token and binds cleanly.
+        srv = self._srv(host="127.0.0.1", port=0, token=None)
+        try:
+            self.assertIn("127.0.0.1", srv._server.server_address[0])
+            self.assertIsNone(srv._token)
+        finally:
+            srv.stop()
+
+    def test_token_can_also_come_from_environment(self):
+        # env is read at construction time; --server-token overrides it for a single instance.
+        with mock.patch.dict(os.environ, {"SPLITFY_SERVER_TOKEN": "from-env"}, clear=True):
+            srv = self._srv(host="0.0.0.0", port=0, token=None)   # no CLI token -> env supplies auth
+            try:
+                self.assertEqual(srv._token, "from-env")
+            finally:
+                srv.stop()
+        with mock.patch.dict(os.environ, {"SPLITFY_SERVER_TOKEN": "from-env"}, clear=True):
+            srv = self._srv(host="0.0.0.0", port=0, token="cli-override")
+            try:
+                self.assertEqual(srv._token, "cli-override")
+            finally:
+                srv.stop()
+
+
+class S2WriteAuthTests(unittest.TestCase):
+    """POST /add is gated by a bearer token when one is configured; accepted when none is."""
+
+    TOKEN = "sekret-abc"
+
+    def test_post_add_accepted_when_no_token_configured(self):
+        # default/legacy behaviour: no server token -> writes are not gated.
+        wid = "noauthTestId01"
+        with _stub_process_one(_FakeResult(ok=True, stage="mix", title=wid)):
+            srv, port, qpath, worker_t, server_t = _start_server()
+            threads = (worker_t, server_t)
+            try:
+                status, body = _post(port, [wid], [wid])
+                self.assertEqual(status, 200)
+                self.assertEqual(body["newly_added"], 1)
+                events = _wait_until(port, lambda evs: wid in _completed_ids(evs))
+                recs = [r for r in _completed_records(events) if r["watch_id"] == wid]
+                self.assertEqual(recs[0]["status"], "done")
+            finally:
+                _cleanup(srv, qpath, threads)
+
+    def test_post_add_rejected_without_token_when_configured(self):
+        srv, port, qpath, worker_t, server_t = _start_server(token=self.TOKEN)
+        threads = (worker_t, server_t)
+        try:
+            wid = "aBcDeFg9012"
+            # no Authorization header -> 401, nothing queued and item never runs.
+            status, body = _post(port, [wid], [wid])
+            self.assertEqual(status, 401)
+            self.assertEqual(body.get("error"), "authorization required")
+
+            # wrong bearer -> still rejected (exact match).
+            status, _ = _post(port, [wid], [], auth="Bearer totally-wrong")
+            self.assertEqual(status, 401)
+        finally:
+            _cleanup(srv, qpath, threads)
+
+    def test_post_add_accepted_with_valid_bearer_then_completes(self):
+        # scheme is case-insensitive; a valid token both accepts the write and lets the worker run it.
+        wid = "zYxWvUt9012"
+        with _stub_process_one(_FakeResult(ok=True, stage="mix", title=wid)):
+            srv, port, qpath, worker_t, server_t = _start_server(token=self.TOKEN)
+            threads = (worker_t, server_t)
+            try:
+                status, body = _post(port, [wid], [wid], auth="Bearer %s" % self.TOKEN)
+                self.assertEqual(status, 200)
+                self.assertEqual(body["newly_added"], 1)
+                events = _wait_until(port, lambda evs: wid in _completed_ids(evs))
+                recs = [r for r in _completed_records(events) if r["watch_id"] == wid]
+                self.assertEqual(len(recs), 1)
+                self.assertEqual(recs[0]["status"], "done")
+            finally:
+                _cleanup(srv, qpath, threads)
+
+    def test_scheme_is_case_insensitive(self):
+        srv, port, qpath, worker_t, server_t = _start_server(token=self.TOKEN)
+        threads = (worker_t, server_t)
+        try:
+            # uppercase Bearer + surrounding whitespace all accepted.
+            status, body = _post(port, ["w01"], [], auth="  BEARER %s  " % self.TOKEN)
+            self.assertEqual(status, 200)
+            self.assertEqual(body["newly_added"], 1)
+        finally:
+            _cleanup(srv, qpath, threads)
 
 
 if __name__ == "__main__":
