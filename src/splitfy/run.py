@@ -45,7 +45,7 @@ from splitfy.watch_queue import WatchQueue, default_queue_path
 # never blocks or fails item processing -- process_one degrades to the watch-id fallback.
 METADATA_FETCH_TIMEOUT = 300
 
-ENGINE_CHOICES = ("auto", "uvr5", "htdemucs")
+ENGINE_CHOICES = ("auto", "htdemucs")  # portable-only: exactly one engine; 'uvr5' no longer exists
 
 
 # module-level logger; quiet by default so importing this module never prints (tests/callers opt in).
