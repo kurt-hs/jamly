@@ -11,11 +11,20 @@
   button { padding:6px;border:none;border-radius:4px;background:#0e7eea;color:#fff;cursor:pointer;font-weight:600; }
   button:hover { background:#0957b5; }
   #counts { font-size:11px;color:#888;margin-left:6px;white-space:nowrap; }
-  #status { color:#ffd54f;font-weight:600;min-height:1.5em;padding-left:6px; }
-  #current-title { padding-left:6px;word-break:break-all;color:#fff; }
+  .badge { display:inline-flex;align-items:center;gap:4px;font-weight:600;font-size:11px;padding:1px 5px;border-radius:3px;background:#303032;color:#e6e6e6;min-width:78px; }
+  .badge .lbl { text-transform:uppercase;letter-spacing:.4px; }
+  #status { min-height:1.5em;padding-left:6px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis; }
+  #current-title { padding-left:6px;word-break:break-all;color:#fff;font-family:monospace;font-size:11px; }
   ul { list-style:none;margin:6px;padding:0;max-height:240px;overflow:auto; }
   li { display:flex;align-items:center;gap:6px;padding:3px 6px;border-bottom:1px solid #333; }
-  .done { color:#4caf50; } .pending { color:#bbb; }
+  .badge.done   { color:#7ee787; background:#1c3a22; }
+  .badge.error  { color:#ff9d9d; background:#3a1c1c; }
+  .badge.pending{ color:#bbb;    background:#2a2a2e; }
+  .badge.download{ color:#79c0ff; background:#142536; }
+  .badge.separate{ color:#d2a8ff; background:#2a1f3a; }
+  .badge.mix    { color:#e3b370; background:#3a2f1c; }
+  .current li b { font-weight:600;color:#fff; }
+  .idle #status { color:#888;font-weight:400; }
   a { color:inherit;text-decoration:none; } a:hover { text-decoration:underline; }
 </style>
 </head>
@@ -36,27 +45,50 @@
 (function () {
   "use strict";
 
+  // Shared download/pipeline vocabulary (kept identical to the CLI's per-item rendering):
+  // stage -> {icon, label}. Color is applied by a CSS class (.badge.<cls>) below.
+  var STAGE = {
+    idle:     { icon: "\u25cc", label: "IDLE" },
+    pending:  { icon: "\u25b0", label: "QUEUED" },
+    download: { icon: "\u2b1b", label: "EXTRACTING" },
+    separate: { icon: "\u2702\ufe0f", label: "SEPARATING" },
+    mix:      { icon: "\U0001F5A4", label: "MIXING" },
+    done:     { icon: "\u2714", label: "DONE" },
+    error:    { icon: "\u2717", label: "ERROR" },
+  };
+
   function counts(body) {
     var p = (body && body.pending == null ? 0 : Math.max(0, body.pending));
     var d = (body && body.done == null ? 0 : Math.max(0, body.done));
     return [p, d];
   }
 
+  // Render a single stage badge: "\u2714 DONE" / "\u2b1b EXTRACTING", plus the title when present.
+  function badge(status, title) {
+    var s = status || "idle";
+    var st = STAGE[s] || STAGE.idle;
+    return '<span class="badge ' + (s === "done" ? "done" : s === "error" ? "error" : s) + '">' +
+           st.icon + ' <span class="lbl">' + st.label + '</span>' +
+           ((title) ? ' &mdash; ' + title : '') + '</span>;
+  }
+
   function renderStatus(body) {
     var el = document.getElementById("status");
     if (!body || !body.current || body.current.status === "idle") {
-      el.textContent = "server idle — nothing running";
+      el.className = "idle";
+      el.textContent = "server idle &mdash; nothing running";
       return;
     }
-    el.textContent = "[" + (body.current.stage || "?") + "] " + (body.current.status || "?").toUpperCase();
-    var ct = document.getElementById("current-title");
-    if (ct) ct.textContent = body.current.title ? body.current.title : "";
+    el.className = "";
+    var cur = body.current;
+    el.innerHTML = badge(cur.status, cur.title || (cur.watch_id ? cur.watch_id[0] + "\u2026" : ''));
+    document.getElementById("current-title").textContent = cur.title || '';
   }
 
   function renderList(body) {
     var list = document.getElementById("list");
     var last_completed = body && body.last_completed || [];
-    // completed terminal records from the server
+    // completed terminal records from the server; the running item is shown live in #status above
     if (!last_completed.length) {
       list.innerHTML = '<li class="pending">no items yet</li>';
       return;
@@ -65,9 +97,8 @@
     for (var i = 0; i < last_completed.length; i++) {
       var rec = last_completed[i];
       if (!rec || !rec.watch_id) continue;
-      var cls = rec.status === "done" ? "done" : "pending";
-      var mark = rec.status === "done" ? "\u2714" : "\u2717";
-      out += '<li class="' + cls + '">' + mark + ' ' + (rec.title || rec.watch_id) + '</li>';
+      // terminal status is only ever 'done' or 'error'; otherwise fall back to the watch id
+      out += '<li>' + badge(rec.status, rec.title || rec.watch_id) + '</li>';
     }
     list.innerHTML = out;
   }

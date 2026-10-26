@@ -37,7 +37,7 @@ from .core import (
 )
 from .bootstrap import find_ffmpeg
 from .provision import resolve_recorded_tools
-from .logging import Logger
+from .logging import SYMBOL, Logger
 from .naming import parse_title_artist, stem_prefix, build_metadata_name, meta_dict
 from splitfy.watch_queue import WatchQueue, default_queue_path
 
@@ -606,11 +606,23 @@ def main(argv=None) -> int:
         return 0
     _log.step("processing %d pending item(s); queue=%s" % (len(remaining), qpath))
 
+    # terminal status per item maps onto the shared vocab used by the popup/options UI:
+    # DONE -> green, ERROR -> red; every other stage is transient inside process_one() and
+    # only observable live on an SSE client. The badge word/icon/color match the browser surfaces.
+    def _stage_badge(status: str) -> str:
+        # done/error reuse the browser vocab's exact glyphs (U+2714 / U+2717) so both surfaces
+        # render identical icons; other stages fall back to a dim info bullet.
+        icon = {"done": "\u2714", "error": "\u2717"}.get(status, SYMBOL["info"])
+        label = {"done": "DONE", "error": "ERROR"}.get(status, status or "PENDING")
+        color = {"done": "green", "error": "red", "separate": "cyan", "mix": "yellow", "download": "blue"}.get(status, "grey")
+        return "%s %s" % (_log._c(icon, color), _log._c(label, color))
+
     ok = err = done = 0
     for i, wid in enumerate(remaining):
         res = process_one(wid, args)
-        hint = (' "%s"' % res.title) if res.title else ""
-        _log.step("%2d/%d  %s%s" % (i + 1, len(remaining), wid[:16], hint))
+        badge = _stage_badge(res.status)
+        title = (' "%s"' % res.title) if res.title else ""
+        _log.step("%2d/%d  %s%s%s" % (i + 1, len(remaining), badge, "  ", wid[:16] + title))
         link_outputs(res)
         if not res.ok:
             _log.fail("%s: %s" % (res.watch_id[:16], res.error or "unknown error"))
