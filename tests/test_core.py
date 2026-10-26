@@ -8,11 +8,10 @@ import unittest
 # src-layout: make the ``splitfy`` package importable for both `pytest` and
 # `python -m unittest discover -s tests` without an editable install. Inserted before any
 # absolute-package import so it always runs first.
-import sys as _shim_sys  # noqa: E402
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 import splitfy.core as core  # noqa: E402 (module alias for core.X attribute access)
 from splitfy.core import (  # noqa: E402
-    PLATFORM_WINDOWS, RunResult, build_demucs_four_stems_cmd,
+    build_demucs_four_stems_cmd,
     build_ffmpeg_mix_cmd, build_ytdlp_extract_cmd, ensure_output_dir,
     sanitize_filename, run, which, _abs, _exists_exe,
 )
@@ -236,7 +235,7 @@ class DetectEngineTests(unittest.TestCase):
         import unittest.mock as mock
         root = self._make_weight_root()
         with mock.patch.dict(os.environ, {"AUTOCV_UVR_ROOT": root}, clear=False), \
-             mock.patch.object(core, "_dir_has_any", return_value=False) as dh:
+             mock.patch.object(core, "_dir_has_any", return_value=False):
             # _scan must surface the explicit env override regardless of weights
             roots = core._scan_uvr_roots()
             self.assertIn(os.path.abspath(root), roots)

@@ -15,7 +15,7 @@ import platform
 import shutil
 import subprocess
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import List, Optional
 
 PLATFORM_WINDOWS = sys.platform == "win32"
@@ -90,9 +90,9 @@ def _classify_path(path: str) -> dict:
     # path-based installs: winget, npm, AppData tool folders, etc.
     label = "PATH"
     for hint, tag in _PATH_LOC_HINTS.items():
-        if any(h.lower() == p or h.replace(" ", "_").lower() == p for p in parts):
+        if any(hint.lower() == p or hint.replace(" ", "_").lower() == p for p in parts):
             return {"kind": "path", "label": tag}
-        if any(h.lower() in p for p in parts):
+        if any(hint.lower() in p for p in parts):
             label = tag
     if "npm" in parts:
         return {"kind": "path", "label": "AppData"}  # AppData\Roaming\npm (winget/npm)
@@ -180,7 +180,7 @@ def run(args: List[str], check: bool = False, capture: bool = True,
             return RunResult(args=cmd, returncode=returncode, stdout="", stderr="")
         else:
             proc = subprocess.run(cmd, capture_output=capture, text=True)
-    except FileNotFoundError as exc:  # tool path is wrong / not found
+    except FileNotFoundError:  # tool path is wrong / not found
         return RunResult(args=cmd, returncode=-1, stdout="", stderr="NOT FOUND: %s" % " ".join(cmd[:3]))
     if check and proc.returncode != 0:
         # Streamed output already went to the terminal live; only tail captured stderr.
@@ -192,7 +192,7 @@ def run(args: List[str], check: bool = False, capture: bool = True,
 def _print_tail(text: str, limit: int = 20) -> None:
     if not text.strip():
         return
-    lines = [l for l in text.splitlines() if l.strip()]
+    lines = [line for line in text.splitlines() if line.strip()]
     sys.stderr.write("\n".join(lines[-limit:]) + "\n")
 
 
@@ -537,7 +537,8 @@ def separate_stems(
         cmd = build_htdemucs_four_stems_cmd(py, audio, workdir, threads=threads)
         res = run(cmd)
         if not res.ok:
-            _print_tail(res.stderr); raise RuntimeError("demucs four-stem separation failed (exit %d): %s" % (res.returncode, " ".join(cmd[:4])))
+            _print_tail(res.stderr)
+            raise RuntimeError("demucs four-stem separation failed (exit %d): %s" % (res.returncode, " ".join(cmd[:4])))
 
     elif engine in (ENGINE_AUTO, ENGINE_UVR5):
         if not (_dir_has_any(_site_packages(), ("audio_separator",))):
@@ -547,7 +548,8 @@ def separate_stems(
         cmd = build_demucs_four_stems_cmd(py, audio, workdir, repo=repo, threads=threads)
         res = run(cmd)
         if not res.ok:
-            _print_tail(res.stderr); raise RuntimeError("audio-separator four-stems failed (exit %d): %s" % (res.returncode, " ".join(cmd[:4])))
+            _print_tail(res.stderr)
+            raise RuntimeError("audio-separator four-stems failed (exit %d): %s" % (res.returncode, " ".join(cmd[:4])))
     else:
         raise ValueError("unknown engine: %r" % (engine,))
 

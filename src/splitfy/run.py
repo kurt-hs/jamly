@@ -19,19 +19,18 @@ Environment knobs (see bootstrap.py): AUTOCV_SCOPE, AUTOCV_UVR_ROOT.
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import shutil
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 from .normalize import normalize_inputs_full, extract_watch_id, Input
 from .core import (
-    AUDIO_FORMATS, DEFAULT_OUTPUT_FORMAT, FORMAT_MP3, FORMAT_WAV,
+    AUDIO_FORMATS, DEFAULT_OUTPUT_FORMAT, FORMAT_WAV,
     build_stem_encode_cmd,
     ENGINE_UVR5, ENGINE_HTDEMUCS,
-    _abs, ensure_output_dir, PLATFORM_WINDOWS, run as _run, sanitize_filename,
+    RunResult, _abs, PLATFORM_WINDOWS, run as _run, sanitize_filename,
     tool_source,
 )
 from .bootstrap import find_ffmpeg

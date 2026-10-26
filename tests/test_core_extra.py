@@ -12,7 +12,6 @@ import unittest
 # src-layout: make the ``splitfy`` package importable for both `pytest` and
 # `python -m unittest discover -s tests` without an editable install. Inserted before any
 # absolute-package import so it always runs first.
-import sys as _shim_sys  # noqa: E402
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 import splitfy.core as c
 
@@ -99,7 +98,7 @@ class HtdemucsRunnerTests(unittest.TestCase):
              mock.patch("splitfy.core.find_python", return_value="python"), \
              mock.patch.object(c, "_locate_stems", return_value=fake), \
              mock.patch.object(c, "run") as run_mock:
-            res = c.separate_stems("song.wav", engine=c.ENGINE_HTDEMUCS, uvr_root="")
+            c.separate_stems("song.wav", engine=c.ENGINE_HTDEMUCS, uvr_root="")
         # module is `demucs`, subcommand `separate` -- NOT the removed htdemucs four-stems entry point
         self.assertEqual(run_mock.call_args.args[0][1:4], ["-m", "demucs", "separate"])
         idx = run_mock.call_args.args[0].index("-n")

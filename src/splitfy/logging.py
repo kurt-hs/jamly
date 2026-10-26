@@ -14,7 +14,7 @@ import os
 import re
 import sys
 import time
-from typing import Callable, Optional
+from typing import Callable, Dict, Optional
 
 
 # --------------------------------------------------------------------------- #

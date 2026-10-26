@@ -74,7 +74,6 @@ class WatchQueue:
         wid = (watch_id or "").strip()
         if not wid or wid in self._done or any(i["watch_id"] == wid for i in self._items):
             return False
-        idx = len(self._items)
         self._items.append({"watch_id": wid, "title": title, "status": self.PENDING})
         return True
 

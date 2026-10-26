@@ -1,6 +1,5 @@
 """Unit tests for queue.py (persistent, resumable input queue). No network/GPU."""
 import sys
-import json
 import os
 import tempfile
 import unittest
@@ -9,7 +8,6 @@ import unittest
 # src-layout: make the ``splitfy`` package importable for both `pytest` and
 # `python -m unittest discover -s tests` without an editable install. Inserted before any
 # absolute-package import so it always runs first.
-import sys as _shim_sys  # noqa: E402
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 from splitfy.watch_queue import WatchQueue, default_queue_path
 

@@ -29,7 +29,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from splitfy.watch_queue import WatchQueue, default_queue_path
 from .core import AUDIO_FORMATS, DEFAULT_OUTPUT_FORMAT
-from .run import ItemResult, process_one
+from .run import process_one
 
 # hosts that keep the queue reachable only by local processes; binding anywhere else is an explicit
 # opt-in (and, with S2 hardening, additionally requires a server token). Empty host -> loopback.

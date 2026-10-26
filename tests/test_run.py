@@ -15,7 +15,6 @@ import unittest.mock as mock
 # src-layout: make the ``splitfy`` package importable for both `pytest` and
 # `python -m unittest discover -s tests` without an editable install. Inserted before any
 # absolute-package import so it always runs first.
-import sys as _shim_sys  # noqa: E402
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 from splitfy import run as run_mod
 from splitfy.core import RunResult   # for finalize_output() test helpers
@@ -110,7 +109,9 @@ class NamingConsistencyTests(unittest.TestCase):
         self.assertTrue(res.ok, res.error)
         # the download step lands <wid>.<ext> in workdir; both stems + the meta share that prefix
         self.assertEqual(os.path.basename(extract_name), extract_name)  # <wid>.webm
-        drums_out = res.drums_path; nodrums_out = res.nodrums_path; meta_path = res.meta_path
+        drums_out = res.drums_path
+        nodrums_out = res.nodrums_path
+        meta_path = res.meta_path
         for path, expected in [(drums_out, "%s_drums.wav" % wid),
                                (nodrums_out, "%s_no_drums.wav" % wid),
                                (meta_path, "%s.meta.json" % wid)]:

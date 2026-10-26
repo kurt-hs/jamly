@@ -14,7 +14,6 @@ from contextlib import redirect_stdout
 # src-layout: make the ``splitfy`` package importable for both `pytest` and
 # `python -m unittest discover -s tests` without an editable install. Inserted before any
 # absolute-package import so it always runs first.
-import sys as _shim_sys  # noqa: E402
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 from splitfy import bootstrap as b
 
@@ -171,7 +170,8 @@ class MainGateTests(unittest.TestCase):
                 with redirect_stdout(io.StringIO()):
                     rc = b.main()
             finally:
-                os.environ.clear(); os.environ.update(old)
+                os.environ.clear()
+                os.environ.update(old)
             self.assertEqual(rc, 0)
 
     def test_not_ready_without_ffprobe(self):
@@ -184,7 +184,8 @@ class MainGateTests(unittest.TestCase):
                 with redirect_stdout(io.StringIO()):
                     rc = b.main()
             finally:
-                os.environ.clear(); os.environ.update(old)
+                os.environ.clear()
+                os.environ.update(old)
             self.assertEqual(rc, 3)   # blocked on ffmpeg+ffprobe
 
 

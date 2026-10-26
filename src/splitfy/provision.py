@@ -12,7 +12,6 @@ reuse-first persistence delegated to :class:`ConfigStore` via ``record_provision
 from __future__ import annotations
 
 import hashlib
-import io
 import json
 import os
 import platform
@@ -21,6 +20,7 @@ import tempfile
 import zipfile
 
 from .core import (_abs, PLATFORM_WINDOWS, _os_family)  # noqa: E402
+from splitfy.config_state import ConfigStore   # noqa: E402
 
 
 def _sha256_hex(data: bytes) -> str:
@@ -53,7 +53,7 @@ def build_asset_name(osf: str, arch: str) -> str:
     if osf == "win":
         return f"ffmpeg-master-latest-{arch}-gpl.zip"
     if osf == "linux-arm":
-        return f"ffmpeg-master-latest-linuxarm64-gpl.tar.xz"
+        return "ffmpeg-master-latest-linuxarm64-gpl.tar.xz"
     if osf == "macos":
         # BtbN ships macOS as .tar.xz under linux naming; fall back to generic.
         return f"ffmpeg-master-latest-{arch}-gpl.tar.xz"
@@ -162,7 +162,7 @@ def _extract_archive(zip_path: str, dest_dir: str) -> None:
                 except OSError:
                     pass  # unreadable / non-regular entry (e.g. a directory) -- ignore
     else:  # .tar.xz / .tgz
-        import tarfile, lzma
+        import tarfile
         with open(zip_path, "rb") as fh, tarfile.open(fileobj=fh, mode="r:") as tf:
             for member in tf.getmembers():
                 if not member.isreg():
@@ -244,7 +244,6 @@ def record_provision(store: "ConfigStore", scope_dir: str, tools: dict) -> list:
     marked ``preferred=True`` with ``origin="portable"``. Returns the list of recorded tool names.
     """
     scope = _abs(os.path.expanduser(scope_dir)) if scope_dir else _abs(os.getcwd())
-    rel_root = os.path.relpath(tools["ffmpeg"], scope)
     # record both ffmpeg and ffprobe (a build always ships the pair); keep only what succeeded
     recorded = []
     for tool in _PROVISIONABLE:
@@ -352,7 +351,7 @@ def provision(scope_dir: str = "", existing_dirs=None) -> dict:
             data = fetch_to_bytes(url, expected_sha256=expected_sha256)
         else:
             data = fetch_to_bytes(url)
-    except FetchError as exc:
+    except FetchError:
         return {"provisioned": False, "dir": None, "downloaded": False,
                 "sources": sources}
 
@@ -366,7 +365,7 @@ def provision(scope_dir: str = "", existing_dirs=None) -> dict:
         try:
             open(zip_path, "wb").write(data)
             extract_build(zip_path, dest_dir)
-        except FetchError as exc:
+        except FetchError:
             return {"provisioned": False, "dir": None, "downloaded": False,
                     "sources": sources}
 
