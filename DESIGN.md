@@ -142,6 +142,14 @@ stretch). No global installs required.
   The `demucs` package and its weights are fetched separately by `pip install demucs`. Network access is a
   deliberate capability; some videos may need yt-dlp cookies/oauth (`cookies.txt`).
 
+### On-disk state files (§7)
+
+Three small JSON files are the only persistent on-disk state; all three live at project root and are gitignored:
+
+- **`.portable/<os>/...`** — private tooling scope. Holds reused or self-provisioned binaries (yt-dlp standalone + a static ffmpeg+ffprobe build that ships BOTH, plus `<os_family>/ffmpeg` scoped fallbacks). Python is NOT stored here; it is resolved from PATH/system first.
+- **`splitfy_queue.json`** — persistent input queue. Schema `{items:[{watch_id,title,status,added_at}], done:[...], updated_at}`; `done` keeps completed/failed ids for history + dedup. Shared by the CLI and HTTP server through the same JSON protocol (override via env `AUTOCV_QUEUE` or the `--queue` flag). WatchQueue loads an empty queue if the file is missing or invalid, so it never blocks a run.
+- **`splitfy.json`** — **does not exist.** The ConfigStore/splitfy.json persistence design was removed during portabilization; there is no persisted binary/override cache. Tool resolution (python / yt-dlp / ffmpeg) is live detection on every launch (`bootstrap.py` + `core.py`), so nothing here can drift out of sync.
+
 ## Binary discovery (§8)
 
 ### Curated known-install roots (PATH-first, then curated)
