@@ -19,8 +19,6 @@ import unittest.mock as mock
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 from splitfy import run as run_mod
 from splitfy.core import RunResult   # for finalize_output() test helpers
-import splitfy.provision as p
-from splitfy.config_state import ConfigStore as cs
 
 
 class DownloadCmdTests(unittest.TestCase):
@@ -278,40 +276,12 @@ class RunPipelineEmptyTests(unittest.TestCase):
         self.assertEqual(run_mod.run_pipeline([], args), [])
 
 
-class ResolveRunEnvReuseTests(unittest.TestCase):
-    """_resolve_run_env prefers a ConfigStore-recorded portable ffmpeg over rescanning."""
+class ResolveRunEnvScopeTests(unittest.TestCase):
+    """_resolve_run_env resolves the working scope from args.scope / AUTOCV_SCOPE / cwd.
 
-    def _seed_recorded_ffmpeg(self, scope):
-        names = ("ffmpeg.exe", "ffprobe.exe") if p.PLATFORM_WINDOWS else ("ffmpeg", "ffprobe")
-        bin_dir = os.path.join(p.ffmpeg_bin_dir(scope), names[0])
-        os.makedirs(os.path.dirname(bin_dir), exist_ok=True)
-        open(bin_dir, "w").close()
-        rel = os.path.relpath(bin_dir, scope)
-        store = cs.create()
-        store.record("ffmpeg", paths=[rel], preferred=True)
-        return bin_dir, rel
-
-    def test_prefers_recorded_path_over_find_ffmpeg(self):
-        with tempfile.TemporaryDirectory() as scope:
-            bin_dir, rel = self._seed_recorded_ffmpeg(scope)
-            recorded_abs = os.path.abspath(bin_dir)
-            # resolve_recorded_tools() itself is unit-tested in tests/test_provision.py; here we
-            # assert _resolve_run_env consumes a ConfigStore-recorded ffmpeg and skips the scan.
-            with mock.patch.object(run_mod, "resolve_recorded_tools", return_value={"ffmpeg": recorded_abs}), \
-                 mock.patch.object(run_mod, "find_ffmpeg", side_effect=RuntimeError("must not scan when reused")), \
-                 mock.patch.object(run_mod, "resolve_engine", return_value="htdemucs"):
-                _s, engine, ffmpeg_dir = run_mod._resolve_run_env(argparse.Namespace(engine="auto", threads=0))
-            self.assertEqual(os.path.normcase(os.path.abspath(ffmpeg_dir)),
-                             os.path.normcase(recorded_abs))
-
-    def test_falls_back_to_find_ffmpeg_when_no_record(self):
-        with tempfile.TemporaryDirectory() as scope:
-            with mock.patch.dict(os.environ, {"AUTOCV_SCOPE": scope}), \
-                 mock.patch.object(run_mod, "find_ffmpeg", return_value="/nonexistent/ffmpeg") as ff, \
-                 mock.patch.object(run_mod, "resolve_engine", return_value="htdemucs"):
-                _s, engine, ffmpeg_dir = run_mod._resolve_run_env(argparse.Namespace(engine="auto", threads=0))
-            self.assertEqual(ffmpeg_dir, "/nonexistent/ffmpeg")
-            ff.assert_called_once()   # no recorded path -> normal scan runs
+    _resolve_run_env no longer consults a reuse cache: ffmpeg is always resolved by a live PATH/app
+    scan (find_ffmpeg), so these cases guard only the scope-selection contract that CLI and server
+    share."""
 
     def test_cli_without_scope_attr_uses_env_then_cwd(self):
         # the bare CLI namespace has NO scope attribute (run.py exposes no --scope flag), so

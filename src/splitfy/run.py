@@ -10,7 +10,7 @@ Per input (YouTube link / partial URL / bare watch id) the pipeline is::
 Outputs per item: ``<title>_drums.<fmt>`` and ``<title>_no_drums.<fmt>`` where ``<fmt>`` is the
 chosen audio format (see :func:`build_parser`'s ``--audio-format``); lossy MP3 is the default,
 raw WAV is opt-in. Each output keeps a ``.meta.json`` sidecar.
-Heavy/networked steps are delegated to core/provision; this module's own logic -- input
+Heavy/networked steps are delegated to core (and the subprocesses it spawns); this module's own
 gathering/dedup, output naming, stage command building, per-item status, dry-run preview, and CLI
 wiring -- is pure or unit-testable without GPU/network.
 
@@ -36,7 +36,6 @@ from .core import (
     tool_source,
 )
 from .bootstrap import find_ffmpeg
-from .provision import resolve_recorded_tools
 from .logging import SYMBOL, Logger
 from .naming import parse_title_artist, stem_prefix, build_metadata_name, meta_dict
 from splitfy.watch_queue import WatchQueue, default_queue_path
@@ -245,7 +244,7 @@ def _resolve_suppress_subs() -> Optional[bool]:
 
 
 # --------------------------------------------------------------------------- #
-# sequential orchestration (delegates heavy steps to core/provision)
+# sequential orchestration (delegates heavy steps to core)
 # --------------------------------------------------------------------------- #
 def _find_ytdlp(scope_dir: str):
     from .bootstrap import find_ytdlp as fy
@@ -265,10 +264,8 @@ def _resolve_run_env(args) -> tuple:
     scope = getattr(args, "scope", None) or os.environ.get("AUTOCV_SCOPE") or os.getcwd()
 
     engine = resolve_engine(args, scope)
-    # reuse-first: if a prior run recorded a portable ffmpeg path that still exists on disk,
-    # prefer it here so we skip the broader PATH/app scan (resolve_recorded_tools returns {} when
-    # nothing usable is recorded -> find_ffmpeg(scope) runs unchanged).
-    ffmpeg_dir = resolve_recorded_tools(scope).get("ffmpeg") or find_ffmpeg(scope)
+    # No reuse cache exists at runtime: always resolve ffmpeg by a live PATH/app scan.
+    ffmpeg_dir = find_ffmpeg(scope)
     return scope, engine, ffmpeg_dir
 
 
@@ -328,7 +325,8 @@ def process_one(wid: str, args, progress=None, source_url: Optional[str] = None)
 
     Kept separate from run_pipeline so a persistent queue can drive one item at a time,
     mark it done in the queue file, and resume later. Heavy steps are delegated to
-    core.separate_stems / provision / subprocesses (yt-dlp + ffmpeg required on PATH/scope).
+    core's subprocess runners (yt-dlp + ffmpeg required on PATH/scope).
+
 
     ``source_url`` is the original input text (full URL / partial path / bare id) kept from
     normalization; it is passed straight to yt-dlp so any host it understands resolves -- not just

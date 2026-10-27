@@ -12,7 +12,7 @@ the pipeline is runnable *as-is* on this machine.
 from __future__ import annotations
 import os
 import sys
-from .config_state import (ConfigStore, default_config_path)
+from dataclasses import dataclass
 from .core import (_abs, ENGINE_HTDEMUCS, PLATFORM_WINDOWS, _os_family, detect_engine, which)  # noqa: E402
 # --------------------------------------------------------------------------- #
 # result types
@@ -70,10 +70,9 @@ def find_ytdlp(scope_dir: str = "") -> ToolStatus:
         ok = (os.path.isfile(path) and not path.endswith(".py")
               and any(name in n for n in ("yt-dlp", "yt-dlp.exe", "yt-dlp_x86.exe", "yt-dlp.bat")))
         return ToolStatus("yt-dlp", path=path, ok=ok)
-    # 1. official per-OS standalone inside the portable scope. Probe BOTH the flat
-    #    <scope>/.portable/<f> direct child and (on Windows) the <os_family>/ subdir, because
-    #    _scan_known_roots records a downloaded build in either layout; without both forms a cached
-    #    portable yt-dlp would be re-scanned every launch.
+    # 1. official per-OS standalone inside the portable scope, probed in BOTH the flat
+    #    <scope>/.portable/<f> direct child and (on Windows) the <os_family>/ subdir so a
+    #    downloaded build is found regardless of layout; without both forms we'd miss it.
     names = ("yt-dlp.exe", "yt-dlp_x86.exe", "yt-dlp") if PLATFORM_WINDOWS else ("yt-dlp",)
     candidates = [os.path.join(portable, f) for f in names]
     if PLATFORM_WINDOWS:
@@ -115,8 +114,8 @@ def detect_ffmpeg(ffmpeg_dirs: list = None, scope_dir: str = "", additional_dirs
     for d in dirs:
         if not os.path.isdir(d):
             continue
-        # _dir_has_both is the single definition of "this dir holds BOTH ffmpeg + ffprobe" --
-        # reused by the curated-root scan (_scan_known_roots) so reuse never splits across two checks.
+        # _dir_has_both is the single definition of "this dir holds BOTH ffmpeg + ffprobe"; every
+        # reusable-dir check routes through it so that notion never drifts into a second place.
         if _dir_has_both(d):
             return ToolStatus("ffmpeg", path=d, ok=True, note="has ffmpeg + ffprobe")
         if os.path.isfile(os.path.join(d, names[0])):
@@ -201,124 +200,9 @@ def _looks_like_ytdlp(path: str) -> bool:
     name = os.path.basename(os.path.normpath(path))
     return (os.path.isfile(path) and not path.endswith(".py")
             and any(n in name for n in ("yt-dlp", "yt-dlp.exe", "yt-dlp_x86.exe", "yt-dlp.bat")))
-def find_known_roots(scope_dir: str = "", additional_dirs=(), config_path=None, force=False) -> dict:
-    """Return reusable install roots for this run.
-    Fast path: when a valid cache exists at ``config_path`` (defaults to the scope root's
-    ``splitfy.json``), the recorded paths are returned immediately -- no filesystem scan,
-    so every run after the first is cheap and can report *reused vs downloaded*. Only when the
-    cache is empty/invalid, or ``force=True``, do we call :func:`_scan_known_roots` (the slow,
-    exhaustive probe) once and persist its results for next time.
-    See :func:`_scan_known_roots` for the semantics of each category. Pure stdlib; no network.
-    """
-    cfg = ConfigStore.from_path(config_path or default_config_path(scope_dir))
-    if not force and not cfg.empty:
-        return _load_cached(cfg)
-    fresh = _scan_known_roots(scope_dir=scope_dir, additional_dirs=tuple(additional_dirs))
-    store = ConfigStore.from_path(config_path or default_config_path(scope_dir))
-    # Persist only when this run actually discovered a usable root for the category: either it
-    # found >=2 candidates (a real multi-path install) or there was no prior record. A thin scan
-    # (<=1 candidate) on an already-known category is treated as noise, so we keep the previously
-    # recorded path instead of clobbering a good root with an empty/thin result.
-    for cat in ("ffmpeg", "yt-dlp"):
-        fresh_paths = list(fresh[cat])
-        had_prior = bool(store.get_paths(cat))
-        if len(fresh_paths) > 1 or not had_prior:
-            store.record(cat, fresh_paths)
-    try:
-        store.save()
-    except OSError:
-        pass  # caching is best-effort; discovery still returns the freshly-scanned paths
-    return fresh
-def _scan_known_roots(scope_dir: str = "", additional_dirs=(), uvr_scan=True) -> dict:
-    """Exhaustive filesystem probe of reusable install roots (PATH-first, then curated).
-    Returns::
-        {"ffmpeg": [dir...], "yt-dlp": [path...]}
-    This is the *slow* path -- invoked only once per unique scope when no cache exists. See
-    :func:`find_known_roots`. A directory with only ffmpeg is NOT listed here (needs BOTH);
-    see :func:`detect_ffmpeg` for that WARN-only case.
-    ``uvr_scan`` gates the one-time UVR5-weight-repo probe; pass False to exercise the fast
-    PATH/curated probes against temp dirs in isolation (the UVR scan is separately unit-tested).
-    """
-    out = {"ffmpeg": [], "yt-dlp": []}
-    def _norm(path: str) -> str:
-        return os.path.normpath(_abs(os.path.expanduser(os.path.expandvars(path))))                .replace("\\", "/")
-    # --- ffmpeg: PATH-first, then curated app roots (a dir with BOTH binaries is reusable) ---
-    path_ffmpeg = which("ffmpeg")
-    if path_ffmpeg and _dir_has_both(os.path.dirname(_abs(path_ffmpeg))):
-        out["ffmpeg"].append(_abs(path_ffmpeg))
-    for d in list(additional_dirs) + [os.path.join(scope_dir, ".portable", "ffmpeg")]:
-        ap = os.path.abspath(os.path.expanduser(d))
-        if not os.path.isdir(ap):
-            continue
-        # only directories shipping BOTH binaries are reusable targets; see :func:`_dir_has_both`
-            continue
-        if _dir_has_both(ap):
-            out["ffmpeg"].append(ap)
-    for root in _curated_app_roots():
-        # extra guard: skip anything that is not a real directory (defensive; roots are already
-        # dir-filtered at creation) -- discovery must never crash on a malformed path.
-        if not os.path.isdir(root):
-            continue
-        try:
-            for level, entry in enumerate(os.walk(root)):
-                # a malformed host path can make os.walk yield odd-shaped tuples -- unpack defensively so
-                # one bad component never aborts the whole walk and hides legitimate bundled-app roots.
-                try:
-                    dp = entry[0]
-                except ValueError:
-                    dp = ""
-                if level > 3:
-                    continue
-                # only directories shipping BOTH binaries are reusable targets; see :func:`_dir_has_both`
-                if not _dir_has_both(dp):
-                    continue
-                out["ffmpeg"].append(_abs(dp))
-        except (OSError, ValueError):
-            # a malformed host path can make os.walk yield odd-shaped tuples -- skip gracefully
-            pass
-    # --- yt-dlp: this box's AppData standalone, then curated roots (PATH-first) ---
-    y_appdata = os.environ.get("APPDATA", "")
-    for cand in [os.path.join(y_appdata, "yt-dlp_win_x86", n)
-                 for n in ("yt-dlp.exe", "yt-dlp_x86.exe", "yt-dlp")]:
-        if _looks_like_ytdlp(cand):
-            out["yt-dlp"].append(_abs(cand))
-    # portable-scope standalone yt-dlp -- symmetric with the AppData probe layout (win_x86/)
-    port_ytdlp = os.path.join(scope_dir, ".portable", "yt-dlp")
-    for f in ("yt-dlp.exe", "yt-dlp_x86.exe", "yt-dlp"):
-        fp = _abs(os.path.join(port_ytdlp, f))
-        if _looks_like_ytdlp(fp) and not any(f.startswith(x) for x in out["yt-dlp"]):
-            out["yt-dlp"].append(fp)
-    win_x86 = os.path.join(port_ytdlp, "win_x86")
-    if os.path.isdir(win_x86):
-        for f in ("yt-dlp.exe", "yt-dlp_x86.exe", "yt-dlp"):
-            fp = _abs(os.path.join(win_x86, f))
-            if _looks_like_ytdlp(fp) and not any(f.startswith(x) for x in out["yt-dlp"]):
-                out["yt-dlp"].append(fp)
-    for root in _curated_app_roots():
-        if os.path.isdir(root):
-            def _find(name, exts):
-                hit = ""
-                # bounded walk: count descent levels from `root` (not absolute components)
-                try:
-                    for level, entry in enumerate(os.walk(root)):
-                        # defensive unpack (see walk above): only dirpath + filenames are needed.
-                        try:
-                            dp, fn = entry
-                        except ValueError:
-                            dp, fn = entry[0], []
-                        if level > 3:
-                            continue
-                        if name in fn and any(fn[0].endswith(e) for e in exts):
-                            hit = _abs(os.path.join(dp, fn[0]))
-                            break
-                except (OSError, ValueError):
-                    pass  # malformed host path -- skip this curated root gracefully
-                return hit
-            for p in (_find("yt-dlp", (".exe", ".bat")), _find("yt-dlp", ())):
-                if p and not any(p.startswith(x) for x in out["yt-dlp"]):
-                    out["yt-dlp"].append(p)
-    return {k: list(dict.fromkeys(v)) for k, v in out.items()}  # de-dup, order-preserving
-def _load_cached(cfg: "ConfigStore") -> dict:
+
+
+def _load_cached(cfg) -> dict:
     """Return cached roots (ffmpeg + yt-dlp) as-is, or empty if nothing recorded."""
     out = {"ffmpeg": list(cfg.get_paths("ffmpeg")), "yt-dlp": list(cfg.get_paths("yt-dlp"))}
     return {k: list(dict.fromkeys(v)) for k, v in out.items()}
@@ -338,23 +222,32 @@ def _exists_exe(path: str) -> bool:
 # --------------------------------------------------------------------------- #
 # orchestration helpers for the CLI report
 # --------------------------------------------------------------------------- #
-def summarize(scope_dir: str = "") -> list:
-    """Build the ordered status report used by `main`.
-    Portable-only: there is exactly one separation engine (the demucs CLI), so there is no UVR5
-    install, bundled weight repo, or uvr-root ffmpeg to report. The htdemucs entry reflects whether
-    that single engine's weights are usable on this box -- the only thing `main` gates on for repro.
-    """
+@dataclass(frozen=True)
+class RunReport:
+    """The single source of truth for a run's dependency status. Produced by summarize only;
+    main derives its readiness gates from this instead of re-running detectors."""
+    python: ToolStatus
+    ytdlp: ToolStatus
+    ffmpeg: ToolStatus
+    engine: ToolStatus          # htdemucs entry; ok iff repro is available (yt-dlp OR demucs weights)
+    has_repro: bool = False     # derived once, here -- never recomputed downstream
+
+def summarize(scope_dir: str = "") -> RunReport:
+    """Build the dependency status report. Portable-only: exactly one separation engine (the demucs
+    CLI), so there is no UVR5 install, bundled weight repo, or uvr-root ffmpeg to report. The htdemucs
+    entry reflects whether that single engine's weights are usable on this box -- the only repro
+    contributor main gates on."""
     py = detect_system_python()
     ytdlp = find_ytdlp(scope_dir)
     ffmpeg = detect_ffmpeg(scope_dir=scope_dir)
     engine = detect_engine(scope_dir=scope_dir)
     has_repro = bool(ytdlp.ok) or (engine == ENGINE_HTDEMUCS)
-    return [py, ytdlp, ffmpeg, ToolStatus(
+    return RunReport(py, ytdlp, ffmpeg, ToolStatus(
         "htdemucs",
         path=engine,
         ok=has_repro,
         note="demucs CLI (%s)" % ("available" if has_repro else "not available"),
-    )]
+    ), has_repro)
 def main(argv=None) -> int:
 
     scope = getattr(os, "environ", {}).get("AUTOCV_SCOPE") or os.getcwd()
@@ -362,23 +255,22 @@ def main(argv=None) -> int:
     print("splitfy dependency detection")
     print("=" * 60)
 
-    for s in summarize(scope_dir=scope):
-        print(s.report())
+    report = summarize(scope_dir=scope)          # runs each detector exactly once; single source of truth
+    for entry in (report.python, report.ytdlp, report.ffmpeg, report.engine):
+        print(entry.report())
 
-    # critical gates for a runnable pipeline *as-is* -- portable, single-engine:
-    ffmpeg_both = detect_ffmpeg(scope_dir=scope)
-    python_ok = detect_system_python().ok
-    ytdlp_ok = find_ytdlp(scope).ok
-    has_repro = bool(ytdlp_ok) or (detect_engine(scope_dir=scope) == ENGINE_HTDEMUCS)
+    has_python = report.python.ok
+    has_ffmpeg = report.ffmpeg.ok
+    has_repro = report.has_repro                  # derived from the same detectors summarize ran -- no re-run
 
     print("=" * 60)
-    if ffmpeg_both.ok and python_ok and has_repro:
+    if has_python and has_ffmpeg and has_repro:
         print("STATUS: ready to run")
         return 0
     reasons = []
-    if not python_ok:
+    if not has_python:
         reasons.append("no system python interpreter found")
-    if not ffmpeg_both.ok:
+    if not has_ffmpeg:
         reasons.append("ffmpeg+ffprobe directory not found (need BOTH binaries)")
     if not has_repro:
         reasons.append("yt-dlp and/or htdemucs repro not detected")

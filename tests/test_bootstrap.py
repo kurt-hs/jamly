@@ -151,18 +151,14 @@ class FindFfmpegTests(unittest.TestCase):
 # --------------------------------------------------------------------------- #
 class OsFamilyDedupTests(unittest.TestCase):
     """
-    _os_family() must live in ONE module (core) and be shared by bootstrap + provision.
-
-    If either module ever re-introduces its own copy, this identity assertion fails -- the whole
-    point of D1 was to remove a duplicated OS-detection function. Branch coverage is exercised via
-    patched PLATFORM_WINDOWS / platform.machine / sys.platform; only _os_family() runs inside each
-    patch so no global state leaks between cases."""
+    _os_family() must live in ONE module (core); bootstrap imports it rather than copying its own,
+    so this identity assertion guards against re-introducing a duplicated OS-detection function.
+    Branch coverage is exercised via patched PLATFORM_WINDOWS / platform.machine / sys.platform; only
+    _os_family() runs inside each patch so no global state leaks between cases."""
 
     def test_single_source_of_truth(self):
         import splitfy.core as c
-        import splitfy.provision as p
-        self.assertIs(b._os_family, c._os_family)
-        self.assertIs(p._os_family, c._os_family)
+        self.assertIs(b._os_family, c._os_family)   # bootstrap uses core's _os_family, not a copy
 
     def _run_with_platform(self, win, machine, platform_name):
         import splitfy.core as c

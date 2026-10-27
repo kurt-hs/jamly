@@ -24,8 +24,8 @@ PLATFORM_WINDOWS = sys.platform == "win32"
 def _os_family() -> str:
     """Coarse OS family for portable-scope layout and asset naming (win/linux/macos).
 
-    Single source of truth -- shared by bootstrap.py and provision.py so their build/download
-    layouts agree. Returns one of ``"win"``, ``"linux"`` or ``"macos"``.
+    Single source of truth for portable-scope layout; shared by bootstrap + run so the .portable/<os>
+    tree is built consistently. Returns one of ``"win"``, ``"linux"`` or ``"macos"`` (or linux-arm).
     """
     if PLATFORM_WINDOWS:
         return "win"
