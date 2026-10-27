@@ -3,7 +3,7 @@
 Per input (YouTube link / partial URL / bare watch id) the pipeline is::
 
     download -> yt-dlp best-audio extract   (container chosen natively by the stream)
-         -> separate_stems() four-stems      (htdemucs ONNX or UVR5 audio-separator)
+         -> separate_stems() four-stems      (torch `demucs` CLI, model htdemucs)
          -> ffmpeg no-drums mix               (bass + other + vocals, 2ch)
          -> per-stem encode-or-copy           (lossy format default; raw WAV on request)
 

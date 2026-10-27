@@ -245,7 +245,7 @@ AUDIO_FORMATS = (FORMAT_WAV, FORMAT_MP3)
 DEFAULT_OUTPUT_FORMAT = FORMAT_MP3   # lossy is the default -- smaller files out of the box
 
 # Per-format ffmpeg encoder settings for lossy targets. V0 320kbps MP3 keeps near-CD quality while
-# staying far smaller than WAV and playing everywhere (Windows media libs, UVR5, drag-and-drop).
+# staying far smaller than WAV and playing in Windows media libraries, generic players, and drag-and-drop.
 _LOSSY_ENCODERS = {
     FORMAT_MP3: {"codec": "libmp3lame", "bitrate": "320k"},
 }

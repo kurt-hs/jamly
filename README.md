@@ -1,17 +1,21 @@
 # splitfy
 
-A small, portable **four-stem audio-separation** tool. Give it anything `yt-dlp` can fetch —
-a full URL, partial path, or bare id from any supported host (YouTube included) — and it
-downloads the highest-quality available audio and splits it into two WAV stems:
+A small, portable **audio-separation** tool. Give it anything `yt-dlp` can fetch — a full URL,
+partial path, or bare id from any supported host (YouTube included) — and it downloads the
+highest-quality available audio and splits it into its four stems:
 
 ```
-drums.wav      – drums only
-no-drums.wav   – everything else (vocals + instruments)
+drums.wav  – drums only
+bass.wav   – bass only
+other.wav  – everything else but drums & bass
+vocals.wav – vocals only
 ```
 
-Separation uses the **Demucs v4 four-stems (`htdemucs`) ONNX Runtime** model, so it runs with
-**no PyTorch / no heavy installs**. If an Ultimate Vocal Remover 5 (UVR5) install is present on
-the machine its bundled models are reused automatically instead.
+Separation uses the **torch-based `demucs` PyPI CLI** (`python -m demucs separate`, model
+`htdemucs`). It has no bundled weights: on first use it fetches its own package (and, if needed,
+the model) via `pip install demucs`. There is a single engine only — no UVR5 / audio-separator
+reuse and no reused `.th` weights. Heavy imports stay lazy, so importing this tool never pulls
+PyTorch; availability checks are import-free.
 
 ## How it works
 
@@ -19,19 +23,21 @@ the machine its bundled models are reused automatically instead.
    so any host `yt-dlp` understands resolves.
 2. `yt-dlp` extracts the highest-quality audio in its native lossless container — passed straight
    through to separation with no re-encode.
-3. Demucs v4 four-stems (`htdemucs`) split it; the **drums** stem and the mix of the remaining three
-   stems are written as `drums.wav` / `no-drums.wav`.
+3. The torch `demucs` CLI separates it into four stems (`drums`, `bass`, `other`, `vocals`). Two of
+   them are consumed by ffmpeg: bass + other + vocals are mixed (2 channels) into the **no-drums**
+   file, while the drum stem is kept as-is.
+4. Outputs land next to each other, named after the parsed title with a `.meta.json` sidecar keyed
+   by the bare watch id — see `DESIGN.md §7`.
 
 ## Layout
 
 ```
 src/splitfy/
   normalize.py    any-source input normalization: extract a stable id, validate + dedup
-  core.py         engine auto-detection (htdemucs ONNX vs UVR5), command builders, stem run
-  bootstrap.py    dependency/tool detection (python, yt-dlp, ffmpeg, UVR5)
-  provision.py    self-provision missing tools into .portable/<os>/ (reuse-first)
-  queue.py        persistent, resumable input queue (JSON-backed, in-memory usable)
-  run.py          CLI orchestrator: download -> separate -> metadata/renaming
+  core.py         engine availability check (single torch demucs CLI), command builders, stem run
+  bootstrap.py    dependency/tool detection (python, yt-dlp, ffmpeg) -- reuse-first, no provisioning
+  watch_queue.py  persistent, resumable input queue with a persisted done-set (JSON-backed)
+  run.py          CLI orchestrator: download -> separate -> mix/metadata/renaming
   server.py       HTTP(S) server with SSE `GET /status` progress streaming
 tests/            unittest suite (absolute-package imports; runs under pytest or -m unittest)
 browser/extension # MV3 WebExtension + shared DOM-free client (manifest, service worker,
@@ -46,7 +52,7 @@ AGENTS.md         contributing & coding conventions
 From a checkout:
 
 ```bash
-python src/splitfy/run.py -i <source-url-or-id> [-i <more>] [--engine auto|uvr5|htdemucs]
+python src/splitfy/run.py -i <source-url-or-id> [-i <more>] [--engine auto|htdemucs]
 # or, if installed via pip install -e . :  splitfy -i <source-url-or-id>
 ```
 
@@ -60,7 +66,8 @@ python -m unittest discover -s tests
 ## HTTP server mode
 
 `server.py` runs a small endpoint for browser userscripts/extension popups: `GET /status` streams
-progress JSON, `/items` adds videos to the queue. See `DESIGN.md §11` for the full UX design.
+progress JSON, `/items` adds videos to the queue. See `DESIGN.md §13` for the shared contract and
+`§14` for the full UX design.
 
 Start it (foreground):  `python -m splitfy.server --port 8765 [--scope .] [--audio-format wav|mp3]`
 
@@ -78,6 +85,7 @@ so no paths are baked into source). See `DESIGN.md §14`:
 
 ## Notes on portability
 
-The tool is designed to "just work" on any machine. `provision.py` self-heals a private
-`.portable/<os>/` scope: it reuses already-installed tools first and only downloads what is missing
-(static ffmpeg+ffprobe build, ONNX Runtime + the Demucs weights). See `DESIGN.md §10` for details.
+The tool is designed to "just work" on any machine. It self-heals a private `.portable/<os>/`
+scope: it reuses already-installed tools first and only downloads what is missing (the official per-OS
+standalone yt-dlp build, and a static ffmpeg+ffprobe build that ships **both** binaries). The `demucs`
+package and its weights are fetched separately by `pip install demucs`. See `DESIGN.md §10` for details.

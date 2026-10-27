@@ -1,83 +1,95 @@
 # Design — audio-separation pipeline
 
-YouTube link → highest-quality audio (yt-dlp) → Demucs v4 four-stems (`htdemucs`) → two WAV stems.
-See `README.md` for usage and `AGENTS.md` for contributing conventions. It records the design,
-decisions, and machine-specific findings below.
+Input URL / partial URL → highest-quality audio (`yt-dlp`) → torch `demucs` four-stem separation →
+two finished outputs plus a `.meta.json`. See `README.md` for usage and `AGENTS.md` for contributing
+conventions. It records the design, decisions, and machine-specific findings below.
 
 ## Overview (§0)
 
-The Python package lives under `src/splitfy/` (stdlib-only):
-`normalize.py` (URL→watch-id), `core.py` (subprocess runners for yt-dlp/Demucs/ffmpeg),
-`bootstrap.py` (reuse-first dependency detection), `provision.py` (self-provisioning into
-`.portable/`), `watch_queue.py` (`WatchQueue`, resumable + persisted done-set), `run.py` (CLI
-orchestrator with queue integration) and `server.py` (streaming `/status` SSE status server). Binary/config discovery is a cache-aware probe: `find_known_roots()` plus the new path-backed
-`splitfy/config_state.py` (`ConfigStore`, atomic persistence, empty-if-missing/invalid),
-and `tests/test_bootstrap_extra.py` (16 tests covering the probe/cache/persistence contracts). The
-probe is made robust on hosts where a git-bash-style env can make `os.walk` yield odd-shaped tuples.
+The Python package lives under `src/splitfy/` (stdlib-only; heavy imports such as torch are lazy):
+`normalize.py` (URL→watch-id), `core.py` (engine availability check + command builders + stem run),
+`bootstrap.py` (reuse-first dependency detection for python / yt-dlp / ffmpeg), `watch_queue.py`
+(`WatchQueue`: resumable queue with a persisted done-set), `run.py` (CLI orchestrator) and
+`server.py` (streaming `/status` SSE status server). Binary discovery is a cache-aware probe: PATH
+first, then a curated list of well-known app locations (`_curated_app_roots`) plus `.portable/<os>/`,
+made robust on hosts where a git-bash-style env can make `os.walk` yield odd-shaped tuples.
 
-Test suite is green under **both** runners (`python -m unittest discover -s tests` and `pytest`). The exact test count grows as features are added, so it isn't pinned in this doc; see AGENTS.md for how the suite stays portable under either runner.
+Test suite is green under **both** runners (`python -m unittest discover -s tests` and `pytest`). The
+exact test count grows as features are added, so it isn't pinned in this doc; see AGENTS.md for how the
+suite stays portable under either runner.
 
-### Developer experience — VSCode config / extensions (§12)
+### Developer experience — VSCode config / extensions (§9)
 
 `.vscode/` scaffolding gives contributors linting + type-checking + pytest-debug out of the box:
-`.vscode/extensions.json` (Python, Pylance, pytest-test-selector, black/ruff formatter, code-spell-checker,
-remote-ssh), `.vscode/settings.json` (pyright `basic`, format-on-save via black, ASCII-only source),
-and `.vscode/launch.json` (modern schema: top-level object with default `pytest-debug` task + named
-per-task tasks each tagged with a unique `taskSig`; debug tasks set `PYTHONPATH=<root>/src` so no editable
-install is needed). Dropped the interpreter-pinned `.code-workspace` at user request. The AGENTS.md /
-README.md references are in place; there is no CI host, so lint/type-check are enforced locally via
-the VSCode dev-config rather than GitHub Actions.
+`.vscode/extensions.json` (Python, Pylance, `pytest-test-selector`, a formatter such as black/ruff,
+code-spell-checker, remote-ssh), `.vscode/settings.json` (pyright `basic`, format-on-save via black,
+ASCII-only source), and `.vscode/launch.json` (modern schema: top-level object with default
+`pytest-debug` task + named per-task tasks each tagged with a unique `taskSig`; debug tasks set
+`PYTHONPATH=<root>/src` so no editable install is needed). Dropped the interpreter-pinned
+`.code-workspace` at user request. The AGENTS.md / README.md references are in place; there is no CI
+host, so lint/type-check are enforced locally via the VSCode dev-config rather than GitHub Actions.
 
 ### Friendly run-time output (§14)
 
 A terse/friendly per-stage log is emitted through the module logger and unit-tested via
 `tests/test_logging.py`. Per raw input it produces: one line flagged `(blank)`/`(invalid)`, a dedup
-summary; a tools report naming each binary's version and install type/location (e.g. `[portable] portable`,
-`[app] Shotcut`) or warning when absent; an engine line; a streamed live download bar (`parse_download_progress`
-/`render_bar`); and clickable output links with a Windows "click here to open" hint. Symbols + optional ANSI
-color are emitted through the module logger, forced UTF-8 on startup so block glyphs survive legacy cp1252 consoles.
+summary; a tools report naming each binary's version and install type/location (e.g. `[portable]
+portable`, `[app] Shotcut`) or warning when absent; an engine availability line; a streamed live
+download bar (`parse_download_progress`/`render_bar`); and clickable output links with a Windows "click
+here to open" hint. Symbols + optional ANSI color are emitted through the module logger, forced UTF-8
+on startup so block glyphs survive legacy cp1252 consoles.
 
 ## Goal (§1)
 
-Given a YouTube link / partial URL / watch ID, download the highest-quality audio with `yt-dlp`,
-split it into stems, and emit two files — **drums-only** (`drums.wav`) and **no-drums**
-(`no-drums.wav`) = vocals + instruments. Python 3 orchestrates yt-dlp + separation; UVR5 becomes
-optional (its models are reused when present) rather than required.
+Given a YouTube link / partial URL / watch ID, download the highest-quality audio with `yt-dlp`, split
+it into four stems via the torch-based `demucs` CLI (`python -m demucs separate --audio … --out <dir> -n
+htdemucs`), and emit two finished files — **drums** (`<title>_drums.wav`) and **no-drums** (bass + other
++ vocals, mixed into `<title>_no_drums.wav`). The `demucs` package fetches its own weights on demand; no
+local install of PyTorch, ONNX Runtime, or UVR5 is required. Python orchestrates yt-dlp + separation; the
+whole thing runs in a private `.portable/` scope so nothing needs to be installed globally.
 
-## Route decision (§3, §6)
+## Environment findings on this machine (§2)
 
-Both inference engines produce the same four-stem split (`drums` / `bass`, `other`, `vocals`; emitted as
-`<id>_drums.wav` and `<id>_no_drums.wav`). They differ only in how that split is computed:
+> Findings for **this box**; the portable design (`§7`) does not depend on them — `bootstrap.py`
+> self-provisions missing tools into `.portable/`. Useful as ground truth for local testing.
 
-- **Default — audio-separator (UVR5).** ``resolve_engine`` returns this when reusable Demucs `.th` weights or
-  the importable `audio_separator` package are present. It reuses UVR5's bundled weights, so results match the
-  GUI path; no extra model download beyond what UVR5 already ships.
-- **Opt-in — htdemucs (ONNX).** ``--engine htdemucs`` selects this only when `htdemucs`/`onnxruntime` are
-  installed and an `.onnx` model file is provisioned in scope. Portable across machines, but requires the flag.
+| Item | Finding |
+|------|---------|
+| System Python | `%USERPROFILE%\anaconda3\python.exe` (v3.13) — no yt-dlp / audio-separator / torch here |
+| `demucs` package | Not installed on this box; enabling four-stem separation needs `pip install demucs` (it fetches its own weights). |
+| yt-dlp binary | Standalone exe at `%USERPROFILE%\AppData\Roaming\yt-dlp_win_x86\yt-dlp`. Custom-build quirks: `--no-subs` is invalid → omit it; `-x/--extract-audio` needs an ffmpeg/ffprobe location and this build is intermittent about detecting them (only `ffmpeg.exe` present). Verify success exit code + output path before relying on it. |
+| ffmpeg / ffprobe | A directory with only `ffmpeg.exe` (no `ffprobe`) is NOT usable by this tool — the "needs BOTH" rule holds. Prefer a static build shipping both into `.portable/`; reuse only when the host matches. |
 
-There is no MDX23C / DrumSep fallback: that was never part of the design. The two routes above are the only
-separation paths; `--engine auto` resolves between them at runtime via ``resolve_engine``.
+> The shared extractor defaults to injecting `--no-subs`, and this box's custom yt-dlp rejects it, so
+> local CLI runs must set `AUTOCV_SUPPRESS_SUBS=0` (env escape-hatch; default None keeps every other
+> host identical). Provisioning ffmpeg for macOS is unsupported upstream — no static build ships, so that
+> platform falls back to PATH detection / system ffmpeg.
 
-### Inference engine options
+## Single-engine route decision (§3)
 
-| Option | Engine / model | Torch? | Portable across machines? | Notes |
-| --- | --- | --- | --- | --- |
-| **Default** | `audio_separator` / UVR5 reusable Demucs weights (`.th`) | Yes (large install) | Low — needs the model folders + a torch-CUDA venv carried over; auto-detected at runtime via ``resolve_engine`` | GUI-identical four-stems, fastest on GPU; this is what ``--engine auto`` selects when UVR5's weights/package are present. |
-| Portable override | ONNX Runtime + `htdemucs` `.onnx` | No | High — pure numpy+onnxruntime; CPU/DirectML/CUDA/CoreML via one provider flag; model auto-downloaded from HF on first use | Same HTDemucs family as UVR5's bundled weight → essentially identical results. Use ``--engine htdemucs`` for "just works" anywhere (requires the package + a provisioned ``.onnx``). |
+There is exactly **one** separation engine: the torch-based `demucs` PyPI CLI (`python -m demucs
+separate`). There is no UVR5 / audio-separator reuse and no ONNX Runtime `.onnx` path — those were never
+part of this design, and nothing falls back to them if the package is missing.
 
-Recommendation: default to the audio-separator/UVR5 path, since ``resolve_engine`` selects it when its
-reusable weights or importable package are present and no explicit engine is given. Provider is auto-detected
-(CUDA preferred, DirectML fallback). The htdemucs ONNX path stays as an opt-in override via `--engine htdemucs`.
+- **`--engine auto`** (default) resolves by availability: it runs whenever `demucs` is importable from
+  site-packages; otherwise separation is not possible rather than falling back to another engine.
+- **`--engine htdemucs`** selects the same torch CLI explicitly (`-n htdemucs`). It exists so callers can
+  name the single path, but there is no second route — both options drive one binary.
+
+The four stems are emitted as `drums`, `bass`, `other`, `vocals`; two of them (bass + other + vocals) feed
+the ffmpeg mix into the **no-drums** file while the drum stem is kept verbatim. See §5 for the command and
+§6 for naming.
 
 ## Architecture (§4)
 
 ```
-User / ext  --> run.py (validate+normalize) --> .portable/ scope (python, yt-dlp, ffmpeg+ffprobe, engine)
-Flow: normalize watch ID -> yt-dlp best-audio download -> stem separation (audio-separator/UVR5 by default, or htdemucs via `--engine`) -> ffmpeg mix -> tag/rename
-run.py self-provisions .portable/ on first run and reuses tools already installed.
+User / ext  --> run.py (validate+normalize) --> .portable/ scope (python, yt-dlp, ffmpeg+ffprobe BOTH)
+Flow: normalize watch ID -> yt-dlp best-audio download -> torch demucs four-stem separation (-n htdemucs) -> ffmpeg mix of bass+other+vocals -> tag/rename + .meta.json
+run.py self-provisions .portable/ on first run and reuses tools already installed. The demucs package is
+installed separately via `pip install demucs` (it fetches its own weights).
 ```
 
-### Command shapes (§7)
+### Command shapes (§5)
 
 **yt-dlp** (native lossless container; pass it straight through, no re-encode):
 
@@ -86,109 +98,86 @@ yt-dlp <url> --extract-audio --audio-format best --audio-quality 0 \
     --ffmpeg-location <dir-with-ffmpeg.exe-and-ffprobe.exe> -o '%(title)s.%(ext)s'
 ```
 
-**Demucs four-stems** (reusing UVR5's bundled weights):
+**Demucs four-stems** (torch `demucs` CLI; no `--four-stems` flag, source count comes from the model):
 
 ```
-python -m audio_separator.demucs.separate \
-    --model htdemucs --name 955717e8-8726e21a.th --repo <models/Demucs_Models/v3_v4_repo> \
-    --four-stems --input <audio> -o <workdir> [--device cuda] [--threads N]
+python -m demucs separate --audio <audio> --out <workdir> -n htdemucs [-j <threads>]
 ```
+
+Writes `<workdir>/separated/htdemucs/{drums,bass,other,vocals}.wav` — exactly what `core._locate_stems`
+walks. Requires `pip install demucs`.
 
 **ffmpeg mix of non-drum stems:**
 
 ```
-ffmpeg -i bass.wav -i other.wav -i vocals.wav -shortest -mixer_channels 2 <workdir>/no_drums.wav
+ffmpeg -nostdin -y -i bass.wav -i other.wav -i vocals.wav \
+    -shortest -map 0? -mixer_channels 2 <workdir>/no_drums.wav
 ```
 
-### Output naming (§7)
+### Output naming (§6)
 
-All three outputs for one item share the **watch id** as their common prefix, matching the yt-dlp
-extract (`<wid>.<ext>`) so every file for an item is traceable to a single name:
+All outputs for one item share the **parsed title** as their common prefix, with a `.meta.json` sidecar
+keyed by the bare watch id so every file traces back to a single record:
 
-- extract:  `<workdir>/<wid>.<ext>`           (build_download_cmd)
-- drums:    `<output_dir>/<wid>_drums.<fmt>`   (+ `.meta.json` sidecar, named but not written by code)
-- no-drums: `<output_dir>/<wid>_no_drums.<fmt>`
+- extract:  `<workdir>/<title>.<ext>`           (build_download_cmd)
+- drums:    `<output_dir>/<title>_drums.<fmt>`   (+ `<watch_id>.meta.json`, named but not written by code)
+- no-drums: `<output_dir>/<title>_no_drums.<fmt>`
 
-The id is URL-safe, unique per video, and known before extraction -- a stable filename basis on every
-platform (no title to rely on yet; no unicode/special chars; no truncation). `res.title` stays a display/logging name only.
+The id is URL-safe, unique per video, and known before extraction — a stable filename basis on every
+platform (no title to rely on yet; no unicode/special chars; no truncation). The real title (`res.title`)
+stays a display/logging name only. The **no-drums mix excludes the drum stem by construction**: ffmpeg
+blends bass+other+vocals into `nodrums_out`, never mixing in `<title>_drums.<fmt>`. Output format
+(`--audio-format`) defaults to lossy MP3; raw WAV is verbatim (copy, no encoder).
 
-The **no-drums mix excludes the drum stem by construction**: ffmpeg blends bass+other+vocals into
-`nodrums_out`, never mixing in `<wid>_drums.<fmt>`. Output format (`--audio-format`) defaults to lossy MP3;
-raw WAV is verbatim (copy, no encoder).
+## Durable / portable scope (§7)
 
-## Environment findings on this machine (§2)
+A single folder that self-heals on any host: reuse what is installed and download & install the rest into
+its own private `.portable/` scope so it "just works" anywhere (Windows primary; macOS/Linux/ARM as
+stretch). No global installs required.
 
-> Findings for **this box**; the portable design (`§10`) does not depend on them — `bootstrap.py`
-> self-provisions missing tools into `.portable/`. Useful as ground truth for local testing.
+- `bootstrap.py`: detect/reuse each dependency into `<project>/.portable/<os>/` — Python, yt-dlp, and a
+  **static ffmpeg+ffprobe build that ships BOTH binaries**. Reuse-first: every check hits PATH/existing
+  installs first; only missing pieces self-provision.
+- Everything needed lives under `.portable/` (gitignored) — no pollution of the system or any host install.
+  The `demucs` package and its weights are fetched separately by `pip install demucs`. Network access is a
+  deliberate capability; some videos may need yt-dlp cookies/oauth (`cookies.txt`).
 
-| Item | Finding |
-|------|---------|
-| System Python | `%USERPROFILE%\anaconda3\python.exe` (v3.13) — no yt-dlp / audio-separator / torch here |
-| yt-dlp binary | Standalone exe at `%USERPROFILE%\AppData\Roaming\yt-dlp_win_x86\yt-dlp`. Custom-build quirks: `--no-subs` is invalid → omit it; `-x/--extract-audio` needs an ffmpeg/ffprobe location and this build is intermittent about detecting them (only `ffmpeg.exe` present). Verify success exit code + output path before relying on it. |
-| UVR5 install | Flat PyInstaller layout — `.pyd` files live at the install root; runtime data in `lib_v5\`, models in `models\`. No bundled python/site-packages. |
-| UVR5 models present | `MDX_Net_Models` (incl. DrumSep model), `Demucs_Models\v3_v4_repo` (`htdemucs.yaml` + `.th` weights → model `955717e8`), `VR_Models`. |
-| GPU backend | **RTX 4070 SUPER (12GB)** confirmed → CUDA available & preferred. UVR5 also ships torch_directml as fallback. |
-| audio-separator | Headless package driving UVR5's Demucs/MDXC models. Recognizes UVR5's bundled `.th` weights — reuse the installed HTDemucs weight directly, no canonical `.pt` re-download. |
-| ffmpeg / ffprobe | Bundled at `%USERPROFILE%\AppData\Local\Programs\Ultimate Vocal Remover\ffmpeg.exe`. No `ffprobe.exe` reachable anywhere; point yt-dlp's `--ffmpeg-location` at a dir with BOTH, or verify exit code + output path on intermittent ffmpeg-only success. |
+## Binary discovery (§8)
 
-> The shared extractor now defaults to injecting `--no-subs` (portable correct). This box's custom
-> yt-dlp rejects it, so local CLI runs must set `AUTOCV_SUPPRESS_SUBS=0` (env escape-hatch; default
-> None keeps every other host identical). Provisioning ffmpeg for macOS is unsupported upstream —
-> no static build ships, so that platform falls back to PATH detection / system ffmpeg.
+### Curated known-install roots (PATH-first, then curated)
 
-## Durable / portable scope (§10)
-
-A single folder that self-heals on any host: reuse what is installed, download & install the rest
-into its own private `.portable/` scope so it "just works" anywhere (Windows primary; macOS/Linux/ARM as stretch). No global installs required.
-
-- `bootstrap.py`: detect/provision each dependency into `<project>/.portable/<os>/` — Python, yt-dlp, ffmpeg+ffprobe (one static build shipping both), and the inference engine (ONNX Runtime + htdemucs `.onnx`, or audio-separator reusing UVR5 weights). **Reuse-first**: every check hits PATH/existing-installs first; only missing pieces self-provision.
-- Everything needed lives under `.portable/` (gitignored) — no pollution of the system or UVR5 install. Network access is a deliberate capability; some videos may need yt-dlp cookies/oauth (`cookies.txt`).
-
-## §11 — Binary / config discovery
-
-### Findings on this box
-
-| Tool | Reusable source found here | Portable? | Notes |
-| --- | --- | --- | --- |
-| ffmpeg + ffprobe | `AppData\Local\Programs\Shotcut\` (both, **shared** MSYS2 build n9.0.2) — good locally but **not self-portable** to another host without Shotcut; also anaconda pkgs (old 4.3.1), `%APPDATA%\yt-dlp_win_x86\`, `File Converter\` (ffmpeg only, no ffprobe). | Low for third-party apps | Prefer a **static build shipping both** into `.portable/` for true portability; reuse only when the host is identical to this one. |
-| UVR5 + HTDemucs weights | Flat PyInstaller install at `AppData\Local\Programs\Ultimate Vocal Remover`; repo `models\Demucs_Models\v3_v4_repo\` ships **6 `.th` weights incl. `955717e8-8726e21a.th`** (the canonical HTDemucs v4). | High — pure model files, no python | Reuse the bundled weight directly; no re-download needed on this or any box with UVR5. |
-| yt-dlp | Official standalone at `AppData\Roaming\yt-dlp_win_x86\yt-dlp.exe` (custom build: drop `--no-subs`; extract-audio needs an ffmpeg location). | Medium — per-OS, self-contained exe | Reuse if same OS/arch; otherwise download the official per-OS standalone into `.portable/<os>/`. |
+1. **Curated app locations** (`core.py` / `bootstrap.py`, pure stdlib): probe PATH first, then a curated
+   list of well-known app folders — `%APPDATA%\yt-dlp_win_x86`, `AppData\Local\Programs\{Shotcut,DaVinci
+   Resolve,OBS Studio,Blender,Kdenlive,Avidemux,HandBrake,PotPlayer}` (apps that ship ffmpeg/ffprobe), plus
+   `.portable/<os>/`. This is a *best-effort* probe; it does not need to find every copy on this box — it
+   needs to cover the common cases cross-machine.
+2. **FFmpeg nuance**: a directory with only `ffmpeg.exe` (no ffprobe) is usable for some yt-dlp builds but
+   not this one — keep the "needs BOTH" rule, and treat third-party shared ffmpeg as *local-reuse-only* (not
+   portable). Open question: whether to also detect a system-wide ffmpeg/ffprobe via `%PATH%` on Windows.
 
 ### Design
 
-1. **Curated known-install roots** (`core.py` / `bootstrap.py`, pure stdlib): probe PATH first, then a curated list of well-known app locations — `%APPDATA%\yt-dlp_win_x86`, `AppData\Local\Programs\{Shotcut,DaVinci Resolve,OBS Studio,Blender,Kdenlive,Avidemux,HandBrake,PotPlayer}` (apps that ship ffmpeg/ffprobe), UVR5 roots, plus `.portable/<os>/`. This is a *best-effort* probe; it does not need to find every copy on this box — it needs to cover the common cases cross-machine.
-2. **Persist discovered paths in `splitfy.json`** (repo root; records existing binaries + user overrides). On first run / re-provision, write what was found so future runs reuse without rescanning and can report *reused vs downloaded*. A missing/absent file → empty queue on load (already handled by `watch_queue.from_path`).
-3. **Reuse-first provisioning**: `bootstrap.py` checks config + known roots first; only when absent (or `--provision`) does it download into `.portable/<os>/`: official yt-dlp standalone, a static ffmpeg+ffprobe build, and the ONNX Runtime HTDemucs export. The script then points yt-dlp's `--ffmpeg-location` at the discovered dir.
-4. **FFmpeg nuance**: a directory with only `ffmpeg.exe` (no ffprobe) is usable for some yt-dlp builds but not this one — keep the "needs BOTH" rule, and treat third-party shared ffmpeg as *local-reuse-only* (not portable). Open question: whether to also detect a system-wide ffmpeg/ffprobe via `%PATH%` on Windows.
+1. **Reuse-first**: `bootstrap.py` checks PATH + known roots first; only when absent (or `--provision`) does
+   it download into `.portable/<os>/`: the official yt-dlp standalone, and a static ffmpeg+ffprobe build. The
+   script then points yt-dlp's `--ffmpeg-location` at the discovered dir.
+2. **No persisted config**: tool resolution is live detection on every launch; there is no `splitfy.json`
+   cache to keep in sync (see AGENTS.md).
 
-> The discovery probe stores freshly-extracted ffmpeg/ffprobe paths relative to scope and reuses any
-> recorded locations still on disk as a reuse fast-path in `run._resolve_run_env()`, falling back to the PATH/app
-> scan when nothing is recorded. This reuse-first provisioning (§11 Design item 3) means future runs avoid
-> rescanning (covered by the probe/cache/persistence suite).
+> Discovery falls back to the PATH/app scan when nothing reusable is found, and reuses a recorded ffmpeg/ffprobe
+> dir only if it still exists on disk — that reuse fast-path keeps common multi-launch runs cheap. See the probe/cache
+> coverage under `tests/test_bootstrap.py`.
 
-## §12 — Developer experience: VSCode config / extensions
+## §9 — Developer experience: VSCode config / extensions
 
-`.vscode/` scaffolding gives contributors linting + type-checking + pytest-debug out of the box.
-
-- **`.vscode/extensions.json`** — recommended extensions (Python, Pylance, `ms-python.vscode-pylance`,
-  `pytest-test-selector`, a linter such as `charliermarsh.ruff` or `MS-python.black`/isort formatters,
-  `streetsidesoftware.code-spell-checker`, and `ms-vscode.remote-ssh` for testing the portable layout on
-  another host). The ruff extension is already installed at user level; its recommendation here makes it
-  reproducible on a fresh clone.
-- **`.vscode/settings.json`** — Python type-checking (pyright), lint/format-on-save, exclude `.portable/`,
-  `_work/`, build/output dirs, and ASCII-only source enforcement.
-- **`.vscode/launch.json`** — commented-out pytest-debug task (`python -m pytest tests`) plus `test_server.py`
-  live-server run; a single `run` task for the CLI. Debug tasks set `PYTHONPATH=<root>/src`, so no editable
-  install is needed.
-- **Ruleset parity**: a project-level `[tool.ruff]` pins the check codes so VS Code's ruff language server and
-  the anaconda `ruff` binary apply identical rules (keep `E4/E7/E9/F`; ignore only line-length/whitespace nits).
-- No CI host exists in this repo, so lint/type-check are enforced locally via the dev-config rather than GitHub Actions.
+See **§0** (Developer experience — VSCode config / extensions) above; this heading is retained for
+cross-reference from README.md and AGENTS.md. `.vscode/` scaffolding gives contributors linting +
+type-checking + pytest-debug out of the box, debug tasks set `PYTHONPATH=<root>/src`, and ruff rules are
+kept in parity with a project-level `[tool.ruff]`.
 
 ## §13 — Browser userscript & background-extension
 
-Both clients build on the shared
-contract the server already emits: a `/status` SSE stream with per-item terminal records
-(`last_completed`) and `pending`/`done` counts, plus the `watch_queue` queue-file schema.
+Both clients build on the shared contract the server already emits: a `/status` SSE stream with per-item
+terminal records (`last_completed`) and `pending`/`done` counts, plus the `watch_queue` queue-file schema.
 
 - **Userscript** — `browser/userscripts/splitfy.user.js` (Tampermonkey/Greasemonkey manifest):
   `GM_addStyle` UI, `/status` polling via fetch/XHR fallback, read/write of the local queue JSON, and
@@ -198,9 +187,9 @@ contract the server already emits: a `/status` SSE stream with per-item terminal
   protocol with the userscript (`GET /status` SSE + `POST /add`); a small server writes to the same queue
   file so users can enqueue from an always-on background page instead of the CLI process.
 - **Shared contract** — both clients use the identical `/status` JSON shape and `watch_queue` schema;
-  the shared client (`browser/extension/splitfy_client.js`) is DOM-free, so it ships as a static
-  asset in the extension rather than as an `splitfy` module. A contract test drives the parsing logic
-  directly; streamed-path tests use bounded reads so they stay deterministic under both runners.
+  the shared client (`browser/extension/splitfy_client.js`) is DOM-free, so it ships as a static asset in
+  the extension rather than as a `splitfy` module. A contract test drives the parsing logic directly;
+  streamed-path tests use bounded reads so they stay deterministic under both runners.
 - Read-only to project scope (never writes outside `.portable/` or the queue file); alerts on completion
   with download links.
 
@@ -211,9 +200,9 @@ folder (so no path edits are needed when files move together).
 ## §14 — Cross-platform server delivery
 
 The HTTP listener runs as a foreground process:  `python -m splitfy.server --port 8765`.
-There is **no** auto-start mechanism and the installed `splitfy` console script drives batch/queue mode, not
-the listener (see `src/splitfy/server.py`). To make it always-on / reboot-persistent across platforms,
-`servers/`-adjacent wrappers resolve tools from the repo root (no baked-in paths):
+There is **no** auto-start mechanism and the installed `splitfy` console script drives batch/queue mode,
+not the listener (see `src/splitfy/server.py`). To make it always-on / reboot-persistent across platforms,
+wrappers resolve tools from the repo root (no baked-in paths):
 
 - **CORS** — every response carries `Access-Control-Allow-Origin: *` and an `OPTIONS` preflight is answered, so
   the MV3 extension and Tampermonkey userscript can fetch over HTTP from their cross-origin contexts. Covered by
