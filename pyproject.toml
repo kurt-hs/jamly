@@ -1,12 +1,12 @@
-# splitfy — a small, portable audio-separation CLI + server.
-# src-layout: all application code lives under ``src/splitfy/`` so the package
+# jamly — a small, portable audio-separation CLI + server.
+# src-layout: all application code lives under ``src/jamly/`` so the package
 # can be installed (``pip install -e .``) or run directly from a checkout.
 [build-system]
 requires = ["setuptools>=61", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "splitfy-audio-sep"
+name = "jamly-audio-sep"
 version = "0.1.0"
 description = "Portable four-stem audio separation (YouTube download -> drums / no-drums WAV)."
 readme = "README.md"
@@ -22,7 +22,7 @@ keywords = ["audio", "demucs", "stem-separation", "yt-dlp"]
 python-version = "3.13"
 
 [project.scripts]
-splitfy = "splitfy.run:main"
+jamly = "jamly.run:main"
 
 [project.optional-dependencies]
 test = ["pytest>=7"]
@@ -30,7 +30,7 @@ test = ["pytest>=7"]
 [tool.setuptools.packages.find]
 where = ["src"]
 
-# Make the package importable (bare ``import splitfy.*``) when running tests
+# Make the package importable (bare ``import jamly.*``) when running tests
 # or scripts straight from a checkout without an editable install.
 # Pin ruff's ruleset so VS Code (@sumneko/ruff-languageserver) uses the SAME
 # checks as the anaconda `ruff` binary — no more editor-vs-CLI disagreement.

@@ -1,4 +1,4 @@
-"""Main CLI orchestrator for splitfy.
+"""Main CLI orchestrator for jamly.
 
 Per input (YouTube link / partial URL / bare watch id) the pipeline is::
 
@@ -38,7 +38,7 @@ from .core import (
 from .bootstrap import find_ffmpeg
 from .logging import SYMBOL, Logger
 from .naming import parse_title_artist, stem_prefix, build_metadata_name, meta_dict
-from splitfy.watch_queue import WatchQueue, default_queue_path
+from jamly.watch_queue import WatchQueue, default_queue_path
 
 # best-effort metadata lookup timeout (seconds); the whole thing is wrapped so a slow/failing yt-dlp
 # never blocks or fails item processing -- process_one degrades to the watch-id fallback.
@@ -48,7 +48,7 @@ ENGINE_CHOICES = ("auto", "htdemucs")  # portable-only: exactly one engine; 'uvr
 
 
 # module-level logger; quiet by default so importing this module never prints (tests/callers opt in).
-# Tests replace it via ``monkeypatch.setattr("splitfy.run._log", ...)`` to capture output.
+# Tests replace it via ``monkeypatch.setattr("jamly.run._log", ...)`` to capture output.
 _log = Logger()
 
 
@@ -419,7 +419,7 @@ def run_pipeline(inputs: List[Input], args, progress=None) -> List[ItemResult]:
     each heavy step (optional hook)."""
     scope = os.environ.get("AUTOCV_SCOPE") or os.getcwd()
     engine = resolve_engine(args, scope)
-    print("splitfy: %d input(s), engine=%s" % (len(inputs), engine or "n/a"))
+    print("jamly: %d input(s), engine=%s" % (len(inputs), engine or "n/a"))
 
     results = []
     for i, item in enumerate(inputs):
@@ -470,7 +470,7 @@ def finalize_output(ffmpeg_exe: str, src_wav: str, dst_path: str, fmt: str) -> b
 # --------------------------------------------------------------------------- #
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        prog="splitfy", description="Download audio from YouTube and split drums / no-drums.")
+        prog="jamly", description="Download audio from YouTube and split drums / no-drums.")
     p.add_argument("-i", "--input", action="append", metavar="URL_OR_ID",
                    help="YouTube link/id/partial URL (repeatable). Also reads stdin when piped.")
     p.add_argument("-o", "--output-dir", default="output",

@@ -9,11 +9,11 @@ import tempfile
 import unittest
 
 
-# src-layout: make the ``splitfy`` package importable for both `pytest` and
+# src-layout: make the ``jamly`` package importable for both `pytest` and
 # `python -m unittest discover -s tests` without an editable install. Inserted before any
 # absolute-package import so it always runs first.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
-import splitfy.core as c
+import jamly.core as c
 
 
 class HtdemucsBuilderTests(unittest.TestCase):
@@ -74,8 +74,8 @@ class HtdemucsRunnerTests(unittest.TestCase):
         import unittest.mock as mock
         fake = [os.path.abspath(os.path.join("separated", "htdemucs", "%s.wav" % s))
                 for s in ("drums", "bass", "other", "vocals")]
-        with mock.patch("splitfy.core._dir_has_any", return_value=True), \
-             mock.patch("splitfy.core.find_python", return_value="python"), \
+        with mock.patch("jamly.core._dir_has_any", return_value=True), \
+             mock.patch("jamly.core.find_python", return_value="python"), \
              mock.patch.object(c, "_locate_stems", return_value=fake), \
              mock.patch.object(c, "run") as run_mock:
             c.separate_stems("song.wav", engine=c.ENGINE_HTDEMUCS)
@@ -89,8 +89,8 @@ class HtdemucsRunnerTests(unittest.TestCase):
         # availability gate fails first (mocked as if no demucs dir) -> clear RuntimeError naming package
         import unittest.mock as mock
         with self.assertRaises(RuntimeError) as ctx, \
-             mock.patch("splitfy.core._dir_has_any", return_value=False), \
-             mock.patch("splitfy.core.find_python", return_value="python"):
+             mock.patch("jamly.core._dir_has_any", return_value=False), \
+             mock.patch("jamly.core.find_python", return_value="python"):
             c.separate_stems("song.wav", engine=c.ENGINE_HTDEMUCS)
         self.assertIn("demucs package is not installed", str(ctx.exception))
 
@@ -100,7 +100,7 @@ class SeparateStemsFailureTests(unittest.TestCase):
 
     def test_no_python_raises_runtimeerror(self):
         import unittest.mock as m
-        with m.patch("splitfy.core.find_python", return_value=None),              m.patch("splitfy.core._dir_has_any", return_value=True):
+        with m.patch("jamly.core.find_python", return_value=None),              m.patch("jamly.core._dir_has_any", return_value=True):
             with self.assertRaises(RuntimeError) as ctx:
                 c.separate_stems("song.wav")
         self.assertIn("no python interpreter", str(ctx.exception))
@@ -108,7 +108,7 @@ class SeparateStemsFailureTests(unittest.TestCase):
     def test_missing_package_raises_runtimeerror(self):
         # availability gate fails first (mocked no demucs dir) -> RuntimeError names the package
         import unittest.mock as m
-        with m.patch("splitfy.core._dir_has_any", return_value=False),              m.patch("splitfy.core.find_python", return_value="python"):
+        with m.patch("jamly.core._dir_has_any", return_value=False),              m.patch("jamly.core.find_python", return_value="python"):
             with self.assertRaises(RuntimeError) as ctx:
                 c.separate_stems("song.wav")
         self.assertIn("demucs package is not installed", str(ctx.exception))

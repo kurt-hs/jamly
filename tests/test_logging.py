@@ -10,12 +10,12 @@ import tempfile
 import unittest
 import unittest.mock as mock
 
-# src-layout: make the ``splitfy`` package importable for both `pytest` and
+# src-layout: make the ``jamly`` package importable for both `pytest` and
 # `python -m unittest discover -s tests` without an editable install. Inserted before any
 # absolute-package import so it always runs first.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
-from splitfy.logging import Logger  # noqa: E402 (public helpers + Logger)
+from jamly.logging import Logger  # noqa: E402 (public helpers + Logger)
 
 
 def _capture(logger=None):
@@ -111,12 +111,12 @@ class VersionOfTests(unittest.TestCase):
 
     def test_returns_first_stdout_line_when_available(self):
         log, buf = _capture()
-        with mock.patch("splitfy.core.run", return_value=mock.MagicMock(ok=True, stdout="2024.7.9\n")):
+        with mock.patch("jamly.core.run", return_value=mock.MagicMock(ok=True, stdout="2024.7.9\n")):
             self.assertEqual(log.version_of("yt-dlp.exe", ("-V",)), "2024.7.9")
 
     def test_missing_tool_returns_none(self):
         log, buf = _capture()
-        with mock.patch("splitfy.core.run", return_value=mock.MagicMock(ok=False)):
+        with mock.patch("jamly.core.run", return_value=mock.MagicMock(ok=False)):
             self.assertIsNone(log.version_of("nope.exe"))
 
 
@@ -125,7 +125,7 @@ class VersionOfTests(unittest.TestCase):
 # --------------------------------------------------------------------------- #
 class EchoInputTests(unittest.TestCase):
     def test_dedup_and_flags(self):
-        import splitfy.run as R
+        import jamly.run as R
 
         log, buf = _capture()
         with mock.patch.object(R, "_log", log):
@@ -149,11 +149,11 @@ class DescribeToolsTests(unittest.TestCase):
             return ytdlp
 
     def test_reports_kind_version_and_location(self):
-        import splitfy.run as R
+        import jamly.run as R
 
         log, buf = _capture()
         with mock.patch.object(R, "_log", log), \
-                mock.patch("splitfy.core.run", return_value=mock.MagicMock(ok=True, stdout="2024.9.1\n")):
+                mock.patch("jamly.core.run", return_value=mock.MagicMock(ok=True, stdout="2024.9.1\n")):
             ytdlp = self._fake_ytdlp_path()
             R.describe_tools(ytdlp, r"C:\Program Files\Shotcut")
         out = buf.getvalue()
@@ -161,7 +161,7 @@ class DescribeToolsTests(unittest.TestCase):
         self.assertIn("2024.9.1", out)            # version line (from mocked -V output)
 
     def test_missing_tools_warn(self):
-        import splitfy.run as R
+        import jamly.run as R
 
         log, buf = _capture()
         with mock.patch.object(R, "_log", log):
@@ -172,7 +172,7 @@ class DescribeToolsTests(unittest.TestCase):
 
 class LinkOutputTests(unittest.TestCase):
     def test_links_all_outputs(self):
-        import splitfy.run as R
+        import jamly.run as R
 
         log, buf = _capture()
         with mock.patch.object(R, "_log", log):   # helpers read the module-global logger
@@ -186,7 +186,7 @@ class LinkOutputTests(unittest.TestCase):
             self.assertIn(p, out)
 
     def test_error_result_links_nothing(self):
-        import splitfy.run as R
+        import jamly.run as R
 
         log, buf = _capture()
         with mock.patch.object(R, "_log", log):   # non-quiet so a successful result WOULD emit (proves the ok-guard)

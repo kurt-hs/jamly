@@ -252,7 +252,7 @@ def main(argv=None) -> int:
 
     scope = getattr(os, "environ", {}).get("AUTOCV_SCOPE") or os.getcwd()
 
-    print("splitfy dependency detection")
+    print("jamly dependency detection")
     print("=" * 60)
 
     report = summarize(scope_dir=scope)          # runs each detector exactly once; single source of truth

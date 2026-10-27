@@ -1,4 +1,4 @@
-"""Output filename construction for splitfy stems (pure, offline-testable).
+"""Output filename construction for jamly stems (pure, offline-testable).
 
 YouTube titles/metadata are user-generated and unreliable: ``%(artist)s``/``%(author)s`` are
 often empty -- e.g. the upload "Between the Buried and Me - Extremophile Elite (LIVE)" reports

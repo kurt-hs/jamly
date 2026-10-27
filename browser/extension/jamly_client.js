@@ -1,8 +1,8 @@
-/* splitfy_client.js — shared HTTP-contract client for the splitfy status server.
+/* jamly_client.js — shared HTTP-contract client for the jamly status server.
 
-   Shared by the Tampermonkey userscript (splitfy.user.js) and the WebExtension
+   Shared by the Tampermonkey userscript (jamly.user.js) and the WebExtension
    background variant (see manifest.json). Both clients talk to the SAME protocol so a user can
-   enqueue from either UI against one running `python -m splitfy.server`. The contract:
+   enqueue from either UI against one running `python -m jamly.server`. The contract:
 
        GET  /status   -> JSON snapshot {pending, done, total, current, last_completed}
        POST /add      body {"inputs":[...], "titles":[...]} -> {queued, newly_added, pending_count}
@@ -11,7 +11,7 @@
 
    The server streams /status as text/event-stream (one progress JSON object per tick). This module
    is DOM-free so it can be dropped into any context (userscript, extension popup, or a local test)
-   and validates with `node --check splitfy_client.js`.
+   and validates with `node --check jamly_client.js`.
 */
 (function (global) {
   "use strict";

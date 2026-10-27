@@ -1,10 +1,10 @@
-"""HTTP status server for splitfy (#16).
+"""HTTP status server for jamly (#16).
 
 Shares the persistent WatchQueue protocol with run.py. A background worker runs one
 queued item at a time via run.process_one, calling mark_done + save() after each item so
 progress is resumable and can be streamed over SSE:
 
-    python server.py --port 8765 [--scope .] [--queue splitfy_queue.json]
+    python server.py --port 8765 [--scope .] [--queue jamly_queue.json]
 
 Endpoints:
     GET /status   SSE stream of {pending, done, current, progress} (text/event-stream)
@@ -27,7 +27,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from splitfy.watch_queue import WatchQueue, default_queue_path
+from jamly.watch_queue import WatchQueue, default_queue_path
 from .core import AUDIO_FORMATS, DEFAULT_OUTPUT_FORMAT
 from .run import process_one
 
@@ -51,11 +51,11 @@ def _authorized(header: str, token: str) -> bool:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="splitfy HTTP status server (shares the queue protocol)")
+    p = argparse.ArgumentParser(description="jamly HTTP status server (shares the queue protocol)")
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8765)
     p.add_argument("--scope", default=None, help="Working scope for engine/ytdlp/ffmpeg resolution (default: cwd)")
-    p.add_argument("--queue", default=None, help="Queue file path (default: env AUTOCV_QUEUE or <scope>/splitfy_queue.json)")
+    p.add_argument("--queue", default=None, help="Queue file path (default: env AUTOCV_QUEUE or <scope>/jamly_queue.json)")
     p.add_argument("--interval-ms", type=int, default=1000, help="SSE progress event interval")
     p.add_argument("--audio-format", choices=AUDIO_FORMATS, default=DEFAULT_OUTPUT_FORMAT,
                    help=("Final audio format; 'wav' = lossless/raw WAVs, '%s' = reasonably-encoded lossy (default)"
@@ -324,7 +324,7 @@ class QueueStatusHandler(BaseHTTPRequestHandler):
             self.send_response(401)
             self._cors()
             self.send_header("Content-Type", "application/json")
-            self.send_header("WWW-Authenticate", 'Bearer realm="splitfy-server"')
+            self.send_header("WWW-Authenticate", 'Bearer realm="jamly-server"')
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)   # body must be written to match Content-Length
@@ -366,7 +366,7 @@ def main(argv=None) -> int:
         print("WARNING: bound off-loopback (host=%s); the server is reachable over the network. "
               "Set SPLITFY_SERVER_TOKEN to require auth on POST /add." % args.host,
               file=sys.stderr)
-    print("splitfy server: listening on http://%s:%d  (queue=%s)" % (args.host, args.port, srv.queue_path))
+    print("jamly server: listening on http://%s:%d  (queue=%s)" % (args.host, args.port, srv.queue_path))
     try:
         srv.start()
     except KeyboardInterrupt:

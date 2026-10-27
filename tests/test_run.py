@@ -13,12 +13,12 @@ import unittest
 import unittest.mock as mock
 
 
-# src-layout: make the ``splitfy`` package importable for both `pytest` and
+# src-layout: make the ``jamly`` package importable for both `pytest` and
 # `python -m unittest discover -s tests` without an editable install. Inserted before any
 # absolute-package import so it always runs first.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
-from splitfy import run as run_mod
-from splitfy.core import RunResult   # for finalize_output() test helpers
+from jamly import run as run_mod
+from jamly.core import RunResult   # for finalize_output() test helpers
 
 
 class DownloadCmdTests(unittest.TestCase):
@@ -232,16 +232,16 @@ class ResolveEngineTests(unittest.TestCase):
     """Portable-only engine resolution: exactly one engine (the demucs PyPI CLI)."""
 
     def test_auto_uses_available_engine(self):
-        with mock.patch("splitfy.core.detect_engine", return_value="htdemucs"):
+        with mock.patch("jamly.core.detect_engine", return_value="htdemucs"):
             self.assertEqual(run_mod.resolve_engine(argparse.Namespace(engine="auto"), ""), "htdemucs")
 
     def test_explicit_override_rejected_if_unavailable(self):
         # portable-only: requesting any engine other than the sole demucs CLI never runs -> None
-        with mock.patch("splitfy.core.detect_engine", return_value="htdemucs"):
+        with mock.patch("jamly.core.detect_engine", return_value="htdemucs"):
             self.assertIsNone(run_mod.resolve_engine(argparse.Namespace(engine="uvr5"), ""))
 
     def test_explicit_htdemucs_accepted_when_available(self):
-        with mock.patch("splitfy.core.detect_engine", return_value="htdemucs"):
+        with mock.patch("jamly.core.detect_engine", return_value="htdemucs"):
             self.assertEqual(run_mod.resolve_engine(argparse.Namespace(engine="htdemucs"), ""), "htdemucs")
 class MainDryRunTests(unittest.TestCase):
     def test_dry_run_exits_zero_without_network(self):
@@ -254,7 +254,7 @@ class MainDryRunTests(unittest.TestCase):
                 try:
                     # main() honours AUTOCV_QUEUE ahead of default_queue_path(cwd), so pointing it at a
                     # temp file keeps the queue write out of the working tree -- no host cwd state.
-                    qpath = os.path.join(tmp, "splitfy_queue.json")
+                    qpath = os.path.join(tmp, "jamly_queue.json")
                     with open(qpath, "w") as fh:
                         fh.write("")
                     os.environ["AUTOCV_QUEUE"] = os.path.abspath(qpath)

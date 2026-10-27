@@ -5,11 +5,11 @@ import tempfile
 import unittest
 
 
-# src-layout: make the ``splitfy`` package importable for both `pytest` and
+# src-layout: make the ``jamly`` package importable for both `pytest` and
 # `python -m unittest discover -s tests` without an editable install. Inserted before any
 # absolute-package import so it always runs first.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
-from splitfy.watch_queue import WatchQueue, default_queue_path
+from jamly.watch_queue import WatchQueue, default_queue_path
 
 
 class DedupTests(unittest.TestCase):

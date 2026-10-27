@@ -1,19 +1,19 @@
 {
   "manifest_version": 3,
-  "name": "splitfy status",
+  "name": "jamly status",
   "version": "1.0.0",
-  "description": "Enqueue audio-separation jobs from an always-on background page; polls the splitfy /status server for live progress.",
-  "author": "splitfy",
+  "description": "Enqueue audio-separation jobs from an always-on background page; polls the jamly /status server for live progress.",
+  "author": "jamly",
   "background": {
-    "service_worker": "splitfy_extension_bg.js"
+    "service_worker": "jamly_extension_bg.js"
   },
   "action": {
-    "default_popup": "splitfy_popup.html",
-    "default_title": "splitfy status",
+    "default_popup": "jamly_popup.html",
+    "default_title": "jamly status",
     "default_icon": {}
   },
   "options_ui": {
-    "page": "splitfy_options.html",
+    "page": "jamly_options.html",
     "open_in_tab": true
   },
   "permissions": ["storage", "activeTab"],

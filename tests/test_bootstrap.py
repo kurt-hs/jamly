@@ -11,11 +11,11 @@ import unittest
 from contextlib import redirect_stdout
 
 
-# src-layout: make the ``splitfy`` package importable for both `pytest` and
+# src-layout: make the ``jamly`` package importable for both `pytest` and
 # `python -m unittest discover -s tests` without an editable install. Inserted before any
 # absolute-package import so it always runs first.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
-from splitfy import bootstrap as b
+from jamly import bootstrap as b
 
 
 def _touch(path):
@@ -157,15 +157,15 @@ class OsFamilyDedupTests(unittest.TestCase):
     _os_family() runs inside each patch so no global state leaks between cases."""
 
     def test_single_source_of_truth(self):
-        import splitfy.core as c
+        import jamly.core as c
         self.assertIs(b._os_family, c._os_family)   # bootstrap uses core's _os_family, not a copy
 
     def _run_with_platform(self, win, machine, platform_name):
-        import splitfy.core as c
+        import jamly.core as c
         import unittest.mock as mock
-        with mock.patch("splitfy.core.PLATFORM_WINDOWS", bool(win)), \
+        with mock.patch("jamly.core.PLATFORM_WINDOWS", bool(win)), \
                 mock.patch.object(c.platform, "machine", lambda m=machine: m or ""), \
-                mock.patch("splitfy.core.sys") as fake_sys:
+                mock.patch("jamly.core.sys") as fake_sys:
             fake_sys.platform = platform_name
             return c._os_family()
 

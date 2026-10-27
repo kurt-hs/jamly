@@ -1,4 +1,4 @@
-"""Terse, friendly, swappable run-time logging for splitfy.
+"""Terse, friendly, swappable run-time logging for jamly.
 
 Every user-facing line goes through :class:`Logger` so the wording/colour/layout lives in one
 place and can be swapped or captured by tests (``logger.stream = io.StringIO()``). The default is
@@ -79,7 +79,7 @@ class Logger:
         return "\x1b[%sm%s\x1b[0m" % (_ANSI[color_name], text)
 
     # -- public steps -------------------------------------------------------- #
-    def banner(self, title: str = "splitfy") -> None:
+    def banner(self, title: str = "jamly") -> None:
         """A header rule + title for a fresh run."""
         self._emit("─" * 46)
         self._emit(self._c(title, "bold"))

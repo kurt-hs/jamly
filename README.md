@@ -1,4 +1,4 @@
-# splitfy
+# jamly
 
 A small, portable **audio-separation** tool. Give it anything `yt-dlp` can fetch — a full URL,
 partial path, or bare id from any supported host (YouTube included) — and it downloads the
@@ -32,7 +32,7 @@ PyTorch; availability checks are import-free.
 ## Layout
 
 ```
-src/splitfy/
+src/jamly/
   normalize.py    any-source input normalization: extract a stable id, validate + dedup
   core.py         engine availability check (single torch demucs CLI), command builders, stem run
   bootstrap.py    dependency/tool detection (python, yt-dlp, ffmpeg) -- reuse-first, no provisioning
@@ -41,7 +41,7 @@ src/splitfy/
   server.py       HTTP(S) server with SSE `GET /status` progress streaming
 tests/            unittest suite (absolute-package imports; runs under pytest or -m unittest)
 browser/extension # MV3 WebExtension + shared DOM-free client (manifest, service worker,
-                  popup/options HTML); browser/userscripts/splitfy.user.js is the
+                  popup/options HTML); browser/userscripts/jamly.user.js is the
                   standalone Tampermonkey panel (installed separately from the extension)
 DESIGN.md           long-form design + portability research notes
 AGENTS.md         contributing & coding conventions
@@ -52,8 +52,8 @@ AGENTS.md         contributing & coding conventions
 From a checkout:
 
 ```bash
-python src/splitfy/run.py -i <source-url-or-id> [-i <more>] [--engine auto|htdemucs]
-# or, if installed via pip install -e . :  splitfy -i <source-url-or-id>
+python src/jamly/run.py -i <source-url-or-id> [-i <more>] [--engine auto|htdemucs]
+# or, if installed via pip install -e . :  jamly -i <source-url-or-id>
 ```
 
 Run the test suite (pytest OR unittest):
@@ -69,7 +69,7 @@ python -m unittest discover -s tests
 progress JSON, `/items` adds videos to the queue. See `DESIGN.md §13` for the shared contract and
 `§14` for the full UX design.
 
-Start it (foreground):  `python -m splitfy.server --port 8765 [--scope .] [--audio-format wav|mp3]`
+Start it (foreground):  `python -m jamly.server --port 8765 [--scope .] [--audio-format wav|mp3]`
 
 The extension and Tampermonkey userscript connect from a *cross-origin* context, so the server emits
 CORS headers (`Access-Control-Allow-Origin: *`) and answers `OPTIONS` preflight — covered by
@@ -78,9 +78,9 @@ CORS headers (`Access-Control-Allow-Origin: *`) and answers `OPTIONS` preflight 
 For always-on / reboot-persistent service use per-platform wrappers (they resolve tools from the repo,
 so no paths are baked into source). See `DESIGN.md §14`:
 
-* **Windows** — foreground: `scripts/windows\start-splitfy-server.bat [PORT]`; persistent: run
+* **Windows** — foreground: `scripts/windows\start-jamly-server.bat [PORT]`; persistent: run
   `powershell scripts/windows/install-schedule-task.ps1` (and `uninstall-schedule-task.ps1` to remove).
-* **Linux**   — systemd unit `scripts/linux\splitfy-server.service`, driven by `scripts/linux/splitfy-server-launch.sh`
+* **Linux**   — systemd unit `scripts/linux\jamly-server.service`, driven by `scripts/linux/jamly-server-launch.sh`
   (`start|stop|status|restart [PORT]`). See `DESIGN.md §14`; edit the absolute paths in that `.service` file first.
 
 ## Notes on portability

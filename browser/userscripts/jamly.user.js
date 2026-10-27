@@ -1,21 +1,21 @@
-/* ==UserScript: splitfy status UI==
- * Shows live progress from a running `python -m splitfy.server` (GET /status SSE) in a
+/* ==UserScript: jamly status UI==
+ * Shows live progress from a running `python -m jamly.server` (GET /status SSE) in a
  * floating panel, and alerts when items finish with links back to the source URL. Zero-install:
  * install via Tampermonkey/Greasemonkey (or your userscript manager), then run the server on another
  * tab. The queue file is read/written locally so it survives across sessions and can be loaded by
- * `python -m splitfy.server` as its resume source.
+ * `python -m jamly.server` as its resume source.
  *
- * Protocol shared with the WebExtension background variant (splitfy_client.js):
+ * Protocol shared with the WebExtension background variant (jamly_client.js):
  *   GET  /status -> {pending, done, total, current, last_completed}
  *   POST /add    body {"inputs":[...], "titles":[...]} -> {queued, newly_added, pending_count}
  *   GET  /items  -> {pending:[], done:[]}
  *   GET  /healthz-> {ok:true,...}
  */
-// @name         splitfy status UI
-// @namespace    https://example.com/splitfy
+// @name         jamly status UI
+// @namespace    https://example.com/jamly
 // @version      1.0.0
-// @description  Live queue progress + completion alerts for the splitfy HTTP status server.
-// @author       splitfy
+// @description  Live queue progress + completion alerts for the jamly HTTP status server.
+// @author       jamly
 // @match        *://*/*
 // @grant        GM_addStyle
 // @grant        none
@@ -25,8 +25,8 @@
   "use strict";
 
   var POLL_INTERVAL_MS = 1000;   // poll /status every second (server emits ~once/sec)
-  var SERVER_URL = "http://127.0.0.1:8765"; // where `python -m splitfy.server` is listening
-  var QUEUE_PATH = ""; // "" -> derive from env AUTOCV_QUEUE or <cwd>/splitfy_queue.json
+  var SERVER_URL = "http://127.0.0.1:8765"; // where `python -m jamly.server` is listening
+  var QUEUE_PATH = ""; // "" -> derive from env AUTOCV_QUEUE or <cwd>/jamly_queue.json
 
   // --- styling (GM_addStyle; no CSS file dependency) -------------------------------------------
   if (typeof GM_addStyle === "function") {
@@ -50,7 +50,7 @@
   var panel = document.createElement("div");
   panel.id = "ac-panel";
   panel.innerHTML =
-    '<div class="ac-head"><span id="ac-title">splitfy</span><span id="ac-close" title="close">×</span></div>' +
+    '<div class="ac-head"><span id="ac-title">jamly</span><span id="ac-close" title="close">×</span></div>' +
     '<div id="ac-body"></div>';
   document.body.appendChild(panel);
   var closeBtn = panel.querySelector("#ac-close");
@@ -134,7 +134,7 @@
       try { return JSON.parse(txt); } catch (e) { return {}; }
     } catch (e) { /* derive from env / cwd */ }
     try {
-      var p = process.env.AUTOCV_QUEUE || (process.cwd ? require("path").join(process.cwd(), "splitfy_queue.json") : "");
+      var p = process.env.AUTOCV_QUEUE || (process.cwd ? require("path").join(process.cwd(), "jamly_queue.json") : "");
       if (!p) return {};
       var fs = await import("node:fs/promises");
       let txt;

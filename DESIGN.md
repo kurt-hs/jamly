@@ -6,7 +6,7 @@ conventions. It records the design, decisions, and machine-specific findings bel
 
 ## Overview (§0)
 
-The Python package lives under `src/splitfy/` (stdlib-only; heavy imports such as torch are lazy):
+The Python package lives under `src/jamly/` (stdlib-only; heavy imports such as torch are lazy):
 `normalize.py` (URL→watch-id), `core.py` (engine availability check + command builders + stem run),
 `bootstrap.py` (reuse-first dependency detection for python / yt-dlp / ffmpeg), `watch_queue.py`
 (`WatchQueue`: resumable queue with a persisted done-set), `run.py` (CLI orchestrator) and
@@ -187,35 +187,35 @@ kept in parity with a project-level `[tool.ruff]`.
 Both clients build on the shared contract the server already emits: a `/status` SSE stream with per-item
 terminal records (`last_completed`) and `pending`/`done` counts, plus the `watch_queue` queue-file schema.
 
-- **Userscript** — `browser/userscripts/splitfy.user.js` (Tampermonkey/Greasemonkey manifest):
+- **Userscript** — `browser/userscripts/jamly.user.js` (Tampermonkey/Greasemonkey manifest):
   `GM_addStyle` UI, `/status` polling via fetch/XHR fallback, read/write of the local queue JSON, and
-  progress + completion alerts with download links. Runs alongside `python -m splitfy.server`.
+  progress + completion alerts with download links. Runs alongside `python -m jamly.server`.
 - **Background-extension variant** — MV3 extension in `browser/extension/` (`manifest.json`, a service
   worker that imports the shared DOM-free client via `importScripts`, plus popup/options HTML). Shares one
   protocol with the userscript (`GET /status` SSE + `POST /add`); a small server writes to the same queue
   file so users can enqueue from an always-on background page instead of the CLI process.
 - **Shared contract** — both clients use the identical `/status` JSON shape and `watch_queue` schema;
   the shared client (`browser/extension/splitfy_client.js`) is DOM-free, so it ships as a static asset in
-  the extension rather than as a `splitfy` module. A contract test drives the parsing logic directly;
+  the extension rather than as a `jamly` module. A contract test drives the parsing logic directly;
   streamed-path tests use bounded reads so they stay deterministic under both runners.
 - Read-only to project scope (never writes outside `.portable/` or the queue file); alerts on completion
   with download links.
 
 The browser source lives under `browser/extension/` and `browser/userscripts/` — it is **not** part of the
-Python package, tests, or `src/splitfy/`, and its manifest resolves all references relative to its own
+Python package, tests, or `src/jamly/`, and its manifest resolves all references relative to its own
 folder (so no path edits are needed when files move together).
 
 ## §14 — Cross-platform server delivery
 
-The HTTP listener runs as a foreground process:  `python -m splitfy.server --port 8765`.
-There is **no** auto-start mechanism and the installed `splitfy` console script drives batch/queue mode,
-not the listener (see `src/splitfy/server.py`). To make it always-on / reboot-persistent across platforms,
+The HTTP listener runs as a foreground process:  `python -m jamly.server --port 8765`.
+There is **no** auto-start mechanism and the installed `jamly` console script drives batch/queue mode,
+not the listener (see `src/jamly/server.py`). To make it always-on / reboot-persistent across platforms,
 wrappers resolve tools from the repo root (no baked-in paths):
 
 - **CORS** — every response carries `Access-Control-Allow-Origin: *` and an `OPTIONS` preflight is answered, so
   the MV3 extension and Tampermonkey userscript can fetch over HTTP from their cross-origin contexts. Covered by
   `test_server.py::ServerIntegrationTests::test_cors_headers_on_responses_and_preflight`.
-- **Windows** — foreground: `scripts/windows/start-splitfy-server.bat [PORT]`; persistent: `powershell scripts/windows/install-schedule-task.ps1`
-  (and `uninstall-schedule-task.ps1` to remove). The task runs from the repo root so `import splitfy` needs no install.
-- **Linux** — systemd unit `scripts/linux/splitfy-server.service` driven by `scripts/linux/splitfy-server-launch.sh` (`start|stop|status|restart [PORT]`).
+- **Windows** — foreground: `scripts/windows/start-jamly-server.bat [PORT]`; persistent: `powershell scripts/windows/install-schedule-task.ps1`
+  (and `uninstall-schedule-task.ps1` to remove). The task runs from the repo root so `import jamly` needs no install.
+- **Linux** — systemd unit `scripts/linux/jamly-server.service` driven by `scripts/linux/jamly-server-launch.sh` (`start|stop|status|restart [PORT]`).
   Edit the absolute paths in that `.service` file (`WorkingDirectory`, `ExecStart`) to point at your checkout before enabling.

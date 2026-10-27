@@ -8,14 +8,14 @@ import unittest
 # src-layout shim (both runners): put ``src`` on sys.path before the absolute-package import.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
-from splitfy.naming import (
+from jamly.naming import (
     build_metadata_name,
     build_stem_basename,
     meta_dict,
     parse_title_artist,
     stem_prefix,
 )
-from splitfy import run as run_mod
+from jamly import run as run_mod
 
 
 class ParseTitleArtistTests(unittest.TestCase):

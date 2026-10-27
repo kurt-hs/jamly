@@ -4,12 +4,12 @@ import sys
 import unittest
 
 
-# src-layout: make the ``splitfy`` package importable for both `pytest` and
+# src-layout: make the ``jamly`` package importable for both `pytest` and
 # `python -m unittest discover -s tests` without an editable install. Inserted before any
 # absolute-package import so it always runs first.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
-import splitfy.core as core  # noqa: E402 (module alias for core.X attribute access)
-from splitfy.core import (  # noqa: E402
+import jamly.core as core  # noqa: E402 (module alias for core.X attribute access)
+from jamly.core import (  # noqa: E402
     build_htdemucs_four_stems_cmd,
     build_ffmpeg_mix_cmd, build_ytdlp_extract_cmd, ensure_output_dir,
     sanitize_filename, run, which, _abs, _exists_exe,
