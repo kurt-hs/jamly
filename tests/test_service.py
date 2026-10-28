@@ -95,6 +95,24 @@ class SharedConfigTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 config.parse_configured_args(server.build_parser(), ["--config", str(path)])
 
+    def test_saved_defaults_override_install_config_but_not_explicit_cli_flags(self):
+        with tempfile.TemporaryDirectory() as root:
+            state = Path(root)
+            settings = state / "server.json"
+            settings.write_text(json.dumps({"state_dir": root, "model": "htdemucs"}))
+            config.write_private_json(state / "preferences.json", {"model": "htdemucs_ft"})
+            args = config.parse_configured_args(server.build_parser(),
+                                                ["--config", str(settings)], preferences=True)
+            self.assertEqual(args.model, "htdemucs_ft")
+            args = config.parse_configured_args(server.build_parser(), [
+                "--config", str(settings), "--model", "htdemucs",
+            ], preferences=True)
+            self.assertEqual(args.model, "htdemucs")
+
+    def test_legacy_job_keeps_balanced_instead_of_inheriting_new_default(self):
+        args = server.build_parser().parse_args(["--model", "htdemucs_ft"])
+        self.assertEqual(config.job_arguments(args, {"audio_format": "wav"}).model, "htdemucs")
+
     def test_pairing_token_is_persistent_and_private(self):
         with tempfile.TemporaryDirectory() as root, patch.dict(os.environ, {"JAMLY_SERVER_TOKEN": ""}):
             state = Path(root)

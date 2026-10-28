@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jamly status helper
 // @namespace    https://github.com/kurtisnotcurtis/jamly
-// @version      0.2.0
+// @version      0.3.0
 // @description  Optional status/enqueue helper for a paired local Jamly backend.
 // @match        https://www.youtube.com/*
 // @match        https://music.youtube.com/*
@@ -61,7 +61,7 @@
     if (closed) return;
     try {
       const state = await request("/status");
-      if (state.api_version !== 2) throw new Error("Update the backend and userscript together.");
+      if (state.api_version !== 3) throw new Error("Update the backend and userscript together.");
       status.textContent = state.current
         ? "Jamly: " + state.current.stage
         : `Queued ${state.pending}; complete ${state.done}; failed ${state.failed}.`;

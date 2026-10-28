@@ -11,6 +11,7 @@ import sys
 import sysconfig
 
 from .core import ENGINE_HTDEMUCS, detect_engine, run
+from .runtime import bundled_binary, module_command
 
 
 @dataclass(frozen=True)
@@ -45,10 +46,13 @@ def find_ytdlp(scope_dir: str = "") -> ToolStatus:
 def ytdlp_command() -> list[str]:
     if not find_ytdlp().ok:
         raise RuntimeError("yt-dlp is missing; reinstall Jamly in this Python environment")
-    return [sys.executable, "-m", "yt_dlp"]
+    return module_command("yt_dlp")
 
 
 def find_deno() -> ToolStatus:
+    bundled = bundled_binary("deno")
+    if bundled is not None:
+        return ToolStatus("deno", str(bundled), bundled.is_file())
     scripts = sysconfig.get_path("scripts")
     search_path = scripts + os.pathsep + os.environ.get("PATH", "")
     executable = shutil.which("deno", path=search_path)
@@ -72,6 +76,9 @@ def _dir_has_both(root: str) -> bool:
 
 def detect_ffmpeg(ffmpeg_dirs=None, scope_dir="", additional_dirs=()) -> ToolStatus:
     directories = list(ffmpeg_dirs or []) + list(additional_dirs)
+    bundled = bundled_binary("ffmpeg")
+    if bundled:
+        directories.append(str(bundled.parent))
     on_path = shutil.which("ffmpeg")
     if on_path:
         directories.append(str(Path(on_path).absolute().parent))
@@ -116,14 +123,10 @@ def summarize(scope_dir: str = "") -> RunReport:
 
 def check_runtime(report: RunReport) -> RunReport:
     commands = {
-        "ytdlp": [sys.executable, "-m", "yt_dlp", "--version"],
+        "ytdlp": module_command("yt_dlp", "--version"),
         "javascript": [report.javascript.path, "--version"],
         "ffmpeg": [str(Path(report.ffmpeg.path or "") / ("ffmpeg.exe" if os.name == "nt" else "ffmpeg")), "-version"],
-        "engine": [sys.executable, "-c",
-                   "import torch,demucs,soundfile,numpy; from demucs.api import Separator;"
-                   "from jamly.demucs_worker import resolve_device;"
-                   "print('Demucs '+demucs.__version__+'; Torch '+torch.__version__"
-                   "+'; automatic device: '+resolve_device('auto'))"],
+        "engine": module_command("jamly.bootstrap", "--engine-check"),
     }
     checked = {}
     for field, command in commands.items():
@@ -142,6 +145,20 @@ def check_runtime(report: RunReport) -> RunReport:
 
 
 def main(argv=None) -> int:
+    import argparse
+    parser = argparse.ArgumentParser(description="Check Jamly's installed runtime")
+    parser.add_argument("--engine-check", action="store_true", help=argparse.SUPPRESS)
+    args = parser.parse_args(argv)
+    if args.engine_check:
+        import torch
+        import demucs
+        from .demucs_worker import resolve_device
+        importlib.import_module("demucs.api")
+        importlib.import_module("soundfile")
+        print("Demucs %s; Torch %s; automatic device: %s" % (
+            demucs.__version__, torch.__version__, resolve_device("auto"),
+        ))
+        return 0
     report = check_runtime(summarize())
     for item in report.entries:
         print(item.report())

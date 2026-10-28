@@ -2,15 +2,20 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
 import secrets
 import shlex
 import subprocess
+import sys
+import tempfile
 
 from filelock import FileLock
 from platformdirs import user_data_path
+
+from .models import DEFAULT_MODEL, MODELS, validate_model
 
 
 def state_directory(value: str | None = None) -> Path:
@@ -48,6 +53,8 @@ def add_pipeline_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--ffmpeg-dir", default=None, help="Directory containing ffmpeg and ffprobe")
     parser.add_argument("-o", "--output-dir", default=default_output_directory())
     parser.add_argument("--audio-format", choices=("mp3", "wav"), default="mp3")
+    parser.add_argument("--model", choices=tuple(MODELS), default=DEFAULT_MODEL,
+                        help="htdemucs: Balanced (default); htdemucs_ft: Higher quality, about 4x slower")
     parser.add_argument("-t", "--threads", type=nonnegative_int, default=0,
                         help="Parallel Demucs jobs; higher values use more memory (default: 0)")
     parser.add_argument("--device", choices=("auto", "cpu", "cuda", "mps"), default="auto")
@@ -60,6 +67,7 @@ def pipeline_options(args: argparse.Namespace) -> dict:
     return {
         "output_dir": str(Path(args.output_dir).expanduser().absolute()),
         "audio_format": args.audio_format,
+        "model": getattr(args, "model", DEFAULT_MODEL),
         "threads": args.threads,
         "device": getattr(args, "device", "auto"),
         "replace_existing": args.replace_existing,
@@ -69,6 +77,8 @@ def pipeline_options(args: argparse.Namespace) -> dict:
 
 def job_arguments(args: argparse.Namespace, options: dict) -> argparse.Namespace:
     result = argparse.Namespace(**vars(args))
+    # Jobs saved before model selection was introduced always used Balanced.
+    result.model = options.get("model", DEFAULT_MODEL)
     for key in ("output_dir", "audio_format", "threads", "device", "replace_existing", "ffmpeg_dir"):
         if key in options:
             setattr(result, key, options[key])
@@ -77,6 +87,11 @@ def job_arguments(args: argparse.Namespace, options: dict) -> argparse.Namespace
 
 def token_path(state_dir: Path) -> Path:
     return state_dir / "server-token"
+
+
+def instance_path(state: Path, queue: Path) -> Path:
+    identity = hashlib.sha256(str(queue).encode()).hexdigest()[:16]
+    return state / ("server-" + identity + ".json")
 
 
 def token_command(state_dir: Path) -> str:
@@ -106,16 +121,58 @@ def pairing_token(state_dir: Path, explicit: str | None = None) -> str:
     return token
 
 
-def parse_configured_args(parser: argparse.ArgumentParser, argv=None) -> argparse.Namespace:
+def validate_preferences(data: dict) -> dict:
+    if not isinstance(data, dict) or set(data) - {"model", "audio_format", "output_dir"}:
+        raise ValueError("Settings accept only model, audio_format and output_dir")
+    result = dict(data)
+    if "model" in data:
+        validate_model(data["model"])
+    if "audio_format" in data and data["audio_format"] not in ("mp3", "wav"):
+        raise ValueError("audio_format must be mp3 or wav")
+    if "output_dir" in data:
+        value = data["output_dir"]
+        if not isinstance(value, str) or not value.strip() or any(ord(char) < 32 for char in value):
+            raise ValueError("Enter an absolute output directory")
+        try:
+            path = Path(value).expanduser()
+        except RuntimeError as exc:
+            raise ValueError("Cannot expand the output directory") from exc
+        if not path.is_absolute():
+            raise ValueError("Enter an absolute output directory")
+        if path.exists() and not path.is_dir():
+            raise ValueError("The output location is a file, not a directory")
+        result["output_dir"] = str(path)
+    return result
+
+
+def write_private_json(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent,
+                                         prefix="." + path.name + "-", delete=False) as file:
+            temporary = Path(file.name)
+            json.dump(data, file, indent=2)
+            file.flush()
+            os.fsync(file.fileno())
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def parse_configured_args(parser: argparse.ArgumentParser, argv=None, *,
+                          preferences: bool = False) -> argparse.Namespace:
+    argv = list(sys.argv[1:] if argv is None else argv)
     preliminary, _ = parser.parse_known_args(argv)
     path = getattr(preliminary, "config", None)
+    config_args = []
     if path:
         data = json.loads(Path(path).read_text(encoding="utf-8"))
         allowed = {action.dest for action in parser._actions} - {"help", "config"}
         if not isinstance(data, dict) or set(data) - allowed:
             raise ValueError("unsupported server configuration fields")
         # Feed values back through argparse so types and choices are validated too.
-        config_args = []
         for action in parser._actions:
             if action.dest not in data:
                 continue
@@ -135,6 +192,16 @@ def parse_configured_args(parser: argparse.ArgumentParser, argv=None) -> argpars
                     config_args.extend((option, str(entry)))
             elif value is not None:
                 config_args.extend((option, str(value)))
-        import sys
-        return parser.parse_args(config_args + list(sys.argv[1:] if argv is None else argv))
-    return parser.parse_args(argv)
+    parsed = parser.parse_args(config_args + argv)
+    if preferences:
+        state, _queue = runtime_paths(parsed)
+        path = state / "preferences.json"
+        if path.exists():
+            try:
+                data = validate_preferences(json.loads(path.read_text(encoding="utf-8")))
+            except ValueError as exc:
+                raise ValueError("Invalid companion settings in %s: %s" % (path, exc)) from exc
+            saved_args = [part for key, value in data.items()
+                          for part in ("--" + key.replace("_", "-"), value)]
+            parsed = parser.parse_args(config_args + saved_args + argv)
+    return parsed

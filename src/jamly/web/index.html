@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Jamly - local drum exports</title>
+  <link rel="stylesheet" href="/app/app.css">
+  <script defer src="/app/jamly_client.js"></script>
+  <script defer src="/app/app.js"></script>
+</head>
+<body>
+  <main>
+    <header>
+      <div><h1>Jamly</h1><p>Drums and drumless tracks. Separated on your computer.</p></div>
+      <button id="quit" type="button">Quit companion</button>
+    </header>
+    <p id="connection" role="status">Connecting to your companion...</p>
+    <p id="error" role="alert"></p>
+    <section id="pairing" hidden>
+      <h2>Open the Jamly application to connect</h2>
+      <p>The launcher connects this page automatically. No extension or account is required.</p>
+      <details>
+        <summary>Advanced: pair with a running backend</summary>
+        <form id="pair-form">
+          <label for="pair-token">Backend token from jamly-service token</label>
+          <input id="pair-token" type="password" autocomplete="off" required>
+          <button type="submit">Pair this tab</button>
+        </form>
+      </details>
+    </section>
+    <section id="workspace" hidden>
+      <form id="split-form">
+        <label for="inputs">Individual media URLs or YouTube ids, one per line</label>
+        <textarea id="inputs" rows="3" required placeholder="Paste an individual track URL"></textarea>
+        <div class="settings">
+          <div>
+            <label for="model">Separation preset</label>
+            <select id="model" aria-describedby="model-help"></select>
+          </div>
+          <div>
+            <label for="format">Export format</label>
+            <select id="format">
+              <option value="mp3">MP3 - smaller files (320 kbps)</option>
+              <option value="wav">WAV - lossless float audio</option>
+            </select>
+          </div>
+        </div>
+        <p id="model-help" class="hint"></p>
+        <label for="output-dir">Save exports to</label>
+        <div class="folder">
+          <input id="output-dir" type="text" required spellcheck="false">
+          <button id="open-output" type="button">Open folder</button>
+        </div>
+        <p class="hint">Choices are saved as your defaults. Already queued jobs keep their settings.
+          Each model and format has its own files.</p>
+        <label class="checkbox"><input id="replace" type="checkbox"> Replace existing exports for this preset and format</label>
+        <div class="actions">
+          <button id="submit" class="primary" type="submit">Split drums</button>
+          <button id="save-settings" type="button">Save defaults</button>
+        </div>
+      </form>
+      <p class="hint">The first use of each preset downloads model weights. Separation can take several minutes.
+        Closing this page does not stop jobs. Only use media you are authorized to download.</p>
+      <h2>Exports</h2>
+      <p id="counts" role="status"></p>
+      <p class="hint">Completed files are already saved in your output folder. "Save a copy" uses the browser's download location.</p>
+      <ul id="jobs"></ul>
+      <details>
+        <summary>Optional Chrome / Edge extension</summary>
+        <p>The companion works without an extension. Add it only if you want to send the current browser page.</p>
+        <button id="prepare-extension" type="button">Prepare extension</button>
+        <div id="extension-setup" hidden>
+          <p>In Chrome / Edge's extensions page, enable Developer mode, choose <strong>Load unpacked</strong>,
+            and select this folder:</p>
+          <code id="extension-path"></code>
+          <p>Open the extension's <strong>Pair / settings</strong> page. Use this backend URL and token:</p>
+          <code id="extension-url"></code>
+          <label for="extension-token">Private pairing token</label>
+          <input id="extension-token" type="password" readonly autocomplete="off">
+          <button id="copy-token" type="button">Copy token</button>
+          <p class="hint">Keep the token private. After updating Jamly, prepare the extension again and reload it
+            in the browser's extensions page. No marketplace listing is provided yet.</p>
+        </div>
+      </details>
+    </section>
+  </main>
+</body>
+</html>

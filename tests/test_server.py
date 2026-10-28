@@ -1,14 +1,16 @@
 import http.client
 import json
 from pathlib import Path
+import re
 import sys
 import tempfile
 import threading
 import time
 import unittest
 from unittest.mock import Mock, patch
+from urllib.parse import unquote, urlencode, urlsplit
 
-from jamly import core, server
+from jamly import config, core, server
 from jamly.outputs import PROCESSING_VERSION, checksum
 from jamly.run import ItemResult
 from jamly.watch_queue import QueueError, WatchQueue
@@ -76,10 +78,72 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(self.request("POST", "/add", {"inputs": [self.source]}, auth=False)[0], 401)
         self.assertEqual(self.app.queue.items, [])
 
+    def test_companion_assets_are_public_but_contain_no_pairing_secrets(self):
+        self.start()
+        code, page, headers = self.request("GET", "/app/", auth=False, raw=True)
+        self.assertEqual(code, 200)
+        self.assertIn(b"Separation preset", page)
+        self.assertNotIn(self.app._token.encode(), page)
+        self.assertIn("frame-ancestors 'none'", headers["Content-Security-Policy"])
+        self.assertEqual(self.request("GET", "/app/../../server-token", auth=False)[0], 404)
+        self.assertEqual(self.request("POST", "/app/launch", {}, auth=False)[0], 401)
+
+    def test_launcher_pairs_through_a_private_single_use_file_not_a_url(self):
+        self.start()
+        code, launch, _ = self.request("POST", "/app/launch", {})
+        self.assertEqual(code, 200)
+        url = urlsplit(launch["launch_file"])
+        self.assertEqual(url.query, "")
+        self.assertEqual(url.fragment, "")
+        path = Path(unquote(url.path))
+        if sys.platform == "win32":
+            path = Path(unquote(url.path).lstrip("/"))
+        ticket = re.search(r'name="ticket" value="([^"]+)"', path.read_text()).group(1)
+        if sys.platform != "win32":
+            self.assertEqual(path.stat().st_mode & 0o077, 0)
+        body = urlencode({"ticket": ticket}).encode()
+        headers = {"Content-Type": "application/x-www-form-urlencoded", "Origin": "null"}
+        code, page, response_headers = self.request("POST", "/app/session", body, auth=False,
+                                                   headers=headers, raw=True)
+        self.assertEqual(code, 200)
+        self.assertIn("nonce-", response_headers["Content-Security-Policy"])
+        self.assertFalse(path.exists())
+        token = re.search(rb'setItem\("jamly-token", "([^"]+)"\)', page).group(1).decode()
+        self.assertNotEqual(token, self.app._token)
+        self.assertEqual(self.request("GET", "/status", auth=False, headers={
+            "Authorization": "Bearer " + token, "Origin": self.app.base_url,
+        })[0], 200)
+        self.assertEqual(self.request("POST", "/app/session", body, auth=False, headers=headers)[0], 400)
+        with patch("jamly.companion_ui.time.monotonic", return_value=time.monotonic() + 86401):
+            self.assertEqual(self.request("GET", "/status", auth=False, headers={
+                "Authorization": "Bearer " + token,
+            })[0], 401)
+
+    def test_settings_are_persistent_validated_and_do_not_change_queued_options(self):
+        self.start()
+        self.request("POST", "/add", {"inputs": [self.source]})
+        self.wait_for(lambda state: state["done"] == 1)
+        options = dict(self.app.queue.get(self.wid)["options"])
+        settings = {"model": "htdemucs_ft", "audio_format": "wav", "output_dir": str(self.root / "other")}
+        code, saved, _ = self.request("POST", "/settings", settings)
+        self.assertEqual((code, saved), (200, settings))
+        self.assertEqual(self.app.queue.get(self.wid)["options"], options)
+        args = config.parse_configured_args(server.build_parser(),
+                                            ["--state-dir", str(self.root)], preferences=True)
+        self.assertEqual(args.model, "htdemucs_ft")
+        self.assertEqual(args.audio_format, "wav")
+        for invalid in ({"output_dir": "../relative"}, {"model": "other"}, {"audio_format": None},
+                        {"server_token": "do-not-change"}, {"output_dir": False}):
+            self.assertEqual(self.request("POST", "/settings", invalid)[0], 400)
+        with patch.object(server, "write_private_json", side_effect=OSError("disk full")):
+            self.assertEqual(self.request("POST", "/settings", {"model": "htdemucs"})[0], 503)
+        self.assertEqual(self.app.args.model, "htdemucs_ft")
+
     def test_unrelated_origin_or_host_is_rejected_even_with_token(self):
         self.start()
         for headers in ({"Origin": "https://unrelated.example"}, {"Host": "unrelated.example"},
                         {"Origin": "null"}, {"Host": "localhost:invalid"},
+                        {"Origin": "http://127.0.0.2:%d" % self.app._server.server_address[1]},
                         {"Origin": "chrome-extension://[invalid"}):
             code, _, _ = self.request("POST", "/add", {"inputs": [self.source]}, headers=headers)
             self.assertEqual(code, 403)
@@ -100,12 +164,35 @@ class ServerTests(unittest.TestCase):
         self.start()
         for body in (None, [], {"inputs": "url"}, {"inputs": [3]}, {"inputs": []},
                      {"inputs": [self.source], "titles": []},
+                     {"inputs": [self.source], "model": "untrusted"},
+                     {"inputs": [self.source], "model": None},
+                     {"inputs": [self.source], "model": []},
+                     {"inputs": [self.source], "audio_format": "flac"},
                      {"inputs": [self.source], "replace_existing": "true"}, b"{invalid"):
             with self.subTest(body=body):
                 code, payload, _ = self.request("POST", "/add", body)
                 self.assertEqual(code, 400)
                 self.assertIn("error", payload)
         self.assertEqual(self.app.queue.items, [])
+
+    def test_selected_model_and_format_are_persisted_and_used_on_retry(self):
+        seen = []
+
+        def process(wid, args, **_kwargs):
+            seen.append((args.model, args.audio_format))
+            return ItemResult(wid, status="error", error="retry this job")
+
+        self.start(process)
+        code, _, _ = self.request("POST", "/add", {
+            "inputs": [self.source], "model": "htdemucs_ft", "audio_format": "wav",
+        })
+        self.assertEqual(code, 202)
+        self.wait_for(lambda state: state["failed"] == 1)
+        self.assertEqual(WatchQueue.from_path(self.app.queue_path).get(self.wid)["options"]["model"], "htdemucs_ft")
+        self.request("POST", "/retry/" + self.wid, {})
+        state = self.wait_for(lambda state: state["failed"] == 1 and len(seen) == 2)
+        self.assertEqual(seen, [("htdemucs_ft", "wav"), ("htdemucs_ft", "wav")])
+        self.assertEqual(state["jobs"][0]["model"], "htdemucs_ft")
 
     def test_stage_progress_and_original_source_reach_worker(self):
         started, release = threading.Event(), threading.Event()
@@ -208,6 +295,14 @@ class ServerTests(unittest.TestCase):
         self.assertEqual((code, body), (200, b"drums"))
         self.assertEqual(self.request("GET", output["url"].replace("generation-one", "stale"))[0], 409)
         self.assertEqual(self.request("GET", "/outputs/" + self.wid + "/../server-token")[0], 404)
+        form_headers = {"Content-Type": "application/x-www-form-urlencoded", "Origin": self.app.base_url}
+        download_path = output["url"].replace("/outputs/", "/app/download/", 1)
+        code, downloaded, _ = self.request("POST", download_path,
+                                           urlencode({"token": "test-token"}).encode(),
+                                           auth=False, headers=form_headers, raw=True)
+        self.assertEqual((code, downloaded), (200, b"drums"))
+        self.assertEqual(self.request("POST", download_path, b"token=wrong",
+                                     auth=False, headers=form_headers)[0], 401)
 
 
 class HostTests(unittest.TestCase):

@@ -91,7 +91,7 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(result.status, "done", result.error)
         self.assertEqual(stages, ["metadata", "download", "separate", "mix", "publish"])
         directory = Path(result.meta_path).parent
-        self.assertEqual(directory, self.root / "output" / self.wid / "wav")
+        self.assertEqual(directory, self.root / "output" / self.wid / "htdemucs" / "wav")
         manifest = outputs.read_manifest(directory)
         self.assertEqual(manifest["source_url"], "https://youtu.be/" + self.wid)
         self.assertEqual(manifest["generation"], result.generation)
@@ -105,6 +105,29 @@ class PipelineTests(unittest.TestCase):
             repeated = self.process()
         self.assertEqual(repeated.status, "skipped")
         self.assertEqual(repeated.generation, first.generation)
+
+    def test_quality_selection_reaches_worker_and_preserves_both_cached_pairs(self):
+        balanced = self.process()
+        self.args.model = "htdemucs_ft"
+        with patch.object(run, "separate_stems", side_effect=self.separate) as separate:
+            quality = self.process()
+        self.assertEqual(quality.status, "done", quality.error)
+        self.assertEqual(separate.call_args.kwargs["model"], "htdemucs_ft")
+        self.assertNotEqual(balanced.drums_path, quality.drums_path)
+        self.assertEqual(outputs.read_manifest(Path(quality.meta_path).parent)["model"], "htdemucs_ft")
+        self.assertEqual(self.process().generation, quality.generation)
+        self.args.model = "htdemucs"
+        self.assertEqual(self.process().generation, balanced.generation)
+
+    def test_mismatched_model_manifest_is_not_reused(self):
+        first = self.process()
+        path = Path(first.meta_path)
+        manifest = json.loads(path.read_text())
+        manifest["model"] = "htdemucs_ft"
+        path.write_text(json.dumps(manifest))
+        repeated = self.process()
+        self.assertEqual(repeated.status, "error")
+        self.assertIn("identity", repeated.error)
 
     def test_read_only_audio_is_reusable_without_write_access(self):
         first = self.process()

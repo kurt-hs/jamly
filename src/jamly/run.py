@@ -21,6 +21,7 @@ from .core import (
     run as _run, sanitize_filename, separate_stems,
 )
 from .logging import Logger
+from .models import DEFAULT_MODEL, validate_model
 from .naming import meta_dict, parse_title_artist, stem_prefix
 from .normalize import Input, normalize_inputs_full
 from .outputs import (
@@ -149,14 +150,16 @@ def process_one(wid: str, args, progress=None, source_url=None, cancel_event=Non
             raise ValueError("Invalid stable input id")
         if args.audio_format not in ("mp3", "wav"):
             raise ValueError("Unsupported audio format")
-        directory = Path(args.output_dir).expanduser().absolute() / wid / args.audio_format
+        model = validate_model(getattr(args, "model", DEFAULT_MODEL))
+        directory = Path(args.output_dir).expanduser().absolute() / wid / model / args.audio_format
         directory.parent.mkdir(parents=True, exist_ok=True)
         with FileLock(str(directory.parent / ("." + args.audio_format + ".lock")), timeout=0):
             recover_directory(directory)
             if directory.exists() and not args.replace_existing:
                 try:
                     manifest = read_manifest(directory)
-                    if manifest["watch_id"] != wid or manifest["format"] != args.audio_format:
+                    if (manifest["watch_id"] != wid or manifest["format"] != args.audio_format
+                            or manifest.get("model") != model):
                         raise ValueError("output identity does not match")
                 except (OSError, ValueError, KeyError) as exc:
                     raise ValueError("Incomplete or outdated outputs; use --replace-existing: %s" % exc) from exc
@@ -187,7 +190,8 @@ def process_one(wid: str, args, progress=None, source_url=None, cancel_event=Non
                 )
                 stage("separate")
                 stems = separate_stems(str(audio), work, args.threads,
-                                       getattr(args, "device", "auto"), cancel_event, ffmpeg_dir=ffmpeg_dir)
+                                       getattr(args, "device", "auto"), cancel_event,
+                                       ffmpeg_dir=ffmpeg_dir, model=model)
                 stage("mix")
                 drums, backing, meta = stem_output_paths(staged, wid, args.audio_format, parsed)
                 destinations = {"drums": Path(drums), "no_drums": Path(backing)}
@@ -198,7 +202,7 @@ def process_one(wid: str, args, progress=None, source_url=None, cancel_event=Non
                               artist=metadata.get("artist") or (parsed[0] if parsed else None),
                               uploader=metadata.get("uploader"), duration=metadata.get("duration_seconds")),
                     processing_version=PROCESSING_VERSION, generation=uuid.uuid4().hex,
-                    model="htdemucs", format=args.audio_format, audio=audio_info,
+                    model=model, format=args.audio_format, audio=audio_info,
                     outputs={name: {"file": path.name, "sha256": checksum(path)}
                              for name, path in destinations.items()},
                 )

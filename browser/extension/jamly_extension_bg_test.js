@@ -29,7 +29,7 @@ test("a cold worker waits for saved configuration before making requests", async
   const settings = new Promise(resolve => { resolveSettings = resolve; });
   let used;
   const background = worker({
-    async status(config) { used = config; return { api_version: 2, jobs: [] }; },
+    async status(config) { used = config; return { api_version: 3, jobs: [] }; },
   }, settings);
   const response = background.send({ type: "status" });
   assert.equal(used, undefined);

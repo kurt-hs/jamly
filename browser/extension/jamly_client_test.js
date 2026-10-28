@@ -17,7 +17,7 @@ async function backend(t) {
         return;
       }
       if (request.url === "/status") {
-        response.end(JSON.stringify({ api_version: 2, jobs: [], pending: 0, done: 0 }));
+        response.end(JSON.stringify({ api_version: 3, jobs: [], pending: 0, done: 0 }));
       } else {
         received.push({ url: request.url, body: JSON.parse(Buffer.concat(chunks).toString()) });
         response.writeHead(202);
@@ -32,11 +32,15 @@ async function backend(t) {
 
 test("paired JSON status, submission and retry preserve input and options", async t => {
   const { config, received } = await backend(t);
-  assert.equal((await client.status(config)).api_version, 2);
-  assert.equal((await client.addInputs(config, ["https://example.test/a"], true)).newly_added, 1);
+  assert.equal((await client.status(config)).api_version, 3);
+  assert.equal((await client.addInputs(config, ["https://example.test/a"], true, {
+    model: "htdemucs_ft", audio_format: "wav",
+  })).newly_added, 1);
   await client.retry(config, "src-id", false);
   assert.deepEqual(received, [
-    { url: "/add", body: { inputs: ["https://example.test/a"], replace_existing: true } },
+    { url: "/add", body: {
+      inputs: ["https://example.test/a"], replace_existing: true, model: "htdemucs_ft", audio_format: "wav",
+    } },
     { url: "/retry/src-id", body: { replace_existing: false } },
   ]);
 });

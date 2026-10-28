@@ -37,7 +37,7 @@
 
   async function status(config) {
     const result = await request(config, "/status");
-    if (result.api_version !== 2 || !Array.isArray(result.jobs)) {
+    if (result.api_version !== 3 || !Array.isArray(result.jobs)) {
       throw new Error("Backend and browser versions differ; update both Jamly components.");
     }
     return result;
@@ -57,10 +57,10 @@
   }
 
   const client = {
-    baseURL, outputURL, status,
+    baseURL, outputURL, status, request,
     health: config => request(config, "/healthz"),
-    addInputs: (config, inputs, replace = false) => request(config, "/add", "POST", {
-      inputs, replace_existing: replace,
+    addInputs: (config, inputs, replace = false, options = {}) => request(config, "/add", "POST", {
+      inputs, replace_existing: replace, model: options.model, audio_format: options.audio_format,
     }),
     retry: (config, id, replace = false) => request(
       config, "/retry/" + encodeURIComponent(id), "POST", { replace_existing: replace }

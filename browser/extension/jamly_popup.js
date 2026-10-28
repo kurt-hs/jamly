@@ -5,6 +5,13 @@
   let refreshing = false;
   let closed = false;
   let connectionError = "";
+  let models = [];
+
+  function modelHelp() {
+    const description = models.find(model => model.id === byId("model").value)?.description || "";
+    byId("model-help").textContent = description;
+    byId("model").title = description;
+  }
 
   async function send(message) {
     const response = await chrome.runtime.sendMessage(message);
@@ -34,6 +41,17 @@
   }
 
   function render(status) {
+    if (!models.length) {
+      models = status.models;
+      for (const model of models) {
+        const option = document.createElement("option");
+        option.value = model.id;
+        option.textContent = model.label;
+        byId("model").appendChild(option);
+      }
+      byId("model").value = status.defaults.model;
+      modelHelp();
+    }
     byId("counts").textContent =
       `Queued: ${status.pending} | Complete: ${status.done} | Failed: ${status.failed}`;
     byId("jobs").replaceChildren();
@@ -44,6 +62,9 @@
       const stage = status.current?.watch_id === job.watch_id ? status.current.stage : job.status;
       state.textContent = `${String(stage).toUpperCase()}: ${job.title || job.watch_id}`;
       row.appendChild(state);
+      const preset = document.createElement("div");
+      preset.textContent = models.find(model => model.id === job.model)?.label || job.model;
+      row.appendChild(preset);
       if (job.error) {
         const error = document.createElement("div");
         error.className = "error";
@@ -88,6 +109,7 @@
   }
 
   byId("options").addEventListener("click", () => chrome.runtime.openOptionsPage());
+  byId("model").addEventListener("change", modelHelp);
   byId("current").addEventListener("click", async () => {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     if (!tab?.url || !/^https?:/.test(tab.url)) {
@@ -104,7 +126,9 @@
     }
     byId("submit").disabled = true;
     try {
-      const result = await send({ type: "enqueue", inputs, replace: byId("replace").checked });
+      const result = await send({
+        type: "enqueue", inputs, replace: byId("replace").checked, model: byId("model").value,
+      });
       byId("error").textContent = "";
       byId("connection").textContent = `Queued ${result.newly_added} new job(s).`;
       await refresh();

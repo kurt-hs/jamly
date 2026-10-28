@@ -8,7 +8,9 @@ import json
 import os
 from pathlib import Path
 import shutil
+import signal
 import socket
+import subprocess
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -19,11 +21,15 @@ from filelock import FileLock, Timeout
 from . import __version__
 from .config import (
     add_pipeline_arguments, job_arguments, pairing_token, parse_configured_args,
-    pipeline_options, runtime_paths, token_command,
+    pipeline_options, runtime_paths, token_command, instance_path, validate_preferences,
+    write_private_json,
 )
+from .companion_ui import CompanionUI, CSP
 from .normalize import InputError, make_input
+from .models import DEFAULT_MODEL, model_choices, validate_model
 from .outputs import read_manifest
 from .run import ItemResult, process_one
+from .runtime import open_directory
 from .watch_queue import QueueError, WatchQueue, queue_owner
 
 
@@ -103,12 +109,46 @@ class ItemServer:
             self._closed = False
             self._current = None
             self._error = None
+            self.ui = CompanionUI(self.state_dir, enabled=_is_loopback_host(args.host))
             server_type = _IPv6Server if ":" in args.host else _HTTPServer
             self._server = server_type((args.host, args.port), QueueStatusHandler)
             self._server.item_server = self
         except BaseException:
             self._owner.__exit__(*sys.exc_info())
             raise
+
+    @property
+    def base_url(self) -> str:
+        host, port = self._server.server_address[:2]
+        return "http://%s:%d" % ("[" + host + "]" if ":" in host else host, port)
+
+    def authorized(self, header: str) -> bool:
+        return _authorized(header, self._token) or self.ui.authorize(header)
+
+    def save_preferences(self, settings: dict) -> dict:
+        settings = validate_preferences(settings)
+        with self._status_lock:
+            if self._stop.is_set():
+                raise QueueError("Server is shutting down")
+            current = {key: value for key, value in pipeline_options(self.args).items()
+                       if key in ("model", "audio_format", "output_dir")}
+            current.update(settings)
+            write_private_json(self.state_dir / "preferences.json", current)
+            for key, value in current.items():
+                setattr(self.args, key, value)
+            return current
+
+    def show_folder(self, wid: str | None = None) -> None:
+        with self._status_lock:
+            if wid is None:
+                directory = Path(self.args.output_dir)
+                directory.mkdir(parents=True, exist_ok=True)
+            else:
+                item = self.queue.get(wid)
+                if not item or item["status"] not in ("done", "skipped") or not item.get("outputs"):
+                    raise ValueError("This job has no completed export")
+                directory = Path(item["outputs"]["metadata"]).parent
+        open_directory(directory)
 
     def _commit(self, change):
         candidate = self.queue.copy()
@@ -117,10 +157,18 @@ class ItemServer:
         self.queue = candidate
         return value
 
-    def enqueue(self, inputs, titles=None, replace=False) -> int:
+    def enqueue(self, inputs, titles=None, replace=False, *, model=None, audio_format=None) -> int:
         normalized = [make_input(source) for source in inputs]
-        options = dict(pipeline_options(self.args), replace_existing=replace or self.args.replace_existing)
+        if model is not None:
+            validate_model(model)
+        if audio_format is not None and audio_format not in ("mp3", "wav"):
+            raise ValueError("audio_format must be mp3 or wav")
         with self._status_lock:
+            options = dict(pipeline_options(self.args), replace_existing=replace or self.args.replace_existing)
+            if model is not None:
+                options["model"] = model
+            if audio_format is not None:
+                options["audio_format"] = audio_format
             if self._error or self._stop.is_set():
                 raise QueueError(self._error or "Server is shutting down")
             added = self._commit(lambda queue: queue.add_all(
@@ -197,6 +245,8 @@ class ItemServer:
                     "watch_id", "title", "source_url", "status", "error", "attempts", "updated_at"
                 )}
                 record["outputs"] = []
+                record["model"] = item.get("options", {}).get("model", DEFAULT_MODEL)
+                record["audio_format"] = item.get("options", {}).get("audio_format", "mp3")
                 if item["status"] in ("done", "skipped") and item.get("generation"):
                     for kind, path in item.get("outputs", {}).items():
                         if kind in ("drums", "no_drums", "metadata"):
@@ -208,13 +258,20 @@ class ItemServer:
                             })
                 jobs.append(record)
             return {
-                "api_version": 2, "pending": sum(item["status"] == "pending" for item in items),
+                "api_version": 3, "pending": sum(item["status"] == "pending" for item in items),
                 "done": len(self.queue.done_ids()), "failed": sum(item["status"] == "error" for item in items),
                 "total": len(items), "current": dict(self._current) if self._current else None,
-                "jobs": jobs, "error": self._error,
+                "jobs": jobs, "error": self._error, "models": model_choices(),
+                "defaults": {key: value for key, value in pipeline_options(self.args).items()
+                             if key in ("model", "audio_format", "output_dir")},
             }
 
     def start(self):
+        if self.ui.enabled:
+            write_private_json(instance_path(self.state_dir, Path(self.queue_path)), {
+                "port": self._server.server_address[1], "host": self._server.server_address[0],
+                "pid": os.getpid(),
+            })
         self._serving = True
         self._serve_ident = threading.get_ident()
         self._worker = threading.Thread(target=self._loop, name="jamly-worker", daemon=True)
@@ -238,6 +295,9 @@ class ItemServer:
                     raise RuntimeError("The worker has not stopped; queue ownership was retained")
             with self._status_lock:
                 self._server.server_close()
+                if self.ui.enabled:
+                    instance_path(self.state_dir, Path(self.queue_path)).unlink(missing_ok=True)
+                self.ui.close()
                 self._owner.__exit__(None, None, None)
                 self._closed = True
 
@@ -259,6 +319,17 @@ class QueueStatusHandler(BaseHTTPRequestHandler):
             parsed = urlsplit(origin)
         except ValueError:
             return False
+        if (self.app.ui.enabled and parsed.scheme == "http" and not parsed.username
+                and parsed.path in ("", "/") and not parsed.query and not parsed.fragment):
+            try:
+                requested = urlsplit("//" + self.headers.get("Host", ""))
+                if (parsed.hostname == requested.hostname
+                        and _is_loopback_host(parsed.hostname or "")
+                        and (parsed.port or 80) == self.app._server.server_address[1]
+                        and (requested.port or 80) == self.app._server.server_address[1]):
+                    return True
+            except ValueError:
+                return False
         return (parsed.scheme in ("chrome-extension", "moz-extension")
                 and bool(parsed.netloc) and parsed.path in ("", "/")
                 and not parsed.username and not parsed.query and not parsed.fragment)
@@ -270,18 +341,26 @@ class QueueStatusHandler(BaseHTTPRequestHandler):
             self.send_header("Vary", "Origin")
 
     def _json(self, body, status=200):
-        data = json.dumps(body).encode("utf-8")
+        self._bytes(json.dumps(body).encode("utf-8"), "application/json", status)
+
+    def _bytes(self, data, content_type, status=200, *, policy=None):
         self.send_response(status)
         self._cors()
-        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        # Native same-origin POST downloads need their Origin header; no-referrer makes it "null".
+        self.send_header("Referrer-Policy", "same-origin" if policy else "no-referrer")
+        if policy:
+            self.send_header("Content-Security-Policy", policy)
+            self.send_header("X-Frame-Options", "DENY")
         if self.close_connection:
             self.send_header("Connection", "close")
         self.end_headers()
         self.wfile.write(data)
 
-    def _allowed_request(self, auth=True):
+    def _allowed_request(self, auth=True, *, bootstrap=False):
         allowed = {"localhost", "127.0.0.1", "::1", self.app.args.host.lower(),
                    *[host.lower() for host in self.app.args.allow_host]}
         try:
@@ -291,13 +370,15 @@ class QueueStatusHandler(BaseHTTPRequestHandler):
         except ValueError:
             valid_host = False
         origin = self.headers.get("Origin")
-        if not valid_host or origin and not self._allowed_origin(origin):
+        origin_ok = not origin or self._allowed_origin(origin) or (bootstrap and origin == "null")
+        if not valid_host or not origin_ok:
             self.close_connection = True
             self._json({"error": "Host or browser origin is not allowed"}, 403)
             return False
-        if auth and not _authorized(self.headers.get("Authorization", ""), self.app._token):
+        if auth and not self.app.authorized(self.headers.get("Authorization", "")):
             self.close_connection = True
-            self._json({"error": "Pair this client using the token from 'jamly-service token'"}, 401)
+            self._json({"error": "Session expired or client not paired. Reopen Jamly, or pair the extension "
+                        "with the token from the companion's extension setup."}, 401)
             return False
         return True
 
@@ -315,11 +396,23 @@ class QueueStatusHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         url = urlsplit(self.path)
-        if not self._allowed_request(auth=url.path != "/healthz"):
+        public = url.path in ("/", "/app", "/healthz") or url.path.startswith("/app/")
+        if not self._allowed_request(auth=not public):
             return
-        if url.path == "/healthz":
+        if url.path in ("/", "/app"):
+            self.send_response(303)
+            self.send_header("Location", "/app/")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+        elif url.path.startswith("/app/"):
+            try:
+                data, kind = self.app.ui.asset(url.path)
+                self._bytes(data, kind, policy=CSP)
+            except OSError:
+                self._json({"error": "Companion asset is missing; reinstall Jamly or check the URL"}, 404)
+        elif url.path == "/healthz":
             self._json({"ok": not bool(self.app._error), "version": __version__,
-                        "api_version": 2, "authentication_required": True})
+                        "api_version": 3, "authentication_required": True})
         elif url.path in ("/status", "/items"):
             self._json(self.app.snapshot())
         elif url.path.startswith("/outputs/"):
@@ -372,6 +465,10 @@ class QueueStatusHandler(BaseHTTPRequestHandler):
             self._json({"error": "output is unavailable: %s" % exc}, 404)
 
     def do_POST(self):
+        path = urlsplit(self.path).path
+        if path == "/app/session" or path.startswith("/app/download/"):
+            self._companion_form(path)
+            return
         if not self._allowed_request():
             return
         try:
@@ -391,9 +488,38 @@ class QueueStatusHandler(BaseHTTPRequestHandler):
             payload = json.loads(self.rfile.read(length))
             if not isinstance(payload, dict):
                 raise ValueError("body must be a JSON object")
-            path = urlsplit(self.path).path
+            if path == "/app/launch":
+                if payload:
+                    raise ValueError("Launch takes no options")
+                launch = self.app.ui.launch(self.app.base_url)
+                self._json({"launch_file": launch.as_uri()})
+                return
+            if path == "/settings":
+                self._json(self.app.save_preferences(payload))
+                return
+            if path == "/app/extension":
+                if payload or not self.app.ui.enabled:
+                    raise ValueError("Extension setup takes no options and requires a loopback backend")
+                from .service import export_browser_assets
+                directory = export_browser_assets(self.app.state_dir, "extension")
+                self._json({"directory": str(directory), "token": self.app._token})
+                return
+            if path in ("/app/open-folder", "/app/stop"):
+                if not self.app.ui.enabled:
+                    raise ValueError("Desktop actions require a loopback backend")
+                if path == "/app/stop":
+                    if payload:
+                        raise ValueError("Stop takes no options")
+                    self._json({"stopping": True})
+                    threading.Thread(target=self.app.stop, name="jamly-stop", daemon=True).start()
+                else:
+                    if set(payload) - {"id"} or ("id" in payload and not isinstance(payload["id"], str)):
+                        raise ValueError("Open folder accepts only an optional job id")
+                    self.app.show_folder(payload.get("id"))
+                    self._json({"opened": True})
+                return
             if path == "/add":
-                if set(payload) - {"inputs", "titles", "replace_existing"}:
+                if set(payload) - {"inputs", "titles", "replace_existing", "model", "audio_format"}:
                     raise ValueError("unknown request field")
                 inputs = payload.get("inputs")
                 if not isinstance(inputs, list) or not inputs or not all(
@@ -407,7 +533,12 @@ class QueueStatusHandler(BaseHTTPRequestHandler):
                 replace = payload.get("replace_existing", False)
                 if not isinstance(replace, bool):
                     raise ValueError("replace_existing must be a boolean")
-                added = self.app.enqueue(inputs, titles, replace)
+                if "model" in payload:
+                    validate_model(payload["model"])
+                if "audio_format" in payload and payload["audio_format"] not in ("mp3", "wav"):
+                    raise ValueError("audio_format must be mp3 or wav")
+                added = self.app.enqueue(inputs, titles, replace, model=payload.get("model"),
+                                         audio_format=payload.get("audio_format"))
             elif path.startswith("/retry/"):
                 if set(payload) - {"replace_existing"} or not isinstance(payload.get("replace_existing", False), bool):
                     raise ValueError("retry accepts only a boolean replace_existing field")
@@ -423,24 +554,58 @@ class QueueStatusHandler(BaseHTTPRequestHandler):
             self._json({"error": "unknown job"}, 404)
         except (OSError, QueueError) as exc:
             self._json({"error": "Cannot persist request: %s" % exc}, 503)
+        except (RuntimeError, subprocess.SubprocessError) as exc:
+            self._json({"error": str(exc)}, 503)
+
+    def _companion_form(self, path: str):
+        bootstrap = path == "/app/session"
+        if not self._allowed_request(auth=False, bootstrap=bootstrap):
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            if not 0 < length <= 4096 or self.headers.get("Transfer-Encoding"):
+                raise ValueError("Invalid companion form length")
+            if self.headers.get("Content-Type", "").split(";")[0] != "application/x-www-form-urlencoded":
+                raise ValueError("Invalid companion form content type")
+            self.connection.settimeout(10)
+            values = parse_qs(self.rfile.read(length).decode("utf-8"),
+                              strict_parsing=True, max_num_fields=1)
+            field = "ticket" if bootstrap else "token"
+            if set(values) != {field} or len(values[field]) != 1:
+                raise ValueError("Invalid companion form")
+            if bootstrap:
+                page, policy = self.app.ui.session_page(values[field][0])
+                self._bytes(page, "text/html; charset=utf-8", policy=policy)
+            elif self.app.ui.enabled and self.app.authorized("Bearer " + values[field][0]):
+                url = urlsplit(self.path.replace("/app/download/", "/outputs/", 1))
+                self._output(url)
+            else:
+                self._json({"error": "Session expired. Open Jamly again."}, 401)
+        except (ValueError, UnicodeError) as exc:
+            self.close_connection = True
+            self._json({"error": str(exc)}, 400)
 
 
 def main(argv=None) -> int:
     parser = build_parser()
     try:
-        args = parse_configured_args(parser, argv)
+        args = parse_configured_args(parser, argv, preferences=True)
         server = ItemServer(args)
     except (OSError, ValueError, QueueError) as exc:
         print("jamly-server: %s" % exc, file=sys.stderr)
         return 2
     print("Jamly listening on %s:%d" % (args.host, server._server.server_address[1]), flush=True)
     print("Pair browsers with: " + token_command(server.state_dir), flush=True)
+    def interrupt(_signum, _frame):
+        raise KeyboardInterrupt
+    previous_signal = signal.signal(signal.SIGTERM, interrupt)
     try:
         server.start()
     except KeyboardInterrupt:
         pass
     finally:
         server.stop()
+        signal.signal(signal.SIGTERM, previous_signal)
     return 0
 
 

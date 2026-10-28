@@ -17,7 +17,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       case "status":
         return jamlyClient.status(settings);
       case "enqueue":
-        return jamlyClient.addInputs(settings, message.inputs, Boolean(message.replace));
+        return jamlyClient.addInputs(settings, message.inputs, Boolean(message.replace), {
+          model: message.model,
+        });
       case "retry":
         return jamlyClient.retry(settings, message.id, Boolean(message.replace));
       case "download": {

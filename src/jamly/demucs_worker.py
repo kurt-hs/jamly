@@ -4,6 +4,8 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from .models import DEFAULT_MODEL, MODELS
+
 
 def resolve_device(device: str) -> str:
     if device != "auto":
@@ -17,7 +19,7 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("audio")
     parser.add_argument("--out", required=True)
-    parser.add_argument("-n", "--name", choices=("htdemucs",), default="htdemucs")
+    parser.add_argument("-n", "--name", choices=tuple(MODELS), default=DEFAULT_MODEL)
     parser.add_argument("-j", "--jobs", type=int, default=0)
     parser.add_argument("--device", choices=("auto", "cpu", "cuda", "mps"), default="auto")
     args = parser.parse_args(argv)

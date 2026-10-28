@@ -1,0 +1,101 @@
+name: Companion packages
+
+on:
+  push:
+    paths:
+      - "src/**"
+      - "browser/**"
+      - "tools/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/companions.yml"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: companions-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  package:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            label: linux-x86_64
+          - os: windows-2022
+            label: windows-x86_64
+          - os: macos-15
+            label: macos-arm64
+          - os: macos-15-intel
+            label: macos-x86_64
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v7
+        with:
+          version: "0.11.7"
+          python-version: "3.12"
+          enable-cache: true
+      - uses: actions/setup-node@v4
+        if: runner.os == 'Linux'
+        with:
+          node-version: "24"
+      - name: Install native build tools on Linux
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y build-essential pkg-config perl
+      - name: Install native build tools on macOS
+        if: runner.os == 'macOS'
+        run: command -v pkg-config || brew install pkg-config
+      - name: Install native build tools on Windows
+        if: runner.os == 'Windows'
+        uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e
+        with:
+          msystem: MINGW64
+          path-type: inherit
+          install: >-
+            make
+            perl
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-pkgconf
+      - run: uv sync --locked --group bundle --managed-python --python 3.12
+      - name: Cache pinned native builds
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: build/native-audio
+          key: native-audio-${{ matrix.label }}-${{ hashFiles('tools/native_audio.py', 'tools/native-sources.json') }}
+      - name: Build companion on macOS or Linux
+        if: runner.os != 'Windows'
+        run: uv run --no-sync python tools/build_companion.py
+      - name: Build companion on Windows
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        run: uv run --no-sync python tools/build_companion.py
+      - name: Relocate and exercise the packaged runtime
+        run: uv run --no-sync python tools/bundle_smoke.py --real-models
+      - name: Real Chrome using the packaged companion
+        if: runner.os == 'Linux'
+        run: node tools/browser_smoke.mjs --runtime dist/desktop/Jamly/jamly-runtime
+      - name: Upload unsigned preview and corresponding sources
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: Jamly-${{ matrix.label }}
+          path: dist/companions/*
+          compression-level: 0
+          retention-days: 14
+      - name: Preserve build logs on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: build-logs-${{ matrix.label }}
+          path: |
+            build/native-audio/build.log
+            build/pyinstaller/**/warn-*.txt
+          if-no-files-found: ignore

@@ -14,6 +14,9 @@ import threading
 import time
 from typing import Sequence
 
+from .models import DEFAULT_MODEL, validate_model
+from .runtime import module_command
+
 PLATFORM_WINDOWS = os.name == "nt"
 ENGINE_AUTO = "auto"
 ENGINE_HTDEMUCS = "htdemucs"
@@ -63,7 +66,8 @@ def check_cancelled(cancel_event: threading.Event | None) -> None:
 
 def _terminate(process: subprocess.Popen) -> None:
     if PLATFORM_WINDOWS:
-        subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"],
+        taskkill = str(Path(os.environ["SystemRoot"]) / "System32" / "taskkill.exe")
+        subprocess.run([taskkill, "/PID", str(process.pid), "/T", "/F"],
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
     else:
         try:
@@ -97,7 +101,8 @@ def run(args: Sequence[str], check: bool = False, capture: bool = True,
             text=True, encoding="utf-8", errors="replace",
             env=env,
             start_new_session=not PLATFORM_WINDOWS,
-            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if PLATFORM_WINDOWS else 0,
+            creationflags=(subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW)
+                          if PLATFORM_WINDOWS else 0,
         )
     except FileNotFoundError:
         return RunResult(cmd, -1, "", "NOT FOUND: %s" % cmd[0])
@@ -214,20 +219,25 @@ def find_python() -> str:
 def build_htdemucs_four_stems_cmd(python_exe: str, input_audio: str, workdir: str,
                                   model_name: str = ENGINE_HTDEMUCS, threads: int = 0,
                                   device: str = "auto") -> list[str]:
-    cmd = [python_exe, "-m", "jamly.demucs_worker", "--out", workdir, "-n", model_name]
+    cmd = module_command("jamly.demucs_worker", "--out", workdir, "-n", model_name,
+                         executable=None if python_exe == sys.executable else python_exe)
     if threads:
         cmd += ["-j", str(threads)]
     return cmd + ["--device", device, input_audio]
 
 
 def separate_stems(audio: str, workdir: str, threads: int = 0,
-                   device: str = "auto", cancel_event=None, ffmpeg_dir=None) -> dict[str, str]:
+                   device: str = "auto", cancel_event=None, ffmpeg_dir=None,
+                   model: str = DEFAULT_MODEL) -> dict[str, str]:
+    validate_model(model)
     if not detect_engine():
         raise RuntimeError("demucs is missing; reinstall Jamly")
     output = Path(workdir) / "stems"
     cmd = build_htdemucs_four_stems_cmd(find_python(), audio, str(output),
-                                      threads=threads, device=device)
+                                      model_name=model, threads=threads, device=device)
     environment = dict(os.environ)
+    environment["HF_HUB_DISABLE_IMPLICIT_TOKEN"] = "1"
+    environment["HF_HUB_DISABLE_TELEMETRY"] = "1"
     if ffmpeg_dir:
         environment["PATH"] = str(ffmpeg_dir) + os.pathsep + environment.get("PATH", "")
     result = run(cmd, cancel_event=cancel_event, env=environment)

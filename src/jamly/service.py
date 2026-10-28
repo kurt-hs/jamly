@@ -14,6 +14,7 @@ import xml.etree.ElementTree as ET
 
 from .bootstrap import summarize, detect_ffmpeg, check_runtime
 from .config import add_pipeline_arguments, pairing_token, pipeline_options, runtime_paths, token_command
+from .runtime import browser_assets, module_command
 
 LABEL = "com.jamly.backend"
 UNIT = "jamly.service"
@@ -21,7 +22,7 @@ TASK = "Jamly"
 
 
 def server_command(python: str, config: Path) -> list[str]:
-    return [python, "-m", "jamly.server", "--config", str(config)]
+    return module_command("jamly.server", "--config", str(config), executable=python)
 
 
 def _systemd_quote(value: str) -> str:
@@ -67,7 +68,7 @@ def render_service(platform: str, python: str, config: PurePath, state: PurePath
         ET.SubElement(restart, "Interval").text = "PT1M"
         ET.SubElement(restart, "Count").text = "3"
         action = ET.SubElement(ET.SubElement(root, "Actions", Context="Author"), "Exec")
-        ET.SubElement(action, "Command").text = python
+        ET.SubElement(action, "Command").text = command[0]
         ET.SubElement(action, "Arguments").text = subprocess.list2cmdline(command[1:])
         ET.SubElement(action, "WorkingDirectory").text = str(state)
         return Path(state) / "scheduled-task.xml", ET.tostring(root, encoding="utf-16", xml_declaration=True)
@@ -114,11 +115,7 @@ def service_commands(platform: str, action: str, definition: Path) -> list[list[
 
 
 def export_browser_assets(state: Path, kind: str) -> Path:
-    installed = Path(sys.prefix) / "share" / "jamly" / "browser" / kind
-    checkout = Path(__file__).resolve().parents[2] / "browser" / kind
-    source = checkout if checkout.is_dir() else installed
-    if not source.is_dir():
-        raise FileNotFoundError("Browser assets are missing; reinstall Jamly")
+    source = browser_assets(kind)
     destination = state / "browser" / kind
     destination.mkdir(parents=True, exist_ok=True)
     for path in source.iterdir():
