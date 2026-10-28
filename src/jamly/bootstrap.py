@@ -77,6 +77,10 @@ def find_ytdlp(scope_dir: str = "") -> ToolStatus:
         for sub in ("win_x86", "win32"):
             for f in names:
                 candidates.append(os.path.join(portable, sub, f))
+    else:
+        for sub in dict.fromkeys((_os_family(), "linux", "macos")):
+            for f in names:
+                candidates.append(os.path.join(portable, sub, f))
     for c in candidates:
         s = _try(c)
         if s.ok:

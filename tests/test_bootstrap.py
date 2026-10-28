@@ -84,7 +84,9 @@ class YtdlpDetectionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as scope:
             port = os.path.join(scope, ".portable", "yt-dlp")
             _touch(_yt_dlp_exe_path(port))
-            s = b.find_ytdlp(scope_dir=scope)
+            import unittest.mock as mock
+            with mock.patch.dict(os.environ, {"PATH": ""}):
+                s = b.find_ytdlp(scope_dir=scope)
             self.assertTrue(s.ok)
 
     def test_appdata_reuse_branch(self):
