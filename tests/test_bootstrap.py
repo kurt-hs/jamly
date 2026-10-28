@@ -97,6 +97,19 @@ class YtdlpDetectionTests(unittest.TestCase):
             finally:
                 del os.environ["APPDATA"]
 
+    def test_path_fallback_finds_ytdlp_only_on_path(self):
+        # yt-dlp absent from the portable scope and %APPDATA%\yt-dlp_win_x86 but present on PATH
+        # must still be found (the review's "yt-dlp isn't found" bug). PATH is isolated to the fake
+        # bin dir so no host yt-dlp shadows it -> deterministic and portable across machines.
+        with tempfile.TemporaryDirectory() as bindir:
+            fake = os.path.join(bindir, "yt-dlp.exe" if b.PLATFORM_WINDOWS else "yt-dlp")
+            _touch(fake)
+            import unittest.mock as mock
+            with mock.patch.dict(os.environ, {"PATH": bindir}):
+                s = b.find_ytdlp()
+            self.assertTrue(s.ok)
+            self.assertIn("yt-dlp", os.path.basename(s.path))
+
 
 class MainGateTests(unittest.TestCase):
     """main()'s portable readiness gate: python + (yt-dlp OR htdemucs repro) + ffmpeg+ffprobe."""

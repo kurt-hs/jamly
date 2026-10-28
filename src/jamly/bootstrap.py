@@ -91,6 +91,16 @@ def find_ytdlp(scope_dir: str = "") -> ToolStatus:
         s = _try(cand)
         if s.ok:
             return s
+    # 3. PATH fallback: a system / standalone yt-dlp reachable via `which`. Without this a host that
+    #    has yt-dlp only on PATH (no portable build, no %APPDATA%\yt-dlp_win_x86) reports "missing"
+    #    even though it is usable -- the review's "yt-dlp isn't found" bug. The pinned portable build
+    #    and the box's known install still win (checked above); PATH is the last resort.
+    on_path = which("yt-dlp")
+    if on_path:
+        s = _try(on_path)
+        if s.ok:
+            return s
+    return ToolStatus("yt-dlp")
 # --------------------------------------------------------------------------- #
 # ffmpeg + ffprobe (static build ships BOTH; this custom yt-dlp needs both)
 # --------------------------------------------------------------------------- #
