@@ -3,19 +3,19 @@
 param(
     [string]$Python = "python",
     [int]$Port = 8765,
-    [ValidateSet("splitfy","Splitfy")] $Name = "splitfy"
+    [ValidateSet("jamly","Jamly")] $Name = "jamly"
 )
 $ErrorActionPreference = "Stop"
 
-# Walk up from this file until we reach the repo root (the dir containing src\splitfy). The wrappers
+# Walk up from this file until we reach the repo root (the dir containing src\jamly). The wrappers
 # now live at <root>/scripts/<os>/<file>, so a depth-independent search keeps this correct.
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path   # .../scripts/windows/
 $maxDepth  = 40
-while (-not (Test-Path -LiteralPath (Join-Path $scriptDir "src/splitfy")) -and $maxDepth -gt 0) {
+while (-not (Test-Path -LiteralPath (Join-Path $scriptDir "src/jamly")) -and $maxDepth -gt 0) {
     $scriptDir = Split-Path -Parent $scriptDir
     $maxDepth--
 }
-$repoRoot  = $scriptDir   # repo root, so `import splitfy` needs no editable install
+$repoRoot  = $scriptDir   # repo root, so `import jamly` needs no editable install
 
 # NOTE: no hardcoded Python path here — the version and install layout vary per box. Prefer
 # `python`/`py` on PATH (covers PATH installs + an editable install); fall back to a couple of
@@ -40,8 +40,8 @@ function Resolve-Python {
 }
 $py = Resolve-Python
 
-Write-Host "Registering scheduled task '$Name' -> `"$py -m splitfy.server --port $Port --scope '$repoRoot'"`""
-$action  = New-ScheduledTaskAction   -Execute "$py -m splitfy.server" -Argument "--port $Port --scope '$repoRoot'" -WorkingDirectory $repoRoot
+Write-Host "Registering scheduled task '$Name' -> `"$py -m jamly.server --port $Port --scope '$repoRoot'"`""
+$action  = New-ScheduledTaskAction   -Execute "$py -m jamly.server" -Argument "--port $Port --scope '$repoRoot'" -WorkingDirectory $repoRoot
 $trigger = New-ScheduledTaskTrigger   -At (Get-Date)
 $settings= New-ScheduledTaskSettingsSet -Restart 300 -RepeatInterval (TimeSpan::FromMinutes 5)
 

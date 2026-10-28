@@ -10,8 +10,9 @@ The Python package lives under `src/jamly/` (stdlib-only; heavy imports such as 
 `normalize.py` (URL→watch-id), `core.py` (engine availability check + command builders + stem run),
 `bootstrap.py` (reuse-first dependency detection for python / yt-dlp / ffmpeg), `watch_queue.py`
 (`WatchQueue`: resumable queue with a persisted done-set), `run.py` (CLI orchestrator) and
-`server.py` (streaming `/status` SSE status server). Binary discovery is a cache-aware probe: PATH
-first, then a curated list of well-known app locations (`_curated_app_roots`) plus `.portable/<os>/`,
+`server.py` (streaming `/status` SSE status server). Binary discovery is a cache-aware probe: the pinned `.portable/<os>/` scope and a curated list of
+well-known app locations (`_curated_app_roots`) first, with a `which("<tool>")` PATH lookup as a
+last-resort fallback so a host that only has the tool on PATH is still found.
 made robust on hosts where a git-bash-style env can make `os.walk` yield odd-shaped tuples.
 
 Test suite is green under **both** runners (`python -m unittest discover -s tests` and `pytest`). The
@@ -147,18 +148,20 @@ stretch). No global installs required.
 Three small JSON files are the only persistent on-disk state; all three live at project root and are gitignored:
 
 - **`.portable/<os>/...`** — private tooling scope. Holds reused or self-provisioned binaries (yt-dlp standalone + a static ffmpeg+ffprobe build that ships BOTH, plus `<os_family>/ffmpeg` scoped fallbacks). Python is NOT stored here; it is resolved from PATH/system first.
-- **`splitfy_queue.json`** — persistent input queue. Schema `{items:[{watch_id,title,status,added_at}], done:[...], updated_at}`; `done` keeps completed/failed ids for history + dedup. Shared by the CLI and HTTP server through the same JSON protocol (override via env `AUTOCV_QUEUE` or the `--queue` flag). WatchQueue loads an empty queue if the file is missing or invalid, so it never blocks a run.
-- **`splitfy.json`** — **does not exist.** The ConfigStore/splitfy.json persistence design was removed during portabilization; there is no persisted binary/override cache. Tool resolution (python / yt-dlp / ffmpeg) is live detection on every launch (`bootstrap.py` + `core.py`), so nothing here can drift out of sync.
+- **`jamly_queue.json`** — persistent input queue. Schema `{items:[{watch_id,title,status,added_at}], done:[...], updated_at}`; `done` keeps completed/failed ids for history + dedup. Shared by the CLI and HTTP server through the same JSON protocol (override via env `AUTOCV_QUEUE` or the `--queue` flag). WatchQueue loads an empty queue if the file is missing or invalid, so it never blocks a run.
+- **`jamly.json`** — **does not exist.** The ConfigStore/jamly.json persistence design was removed during portabilization; there is no persisted binary/override cache. Tool resolution (python / yt-dlp / ffmpeg) is live detection on every launch (`bootstrap.py` + `core.py`), so nothing here can drift out of sync.
 
 ## Binary discovery (§8)
 
-### Curated known-install roots (PATH-first, then curated)
+### Curated known-install roots (portable + curated first, then PATH fallback)
 
-1. **Curated app locations** (`core.py` / `bootstrap.py`, pure stdlib): probe PATH first, then a curated
-   list of well-known app folders — `%APPDATA%\yt-dlp_win_x86`, `AppData\Local\Programs\{Shotcut,DaVinci
-   Resolve,OBS Studio,Blender,Kdenlive,Avidemux,HandBrake,PotPlayer}` (apps that ship ffmpeg/ffprobe), plus
-   `.portable/<os>/`. This is a *best-effort* probe; it does not need to find every copy on this box — it
-   needs to cover the common cases cross-machine.
+1. **Curated app locations** (`core.py` / `bootstrap.py`, pure stdlib): probe the pinned `.portable/<os>/`
+   scope first, then a curated list of well-known app folders — `%APPDATA%\yt-dlp_win_x86`, `AppData\Local\Programs\{Shotcut,DaVinci
+   Resolve,OBS Studio,Blender,Kdenlive,Avidemux,HandBrake,PotPlayer}` (apps that ship ffmpeg/ffprobe). A
+   `which("<tool>")` **PATH lookup is the last resort** (a host that has yt-dlp only on PATH is still
+   found) -- but the pinned portable build and the box's known install win over PATH. This is a
+   *best-effort* probe; it does not need to find every copy on this box — it needs to cover the common
+   cases cross-machine.
 2. **FFmpeg nuance**: a directory with only `ffmpeg.exe` (no ffprobe) is usable for some yt-dlp builds but
    not this one — keep the "needs BOTH" rule, and treat third-party shared ffmpeg as *local-reuse-only* (not
    portable). Open question: whether to also detect a system-wide ffmpeg/ffprobe via `%PATH%` on Windows.
@@ -168,7 +171,7 @@ Three small JSON files are the only persistent on-disk state; all three live at 
 1. **Reuse-first**: `bootstrap.py` checks PATH + known roots first; only when absent (or `--provision`) does
    it download into `.portable/<os>/`: the official yt-dlp standalone, and a static ffmpeg+ffprobe build. The
    script then points yt-dlp's `--ffmpeg-location` at the discovered dir.
-2. **No persisted config**: tool resolution is live detection on every launch; there is no `splitfy.json`
+2. **No persisted config**: tool resolution is live detection on every launch; there is no `jamly.json`
    cache to keep in sync (see AGENTS.md).
 
 > Discovery falls back to the PATH/app scan when nothing reusable is found, and reuses a recorded ffmpeg/ffprobe
@@ -195,7 +198,7 @@ terminal records (`last_completed`) and `pending`/`done` counts, plus the `watch
   protocol with the userscript (`GET /status` SSE + `POST /add`); a small server writes to the same queue
   file so users can enqueue from an always-on background page instead of the CLI process.
 - **Shared contract** — both clients use the identical `/status` JSON shape and `watch_queue` schema;
-  the shared client (`browser/extension/splitfy_client.js`) is DOM-free, so it ships as a static asset in
+  the shared client (`browser/extension/jamly_client.js`) is DOM-free, so it ships as a static asset in
   the extension rather than as a `jamly` module. A contract test drives the parsing logic directly;
   streamed-path tests use bounded reads so they stay deterministic under both runners.
 - Read-only to project scope (never writes outside `.portable/` or the queue file); alerts on completion
