@@ -16,7 +16,7 @@
         {
             "label": "run-server",
             "type": "shell",
-            "command": "PYTHONPATH=src python -m splitfy.server",
+            "command": "PYTHONPATH=src python -m jamly.server",
             "options": { "/d": "/s" }
         }
     ]

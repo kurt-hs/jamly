@@ -38,7 +38,7 @@
             "name": "run-server",
             "type": "debugpy",
             "request": "launch",
-            "module": "splitfy.server",
+            "module": "jamly.server",
             "justMyCode": false,
             "cwd": "${workspaceFolder}",
             "env": {
