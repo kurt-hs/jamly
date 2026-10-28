@@ -23,7 +23,9 @@ class HtdemucsBuilderTests(unittest.TestCase):
         self.assertEqual(cmd[1:4], ["-m", "demucs", "separate"])
         # model selection uses -n/--name (not --model); htdemucs selects the 4-source model
         self.assertIn("-n", cmd) and self.assertEqual(cmd[cmd.index("-n") + 1], "htdemucs")
-        self.assertIn("--audio", cmd) and self.assertIn("in.wav", cmd)
+        # the audio file is a POSITIONAL argument: demucs takes `tracks` (nargs='*') and has
+        # no --audio option (an invalid flag -> exit 2, nothing separates)
+        self.assertNotIn("--audio", cmd) and self.assertIn("in.wav", cmd)
         self.assertIn("--out", cmd) and self.assertIn("/work", cmd)
         # -j is the parallelism flag (not --threads); source count comes from the model
         self.assertEqual(cmd[cmd.index("-j") + 1], "2")

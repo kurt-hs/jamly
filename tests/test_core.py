@@ -25,24 +25,53 @@ class YtdlpCmdTests(unittest.TestCase):
         self.assertEqual(cmd[-2:], ["-o", "%(title)s.%(ext)s"])
         # --ffmpeg-location must be present so the mux step has BOTH ffmpeg + ffprobe
         self.assertIn("C:\\f\\ffmpeg", cmd)
-        # portable default suppresses subtitle downloads on every host
-        self.assertIn("--no-subs", cmd)
+        # portable default suppresses subtitle writes on every host (the option yt-dlp accepts)
+        self.assertIn("--no-write-subs", cmd)
 
     def test_without_ffmpeg_location(self):
         cmd = build_ytdlp_extract_cmd("yt-dlp.exe", "https://youtu.be/dQw4w9WgXcQ")
         self.assertTrue(cmd[0].endswith("yt-dlp.exe"))
         self.assertIn("--audio-format", cmd)
         self.assertNotIn("--ffmpeg-location", cmd)
-        # portable default suppresses subtitle downloads
-        self.assertIn("--no-subs", cmd)
+        # portable default suppresses subtitle writes (the option yt-dlp accepts)
+        self.assertIn("--no-write-subs", cmd)
 
     def test_suppress_subs_default_and_override(self):
-        # default: skip subtitle downloads for this lossless-audio pipeline on every host
+        # default: skip subtitle writes for this lossless-audio pipeline on every host
         cmd = build_ytdlp_extract_cmd("yt-dlp.exe", "https://youtu.be/dQw4w9WgXcQ")
-        self.assertIn("--no-subs", cmd)
+        self.assertIn("--no-write-subs", cmd)
         # a specific build that rejects the flag -> opt out explicitly
         cmd = build_ytdlp_extract_cmd("yt-dlp.exe", "https://youtu.be/dQw4w9WgXcQ", suppress_subs=False)
-        self.assertNotIn("--no-subs", cmd)
+        self.assertNotIn("--no-write-subs", cmd)
+
+    def test_suppress_subs_env_override_reaches_builder(self):
+        # AUTOCV_SUPPRESS_SUBS=0 must actually reach the builder (run.build_download_cmd used
+        # to short-circuit with 'suppress_subs or True', which made this override a no-op).
+        import os
+        import jamly.run as run_mod
+        old = os.environ.pop("AUTOCV_SUPPRESS_SUBS", None)
+        try:
+            os.environ["AUTOCV_SUPPRESS_SUBS"] = "0"
+            self.assertFalse(run_mod._resolve_suppress_subs())   # resolves to False
+            cmd = build_ytdlp_extract_cmd("yt-dlp.exe", "https://youtu.be/dQw4w9WgXcQ",
+                                          suppress_subs=run_mod._resolve_suppress_subs())
+            self.assertNotIn("--no-write-subs", cmd)
+        finally:
+            if old is not None:
+                os.environ["AUTOCV_SUPPRESS_SUBS"] = old
+
+    def test_leading_dash_source_is_not_an_option(self):
+        # a bare watch id can start with '-' (base64url); yt-dlp must treat it as the positional
+        # URL/id arg, not a flag. '--' ends option parsing so '-bcdefghij' is not parsed as '-b ...'.
+        cmd = build_ytdlp_extract_cmd("yt-dlp.exe", "-bcdefghijX")
+        self.assertEqual(cmd[0], "yt-dlp.exe")
+        self.assertIn("--", cmd)
+        # the source sits AFTER the '--' terminator, so it is never read as an option
+        self.assertEqual(cmd[cmd.index("--") + 1], "-bcdefghijX")
+        # normal URL sources are unaffected (no '--' injected)
+        plain = build_ytdlp_extract_cmd("yt-dlp.exe", "https://youtu.be/dQw4w9WgXcQ")
+        self.assertNotIn("--", plain)
+        self.assertEqual(plain[1], "https://youtu.be/dQw4w9WgXcQ")
 
 
 class DemucsCmdTests(unittest.TestCase):
@@ -51,7 +80,9 @@ class DemucsCmdTests(unittest.TestCase):
     def test_four_stems_args(self):
         cmd = build_htdemucs_four_stems_cmd(python_exe="python.exe", input_audio="in.wav", workdir="w")
         self.assertIn("htdemucs", cmd)         # -n/--name selects the model
-        self.assertIn("--audio", cmd)          # --audio names the source file
+        # demucs takes audio files as POSITIONAL arguments; there is no --audio option
+        self.assertNotIn("--audio", cmd)
+        self.assertEqual(cmd[cmd.index("separate") + 1], "in.wav")   # audio is positional
         self.assertEqual(cmd[cmd.index("--out") + 1], "w")   # --out sets the output dir
         # portable-only: no per-device override flag (auto on every host), and NO --four-stems flag
         self.assertNotIn("--device", cmd)
@@ -70,10 +101,11 @@ class DemucsCmdTests(unittest.TestCase):
         self.assertEqual(cmd[0], "ffmpeg.exe")
         self.assertIn("-i", cmd)
         self.assertTrue(cmd.count("-i"), 3)                 # three inputs
-        self.assertIn("-map", cmd)
-        self.assertEqual(cmd[cmd.index("-map") + 1], "0?")
-        self.assertIn("-mixer_channels", cmd)
-        self.assertEqual(cmd[cmd.index("-mixer_channels") + 1], "2")
+        self.assertIn("-filter_complex", cmd)               # portable amix filter graph
+        self.assertIn("amix=inputs=3", cmd[cmd.index("-filter_complex") + 1])
+        self.assertNotIn("-mixer_channels", cmd)            # rejected by newer ffmpeg (exit 8)
+        # -map must point at the amix filter output, not the raw first input (0? kept only bass)
+        self.assertEqual(cmd[cmd.index("-map") + 1], "[0:a]")
         self.assertTrue(cmd[-1].endswith("out.wav"))
 
     def test_shortest_flag(self):

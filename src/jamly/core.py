@@ -209,13 +209,20 @@ def build_ytdlp_extract_cmd(
     """yt-dlp best-audio extraction; container decided natively by the stream.
 
     ``suppress_subs`` is an explicit knob (not a hidden per-host assumption): when True the tool
-    asks yt-dlp to skip subtitle downloads for this lossless-audio pipeline. It defaults True so
-    every host behaves identically; pass False only if your specific build rejects the flag -- see
-    DESIGN.md section 7.
+    asks yt-dlp to skip subtitle writes for this lossless-audio pipeline. It defaults True so every
+    host behaves identically; pass False only if your specific build rejects the flag -- see
+    DESIGN.md section 7. Suppression uses ``--no-write-subs`` (the option yt-dlp actually accepts);
+    the historic ``--no-subs`` alias is rejected by yt-dlp.
     """
-    cmd = [str(ytdlp_exe), str(url)]
+    cmd = [str(ytdlp_exe)]
+    # a bare watch id can start with '-' (base64url ids use '-'/'_'); passed raw, yt-dlp parses it
+    # as a flag (e.g. '-bcdefghij' -> '-b cdefghij' -> "batch file cdefghij could not be read").
+    # '--' ends option parsing so a leading-dash source is treated as the positional URL/id arg.
+    if str(url).startswith("-"):
+        cmd.append("--")
+    cmd.append(str(url))
     if suppress_subs:
-        cmd += ["--no-subs"]
+        cmd += ["--no-write-subs"]
     if ffmpeg_dir:
         # a dir with only ffmpeg.exe works for some yt-dlp builds but not this one; pass a dir
         # that ships BOTH ffmpeg.exe and ffprobe.exe (see DESIGN.md section 7).
@@ -258,9 +265,18 @@ def build_ffmpeg_mix_cmd(
     vocals: str,
     output: str,
 ) -> List[str]:
-    """Mix non-drum stems (bass+other+vocals) into the 2-channel no-drums file."""
+    """Mix non-drum stems (bass+other+vocals) into the 2-channel no-drums file.
+
+    Uses an ``amix`` filter rather than ``-map 0?`` + ``-mixer_channels``: demuxing all three
+    inputs then combining them in one filter graph is portable across ffmpeg builds. ``-mixer_channels``
+    was rejected by newer ffmpeg (exit 8, nothing written) and, even when accepted, ``-map 0?``
+    would keep only the FIRST input -- so the old form could silently drop stems. Each input is
+    stereo, so the mix lands in 2 channels by construction.
+    """
+    filter_complex = "[0:a][1:a][2:a]amix=inputs=3:duration=shortest"
     return [str(ffmpeg_exe), "-nostdin", "-y", "-i", _abs(bass), "-i", _abs(other),
-            "-i", _abs(vocals), "-shortest", "-map", "0?", "-mixer_channels", "2", str(output)]
+            "-i", _abs(vocals), "-shortest", "-filter_complex", filter_complex,
+            "-map", "[0:a]", str(output)]
 
 
 def build_stem_encode_cmd(
@@ -371,9 +387,10 @@ def build_htdemucs_four_stems_cmd(
     Mirrors ``python -m demucs separate``: ``-n/--name htdemucs`` selects the 4-source model,
     and ``--out`` places results in <workdir>/separated/<model>/<track>/{drums,bass,other,vocals}.wav
     (exactly what :func:`_locate_stems` walks). No ``--four-stems`` flag exists -- source count comes
-    from the model. Requires ``pip install demucs``.
+    from the model. The input audio is passed as a **positional** argument (``tracks``, ``nargs='*'``);
+    demucs has no ``--audio`` option. Requires ``pip install demucs``.
     """
-    cmd = [str(python_exe), "-m", "demucs", "separate", "--audio", str(input_audio),
+    cmd = [str(python_exe), "-m", "demucs", "separate", str(input_audio),
            "--out", str(workdir), "-n", str(model_name)]
     if threads and threads > 0:
         cmd += ["-j", str(threads)]
