@@ -12,7 +12,7 @@ PROCESSING_VERSION = 2
 
 def checksum(path: Path) -> str:
     digest = hashlib.sha256()
-    with path.open("rb+") as file:
+    with path.open("rb") as file:
         for block in iter(lambda: file.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
@@ -62,7 +62,8 @@ def publish_directory(staged: Path, destination: Path) -> None:
     read_manifest(staged)
     for path in staged.iterdir():
         if path.is_file():
-            with path.open("rb") as file:
+            # Windows' FlushFileBuffers requires a handle opened for writing.
+            with path.open("rb+") as file:
                 os.fsync(file.fileno())
     backup = previous_directory(destination)
     recover_directory(destination)

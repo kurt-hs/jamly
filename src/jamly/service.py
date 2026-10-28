@@ -5,7 +5,7 @@ import argparse
 import getpass
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePath
 import plistlib
 import shutil
 import subprocess
@@ -30,7 +30,7 @@ def _systemd_quote(value: str) -> str:
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%") + '"'
 
 
-def render_service(platform: str, python: str, config: Path, state: Path,
+def render_service(platform: str, python: str, config: PurePath, state: PurePath,
                    *, username: str = "", home: Path | None = None) -> tuple[Path, bytes]:
     home = home or Path.home()
     command = server_command(python, config)
@@ -70,7 +70,7 @@ def render_service(platform: str, python: str, config: Path, state: Path,
         ET.SubElement(action, "Command").text = python
         ET.SubElement(action, "Arguments").text = subprocess.list2cmdline(command[1:])
         ET.SubElement(action, "WorkingDirectory").text = str(state)
-        return state / "scheduled-task.xml", ET.tostring(root, encoding="utf-16", xml_declaration=True)
+        return Path(state) / "scheduled-task.xml", ET.tostring(root, encoding="utf-16", xml_declaration=True)
     raise ValueError("Service installation is supported on Windows, macOS and Linux")
 
 

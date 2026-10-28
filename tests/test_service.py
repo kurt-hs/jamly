@@ -1,6 +1,6 @@
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import plistlib
 import sys
 import tempfile
@@ -22,7 +22,7 @@ class ServiceDefinitionsTests(unittest.TestCase):
 
     def test_all_platforms_use_the_selected_interpreter_and_config(self):
         python = "/installed path/python"
-        state = Path("/state path")
+        state = PurePosixPath("/state path")
         settings = state / "server.json"
         with patch.dict(os.environ, {"XDG_CONFIG_HOME": "/configuration"}):
             path, unit = service.render_service("linux", python, settings, state, home=Path("/home"))

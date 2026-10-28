@@ -106,6 +106,18 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(repeated.status, "skipped")
         self.assertEqual(repeated.generation, first.generation)
 
+    def test_read_only_audio_is_reusable_without_write_access(self):
+        first = self.process()
+        self.assertEqual(first.status, "done", first.error)
+        paths = [Path(first.drums_path), Path(first.nodrums_path)]
+        try:
+            for path in paths:
+                path.chmod(0o444)
+            self.assertEqual(self.process().status, "skipped")
+        finally:
+            for path in paths:
+                path.chmod(0o644)
+
     def test_deleted_outputs_are_regenerated(self):
         first = self.process()
         import shutil
