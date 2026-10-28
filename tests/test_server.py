@@ -124,23 +124,31 @@ def _post(port, inputs=None, titles=None, auth=None):
 def _poll_status(base_url):
     """One bounded read of ``GET /status``; return the list of SSE JSON events seen in this poll.
 
-    Reads at most one chunk (<=64KB) so we never hold an infinite connection and memory stays
-    bounded per poll. Returns [] if nothing readable yet.
+    Reads line-by-line until at least one complete SSE event has been consumed, then stops -- so a
+    *paced* stream (events spaced by ``--interval-ms``) stays time-bounded via the socket timeout
+    instead of blocking until a fixed 64KB buffer fills (which a paced stream of small events never
+    does). Each poll opens a fresh short-lived connection; the server re-streams cumulative
+    ``last_completed`` on every tick, so repeated polls observe monotonic progress. Returns [] if
+    nothing readable yet.
     """
     req = Request(base_url + "/status")
     try:
         with urlopen(req, timeout=5) as resp:
-            raw = resp.read(65536).decode("utf-8", "replace")
+            events = []
+            line = resp.readline()
+            while line:
+                text = line.decode("utf-8", "replace").strip()
+                if text.startswith("data: "):
+                    try:
+                        events.append(json.loads(text[len("data: ") :]))
+                    except (ValueError, TypeError):  # noqa: BLE001 - skip malformed chunks defensively
+                        pass
+                    # stop after the first complete event so a paced stream stays time-bounded
+                    if events:
+                        break
+                line = resp.readline()
     except (URLError, OSError):  # noqa: BLE001 - transient; the caller keeps polling
         return []
-    events = []
-    for line in raw.splitlines():
-        if not line.startswith("data: "):
-            continue
-        try:
-            events.append(json.loads(line[len("data: ") :]))
-        except (ValueError, TypeError):  # noqa: BLE001 - skip malformed chunks defensively
-            pass
     return events
 
 
@@ -249,6 +257,39 @@ class ServerIntegrationTests(unittest.TestCase):
                 events2 = _wait_until(port, lambda evs: wid in _completed_ids(evs), deadline=3.0)
                 recs2 = [r for r in _completed_records(events2) if r["watch_id"] == wid]
                 self.assertEqual(len(recs2), 1)
+            finally:
+                _cleanup(srv, qpath, threads)
+
+    def test_worker_saves_queue_after_finishing_item(self):
+        """The worker persists the queue (mark_done + save) after each item so the done-set
+        survives a restart; a previously-finished item loads as done, not re-queued."""
+        wid = "aBcDeFg1234"
+        with _stub_process_one(_FakeResult(ok=True, stage="mix", title="Song A")):
+            srv, port, qpath, worker_t, server_t = _start_server()
+            threads = (worker_t, server_t)
+            try:
+                added = _add_items("http://127.0.0.1:%d" % port, [wid], ["Song A"])
+                self.assertEqual(added["newly_added"], 1)
+                # wait for the terminal record via /status ...
+                _wait_until(port, lambda evs: wid in _completed_ids(evs))
+                # halt the worker so no .save() races our read (on Windows you cannot os.replace a
+                # file another handle currently has open), then join so it fully unwinds.
+                srv.stop()
+                for t in threads:
+                    try:
+                        if t.is_alive():
+                            t.join(timeout=2.0)
+                    except Exception:  # noqa: BLE001 - best-effort teardown
+                        pass
+                # ... the queue is now quiescent; the on-disk done-set must reflect the finished item
+                import jamly.watch_queue as wq_mod
+                queue = wq_mod.WatchQueue.from_path(qpath)
+                self.assertIn(wid, queue.done_ids())
+                self.assertNotIn(wid, queue.pending_ids())
+                # and a fresh load (simulating a restart) sees it as done, not re-queued
+                reloaded = wq_mod.WatchQueue.from_path(qpath)
+                self.assertIn(wid, reloaded.done_ids())
+                self.assertNotIn(wid, reloaded.pending_ids())
             finally:
                 _cleanup(srv, qpath, threads)
 
@@ -444,6 +485,19 @@ class ServerArgParseTests(unittest.TestCase):
     def test_server_parser_honors_replace_existing_flag(self):
         args = build_parser().parse_args(["--replace-existing"])
         self.assertTrue(args.replace_existing)
+
+    def test_server_parser_carries_threads_and_output_dir(self):
+        # process_one reads args.threads and args.output_dir unconditionally; the server parser must
+        # define both (or every server job crashes with AttributeError). Defaults mirror the CLI.
+        args = build_parser().parse_args([])
+        self.assertEqual(args.threads, 0)
+        self.assertEqual(args.output_dir, "output")
+        self.assertEqual(args.audio_format, "mp3")
+
+    def test_server_parser_honors_threads_and_output_dir(self):
+        args = build_parser().parse_args(["-t", "4", "-o", "custom-out"])
+        self.assertEqual(args.threads, 4)
+        self.assertEqual(args.output_dir, "custom-out")
 
 
 if __name__ == "__main__":

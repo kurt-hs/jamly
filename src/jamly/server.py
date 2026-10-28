@@ -29,6 +29,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from jamly.watch_queue import WatchQueue, default_queue_path
 from .core import AUDIO_FORMATS, DEFAULT_OUTPUT_FORMAT
+from .normalize import extract_watch_id
 from .run import process_one
 
 # hosts that keep the queue reachable only by local processes; binding anywhere else is an explicit
@@ -57,9 +58,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--scope", default=None, help="Working scope for engine/ytdlp/ffmpeg resolution (default: cwd)")
     p.add_argument("--queue", default=None, help="Queue file path (default: env AUTOCV_QUEUE or <scope>/jamly_queue.json)")
     p.add_argument("--interval-ms", type=int, default=1000, help="SSE progress event interval")
+    p.add_argument("-o", "--output-dir", default="output",
+                   help="Directory for <title>_drums.<fmt> / _no_drums.<fmt> (default: output)")
     p.add_argument("--audio-format", choices=AUDIO_FORMATS, default=DEFAULT_OUTPUT_FORMAT,
                    help=("Final audio format; 'wav' = lossless/raw WAVs, '%s' = reasonably-encoded lossy (default)"
                          % DEFAULT_OUTPUT_FORMAT))
+    p.add_argument("-t", "--threads", type=int, default=0,
+                   help="Demucs separation threads (0 = auto; only used when available)")
     p.add_argument("--idle-wait-s", type=float, default=2.0, help="Block this long when the queue is empty")
     # write-auth secret for POST /add: shared between this server and any client that enqueues
     # with it (also settable via env SPLITFY_SERVER_TOKEN). With no token configured, writes are
@@ -192,6 +197,13 @@ class ItemServer:
         with self._status_lock:
             self._status["pending"] = list(self.queue.pending_ids())
             self._status["done"] = list(self.queue.done_ids())
+        # persist AFTER recording completion so the done-set survives a restart (the worker previously
+        # updated the in-memory queue but never saved -> a restart re-loaded finished items as pending).
+        try:
+            self.queue.save()
+        except OSError as exc:  # noqa: BLE001 - keep going; next cycle retries the save
+            with self._status_lock:
+                self._status["current"]["error"] = "queue-save-error: %s" % exc
         return True
 
     # Minimum interval between worker iterations even when ``--idle-wait-s`` is 0. A tight
@@ -280,6 +292,10 @@ class QueueStatusHandler(BaseHTTPRequestHandler):
             self.send_header("Connection", "keep-alive")
             self.end_headers()
             try:
+                # paced from the ItemServer's --interval-ms; fall back to 1s if the caller
+                # didn't configure it (e.g. a test stubbing the worker)
+                interval_s = getattr(s, "args", None)
+                interval_s = (interval_s.interval_ms / 1000.0) if interval_s and hasattr(interval_s, "interval_ms") else 1.0
                 while not s._stop.is_set():
                     with s._status_lock:
                         snap = json.loads(json.dumps(s._status))   # deep copy under lock
@@ -294,6 +310,11 @@ class QueueStatusHandler(BaseHTTPRequestHandler):
                     self.wfile.write(("data: %s\n\n" % line).encode("utf-8"))
                     self.wfile.write((": tick p=%d/%d d=%d\n\n" % (pr["pending"], total, done)).encode("utf-8"))
                     self.wfile.flush()   # a write error here means the client disconnected
+                    # pace the stream to --interval-ms (default 1s). Without this the loop
+                    # writes as fast as the client reads -- a busy spin that starves the HTTP
+                    # handler thread and makes /status stall for observers.
+                    if interval_s > 0:
+                        time.sleep(interval_s)
             except (BrokenPipeError, ConnectionResetError):
                 self.close_connection = True   # stop the keep-alive loop on a dead socket
                 return  # client disconnected; drop this SSE connection
@@ -339,11 +360,21 @@ class QueueStatusHandler(BaseHTTPRequestHandler):
         if not inputs:
             self._send_json({"queued": [], "note": "provide a non-empty 'inputs' list"}, status=400)
             return
+        # Normalise each raw input to its watch id BEFORE storing -- otherwise a full URL
+        # becomes the queue's "id" (the dedup + naming key), and part of it lands where the
+        # file path expects. A bare id (including legacy non-11-char ones) is kept as-is;
+        # only URL-shaped inputs are reduced to the id yt-dlp would use.
+        normalized = []
+        for src in inputs:
+            try:
+                normalized.append(extract_watch_id(src))
+            except Exception:  # noqa: BLE001 - unparseable -> keep the raw text (legacy)
+                normalized.append(src)
         s = self._server_obj
         with s._status_lock:
             # add while holding the lock so the response counts are stable even under idle=0 churn;
             # items may be marked done by the worker only after this handler releases the lock.
-            newly = s.queue.add_all(inputs, titles)
+            newly = s.queue.add_all(normalized, titles)
             pending_count = len(s.queue.pending_ids())
             s._status["pending"] = list(s.queue.pending_ids())
             s._status["done"] = list(s.queue.done_ids())
