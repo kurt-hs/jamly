@@ -134,9 +134,9 @@ class EchoInputTests(unittest.TestCase):
                 ["aBcDeFg1234", "aBcDeFg1234", "", "", "aBcDeFg1234"],
             )
         out = buf.getvalue()
-        self.assertIn("5 raw input(s) -> 2 watch id(s)", out)   # dedup summary line
+        self.assertIn("5 raw input(s) -> 3 stable id(s)", out)
         self.assertIn("-> aBcDeFg1234", out)                    # kept ids shown
-        self.assertIn("(blank)", out) and self.assertIn("(invalid)", out)
+        self.assertIn("(blank)", out) and self.assertIn("(duplicate)", out)
 
 
 class DescribeToolsTests(unittest.TestCase):

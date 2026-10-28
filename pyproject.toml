@@ -2,30 +2,33 @@
 # src-layout: all application code lives under ``src/jamly/`` so the package
 # can be installed (``pip install -e .``) or run directly from a checkout.
 [build-system]
-requires = ["setuptools>=61", "wheel"]
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "jamly-audio-sep"
 version = "0.1.0"
-description = "Portable four-stem audio separation (YouTube download -> drums / no-drums WAV)."
+description = "Download yt-dlp audio and create drums and no-drums tracks with Demucs."
 readme = "README.md"
-requires-python = ">=3.9"
-license = { file = "LICENSE.md" }
+requires-python = ">=3.11,<3.13"
+license = "MIT"
+license-files = ["LICENSE.md"]
 keywords = ["audio", "demucs", "stem-separation", "yt-dlp"]
-
-# uv-managed project venv at ``.venv`` (created by `uv sync`). Pure stdlib app,
-# so the only test-time dependency is pytest; pin the interpreter for a
-# reproducible, portable environment that VS Code can pin via .vscode/settings.json.
-[tool.uv]
-# Pin the interpreter used to build .venv for a reproducible, portable env.
-python-version = "3.13"
+dependencies = [
+    "demucs>=4.1,<5",
+    "numpy>=1.26,<2",
+    "yt-dlp[default]>=2026.10.26",
+]
 
 [project.scripts]
 jamly = "jamly.run:main"
+jamly-server = "jamly.server:main"
 
 [project.optional-dependencies]
-test = ["pytest>=7"]
+test = ["pytest>=8"]
+
+[dependency-groups]
+dev = ["pytest>=8", "ruff>=0.14"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -14,7 +14,7 @@ var self = globalThis;
 
 function startFakeServer() {
   var server = http.createServer(function (req, res) {
-    if (req.method === "GET" && req.url === "/status") {
+    if (req.method === "GET" && req.url === "/status?once=1") {
       // mirror the real handler: an SSE data line carrying one progress JSON object + a comment tick
       res.setHeader("Content-Type", "text/event-stream");
       var payload = JSON.stringify({
@@ -26,6 +26,10 @@ function startFakeServer() {
       res.write(": tick p=2 d=0\n\n");
       return res.end();
     } else if (req.method === "POST" && req.url === "/add") {
+      if (req.headers.authorization !== "Bearer sekret") {
+        res.statusCode = 401;
+        return res.end(JSON.stringify({ error: "authorization required" }));
+      }
       var chunks = [];
       req.on("data", function (c) { chunks.push(c); });
       req.on("end", function () {
@@ -71,7 +75,12 @@ startFakeServer().then(function (base_url) {
       assert.deepStrictEqual(snap.current.stage, "mix");
       console.log("pollStatus parsed from SSE tick: OK (pending=%d done=%d)", snap.pending, snap.done);
 
-      return autoConvertClient.addInputs(base_url, ["  https://youtu.be/abc123 ", "", "https://youtu.be/def456"], [null, null]);
+      return autoConvertClient.addInputs(
+        base_url,
+        ["  https://youtu.be/abc123 ", "", "https://youtu.be/def456"],
+        [null, null],
+        "sekret"
+      );
     }).then(function (resp) {
       assert.strictEqual(resp.newly_added, 2, "newly_added should count unique non-empty inputs");
       assert.strictEqual(resp.pending_count, 2);

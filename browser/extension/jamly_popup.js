@@ -13,10 +13,17 @@
     pending:  { icon: "\u25b0", label: "QUEUED" },
     download: { icon: "\u2b1b", label: "EXTRACTING" },
     separate: { icon: "\u2702\ufe0f", label: "SEPARATING" },
-    mix:      { icon: "\U0001F5A4", label: "MIXING" },
+    mix:      { icon: "\u{1F5A4}", label: "MIXING" },
     done:     { icon: "\u2714", label: "DONE" },
     error:    { icon: "\u2717", label: "ERROR" },
+    skipped:  { icon: "\u2714", label: "SKIPPED" },
   };
+
+  function escapeHtml(value) {
+    return String(value || "").replace(/[&<>"']/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+    });
+  }
 
   function counts(body) {
     var p = (body && body.pending == null ? 0 : Math.max(0, body.pending));
@@ -28,21 +35,21 @@
   function badge(status, title) {
     var s = status || "idle";
     var st = STAGE[s] || STAGE.idle;
-    return '<span class="badge ' + (s === "done" ? "done" : s === "error" ? "error" : s) + '">' +
+    return '<span class="badge ' + (s === "done" || s === "skipped" ? "done" : s === "error" ? "error" : s) + '">' +
            st.icon + ' <span class="lbl">' + st.label + '</span>' +
-           ((title) ? ' &mdash; ' + title : '') + '</span>';
+           ((title) ? ' &mdash; ' + escapeHtml(title) : '') + '</span>';
   }
 
   function renderStatus(body) {
     var el = document.getElementById("status");
     if (!body || !body.current || body.current.status === "idle") {
       el.className = "idle";
-      el.textContent = "server idle &mdash; nothing running";
+      el.textContent = "server idle — nothing running";
       return;
     }
     el.className = "";
     var cur = body.current;
-    el.innerHTML = badge(cur.status, cur.title || (cur.watch_id ? cur.watch_id[0] + "\u2026" : ''));
+    el.innerHTML = badge(cur.status, cur.title || (cur.watch_id ? cur.watch_id.slice(0, 12) + "\u2026" : ''));
     document.getElementById("current-title").textContent = cur.title || '';
   }
 

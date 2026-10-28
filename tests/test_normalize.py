@@ -75,9 +75,11 @@ class NormalizeInputsTests(unittest.TestCase):
     def test_none_returns_empty(self):
         self.assertEqual(normalize_inputs(None), [])
 
-    def test_invalid_item_raises(self):
-        with self.assertRaises(InputError):
-            normalize_inputs(["good", "not-a-link-123"])
+    def test_non_youtube_sources_receive_stable_ids(self):
+        first = normalize_inputs(["https://soundcloud.com/artist/song"])
+        second = normalize_inputs(["https://soundcloud.com/artist/song"])
+        self.assertEqual(first, second)
+        self.assertTrue(first[0].startswith("src-"))
 
     def test_non_string_raises(self):
         with self.assertRaises(InputError):
@@ -85,31 +87,25 @@ class NormalizeInputsTests(unittest.TestCase):
 
 
 class MultiHostExtractionTests(unittest.TestCase):
-    """Broader input support: any host yt-dlp understands, plus partial paths without a scheme."""
+    """Non-YouTube sources pass through with a stable, filesystem-safe id."""
 
-    def _ok(self, text, expected):
-        self.assertEqual(extract_watch_id(text), expected)
+    def test_other_hosts_use_hash_ids(self):
+        for source in (
+            "https://vimeo.com/123456789",
+            "https://soundcloud.com/artist/song-name",
+            "ytsearch1:artist song",
+        ):
+            inp = make_input(source)
+            self.assertTrue(inp.watch_id.startswith("src-"))
+            self.assertEqual(inp.source_url, source)
 
-    def test_other_hosts_resolve_any_11_char_id(self):
-        # the id is host-agnostic -- Vimeo/Bandcamp/any yt-dlp-supported site resolves.
-        # 11-char tokens (a real Vimeo id is exactly 11 chars; '123456789' alone would be only 9).
-        self._ok("https://vimeo.com/12345678901", "12345678901")
-        self._ok("https://bandcamp.com/abcDEF12345", "abcDEF12345")
-
-    def test_partial_path_without_scheme(self):
-        # a bare host+path (no http) is accepted, matching how tools are often pasted as plain links.
-        # a bare host+path (no http) is accepted, matching how tools are often pasted as plain links.
-        self._ok("vimeo.com/12345678901", "12345678901")
-        self._ok("bandcamp.com/abcDEF12345", "abcDEF12345")
-
-    def test_no_scheme_still_needs_11_char_id(self):
-        # without a recognizable id in the path, an arbitrary host URL is rejected.
-        with self.assertRaises(InputError):
-            extract_watch_id("https://example.com/some/short/path")
+    def test_same_source_has_same_id(self):
+        source = "https://bandcamp.com/track/example"
+        self.assertEqual(make_input(source).watch_id, make_input(source).watch_id)
 
     def test_full_url_passthrough_source(self):
         inp = make_input("  https://vimeo.com/12345678901  ")
-        self.assertEqual(inp.watch_id, "12345678901")
+        self.assertTrue(inp.watch_id.startswith("src-"))
         # source keeps the cleaned original so yt-dlp receives a full URL for any host
         self.assertEqual(inp.source_url, "https://vimeo.com/12345678901")
 
@@ -127,7 +123,8 @@ class MultiHostExtractionTests(unittest.TestCase):
         self.assertEqual(
             [(i.watch_id, i.source_url) for i in full],
             [
-                ("12345678901", "https://vimeo.com/12345678901"),
+                (make_input("https://vimeo.com/12345678901").watch_id,
+                 "https://vimeo.com/12345678901"),
                 ("dQw4w9WgXcQ", "youtube.com/watch?v=dQw4w9WgXcQ"),
                 ("aBcDeFg1234", "aBcDeFg1234"),
             ],

@@ -21,7 +21,6 @@ $repoRoot  = $scriptDir   # repo root, so `import jamly` needs no editable insta
 # `python`/`py` on PATH (covers PATH installs + an editable install); fall back to a couple of
 # common locations so it still runs on a fresh machine, then give an actionable error.
 function Resolve-Python {
-    $env:ProgramFiles = "$env:ProgramFiles"
     foreach ($c in @("$Python", "python", "py")) {
         if ($null -ne (Get-Command $c -ErrorAction SilentlyContinue)) { return $c }
     }
@@ -39,11 +38,19 @@ function Resolve-Python {
     throw "$Python not set and no python on PATH or common Windows locations; set the '$Python' env var."
 }
 $py = Resolve-Python
+$launcher = Join-Path $repoRoot "scripts\windows\start-jamly-server.bat"
+$cmdArgs = '/d /c ""{0}" {1}"' -f $launcher, $Port
 
-Write-Host "Registering scheduled task '$Name' -> `"$py -m jamly.server --port $Port --scope '$repoRoot'"`""
-$action  = New-ScheduledTaskAction   -Execute "$py -m jamly.server" -Argument "--port $Port --scope '$repoRoot'" -WorkingDirectory $repoRoot
-$trigger = New-ScheduledTaskTrigger   -At (Get-Date)
-$settings= New-ScheduledTaskSettingsSet -Restart 300 -RepeatInterval (TimeSpan::FromMinutes 5)
+Write-Host "Registering scheduled task '$Name' -> $launcher $Port"
+$action = New-ScheduledTaskAction `
+    -Execute $env:ComSpec `
+    -Argument $cmdArgs `
+    -WorkingDirectory $repoRoot
+$trigger = New-ScheduledTaskTrigger -AtStartup
+$settings = New-ScheduledTaskSettingsSet `
+    -RestartCount 3 `
+    -RestartInterval (New-TimeSpan -Minutes 5) `
+    -ExecutionTimeLimit (New-TimeSpan -Days 3650)
 
-Register-ScheduledTask -TaskName $Name -Action $action -Trigger $trigger -Settings $settings
+Register-ScheduledTask -TaskName $Name -Action $action -Trigger $trigger -Settings $settings -Force
 Write-Host "Done. Start it: schtasks /Query /FO TABLE /V /Filter:""Name=$Name"""

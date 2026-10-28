@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - run: uv lock --check
+      - run: uv run --no-project --python ${{ matrix.python-version }} --with pytest python -m pytest -q
+      - run: uv run --no-project --python ${{ matrix.python-version }} --with pytest python -m unittest discover -s tests
+      - run: uvx ruff check .
+      - run: node browser/extension/jamly_client_test.js
+      - run: node browser/extension/jamly_extension_bg_test.js
+      - run: uv build

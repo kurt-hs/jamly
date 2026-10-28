@@ -3,8 +3,7 @@
    Shows live progress from a running `python -m jamly.server` (GET /status SSE) in a floating
    panel, and alerts when items finish with links back to the source URL. Zero-install: install
    via Tampermonkey/Greasemonkey (or your userscript manager), then run the server on another tab.
-   The queue file is read/written locally so it survives across sessions and can be loaded by
-   `python -m jamly.server` as its resume source.
+   Queue persistence is owned by the local jamly server.
 
    Protocol shared with the WebExtension background variant (jamly_client.js):
      GET  /status -> {pending, done, total, current, last_completed}
@@ -18,8 +17,11 @@
 // @version      1.0.0
 // @description  Live queue progress + completion alerts for the jamly HTTP status server.
 // @author       jamly
-// @match        *://*/*
+// @match        https://www.youtube.com/*
+// @match        https://music.youtube.com/*
 // @grant        GM_addStyle
+// @connect      127.0.0.1
+// @connect      localhost
 // @run-at       document-end
 // ==/UserScript==
 
@@ -28,7 +30,7 @@
 
   var POLL_INTERVAL_MS = 1000;   // poll /status every second (server emits ~once/sec)
   var SERVER_URL = "http://127.0.0.1:8765"; // where `python -m jamly.server` is listening
-  var QUEUE_PATH = ""; // "" -> derive from env AUTOCV_QUEUE or <cwd>/jamly_queue.json
+  var SERVER_TOKEN = ""; // set when the server requires JAMLY_SERVER_TOKEN
 
   // --- styling (GM_addStyle; no CSS file dependency) -------------------------------------------
   if (typeof GM_addStyle === "function") {
@@ -69,7 +71,10 @@
   // --- helpers ---------------------------------------------------------------------------------
   function counts(body) {
     var pending = body.pending, done = body.done;
-    return pending == null ? 0 : Math.max(0, pending), done == null ? 0 : Math.max(0, done);
+    return [
+      pending == null ? 0 : Math.max(0, pending),
+      done == null ? 0 : Math.max(0, done)
+    ];
   }
 
   function renderCounts(pending, done) {
@@ -94,7 +99,7 @@
     // pending items (from the queue file) with a clickable link back to their source URL
     if (!inputs || !inputs.length) {
       if (last_completed && last_completed.length) {
-        renderCompleted(last_completed);
+        list.innerHTML = renderCompleted(last_completed);
         return;
       }
       list.innerHTML = '<li id="ac-empty">no items yet</li>';
@@ -117,9 +122,10 @@
     for (var i = 0; i < last_completed.length; i++) {
       var rec = last_completed[i];
       if (!rec || !rec.watch_id) continue;
-      var cls = rec.status === "done" ? "ac-done" : "ac-pending";
-      var mark = rec.status === "done" ? "✔" : "✗";
-      var label = rec.title ? escapeHtml(rec.title) : rec.watch_id;
+      var successful = rec.status === "done" || rec.status === "skipped";
+      var cls = successful ? "ac-done" : "ac-pending";
+      var mark = successful ? "✔" : "✗";
+      var label = escapeHtml(rec.title || rec.watch_id);
       out += '<li class="' + cls + '">' + mark + ' ' + label + '</li>';
     }
     return out;
@@ -132,71 +138,29 @@
   }
   function escapeAttr(s) { return escapeHtml(s); }
 
-  // --- queue file read/write (local resume source; server owns durable state) ------------------
-  async function loadQueue() {
-    if (!QUEUE_PATH) return {};
-    try {
-      var base = "file://";
-      var url = QUEUE_PATH.replace(/^\/+/, "");
-      var resp = await fetch(base + url, { cache: "no-store" });
-      var txt = await resp.text();
-      if (!txt || !txt.trim()) return {};
-      try { return JSON.parse(txt); } catch (e) { return {}; }
-    } catch (e) { /* derive from env / cwd */ }
-    try {
-      var p = process.env.AUTOCV_QUEUE || (process.cwd ? require("path").join(process.cwd(), "jamly_queue.json") : "");
-      if (!p) return {};
-      var fs = await import("node:fs/promises");
-      let txt;
-      try { txt = await fs.readFile(p, "utf8"); } catch (e2) { return {}; }
-      if (!txt || !txt.trim()) return {};
-      return JSON.parse(txt);
-    } catch (e) { return {}; }
-  }
-
-  // Read a SINGLE SSE event from the stream (bounded). The server streams /status forever, so an
-  // unbounded read (resp.text()) never resolves and would hang this poll; instead we drain the
-  // reader until the first event terminator ("\n\n"), with a hard timeout cap so a stalled socket
-  // can never block the UI. (Fix for the "waits for a status response that never ends" bug.)
-  async function readOneEvent(resp, timeoutMs) {
-    var reader = resp.body.getReader();
-    var decoder = new TextDecoder();
-    var acc = "";
-    var deadline = Date.now() + timeoutMs;
-    try {
-      while (Date.now() < deadline) {
-        var chunk = await reader.read();
-        if (chunk.done) break;
-        acc += decoder.decode(chunk.value, { stream: true });
-        var end = acc.indexOf("\n\n");
-        if (end !== -1) { acc = acc.slice(0, end); break; }
-      }
-    } finally {
-      try { reader.cancel(); } catch (e) { /* already released */ }
-    }
-    return acc;
-  }
-
   // --- poll loop -------------------------------------------------------------------------------
   async function poll() {
     try {
-      var resp = await fetch(SERVER_URL + "/status", { cache: "no-store" });
+      var headers = SERVER_TOKEN ? { Authorization: "Bearer " + SERVER_TOKEN } : {};
+      var resp = await fetch(SERVER_URL + "/status?once=1", {
+        cache: "no-store",
+        headers: headers
+      });
       if (!resp.ok) return;
-      // read only the first event (bounded), not the whole never-ending SSE stream
-      var txt = await readOneEvent(resp, 5000);
+      var txt = await resp.text();
       var m = txt.match(/\{[\s\S]*\}/); // outermost JSON object (server writes data:{...} ticks)
       if (!m) return;
       var body = JSON.parse(m[0]);
-      renderCounts(counts(body), counts(body));
+      var totals = counts(body);
+      renderCounts(totals[0], totals[1]);
       renderStatus(body.current);
       renderList(body.last_completed || [], null, body.done);
     } catch (e) { /* transient — next poll will retry */ }
   }
 
   async function start() {
-    var inputs = await loadQueue(); // source URLs for completion links
-    setInterval(poll, POLL_INTERVAL_MS);   // unref-like via daemon below when in a service worker; harmless here
-    poll();                                 // immediate first paint
+    setInterval(poll, POLL_INTERVAL_MS);
+    poll();
   }
 
   if (typeof document !== "undefined") start();

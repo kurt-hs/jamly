@@ -3,8 +3,8 @@
 Backed by a small JSON file so the CLI and the HTTP server (#16) share one protocol::
 
     {
-      "items": [{"watch_id":"dQw4w9WgXcQ","title":null,"status":"pending",
-                 "added_at":1710000000.0}],
+      "items": [{"watch_id":"dQw4w9WgXcQ","source_url":"https://youtu.be/...",
+                 "title":null}],
       "done":  ["xYz..."],   # completed/failed ids (kept for history + dedup)
       "updated_at": <epoch float>
     }
@@ -54,6 +54,7 @@ class WatchQueue:
                 data = json.load(fh)
         except (OSError, ValueError):
             return q
+        done = [str(d).strip() for d in data.get("done", []) if str(d).strip()]
         items = [i for i in data.get("items", []) if isinstance(i, dict)]
         # de-dup on load, order-preserving
         seen = set()
@@ -63,8 +64,12 @@ class WatchQueue:
             if not wid or wid in seen:
                 continue
             seen.add(wid)
-            uniq.append({"watch_id": wid, "title": i.get("title"), "status": q.PENDING})
-        done = [str(d).strip() for d in data.get("done", []) if str(d).strip()]
+            uniq.append({
+                "watch_id": wid,
+                "source_url": str(i.get("source_url") or wid),
+                "title": i.get("title"),
+                "status": q.DONE if wid in done else q.PENDING,
+            })
         return cls(path=q.path, items=uniq, done=done)
 
     @classmethod
@@ -73,21 +78,38 @@ class WatchQueue:
         return cls(path=path)
 
     # -- mutation ------------------------------------------------------------- #
-    def add(self, watch_id: str, title: Optional[str] = None) -> bool:
+    def add(
+        self,
+        watch_id: str,
+        title: Optional[str] = None,
+        source_url: Optional[str] = None,
+    ) -> bool:
         """Add a watch id if not already known; returns True iff it was newly added."""
         wid = (watch_id or "").strip()
         if not wid or wid in self._done or any(i["watch_id"] == wid for i in self._items):
             return False
-        self._items.append({"watch_id": wid, "title": title, "status": self.PENDING})
+        self._items.append({
+            "watch_id": wid,
+            "source_url": (source_url or wid).strip(),
+            "title": title,
+            "status": self.PENDING,
+        })
         return True
 
-    def add_all(self, watch_ids: List[str], titles: Optional[List[Optional[str]]] = None) -> int:
+    def add_all(
+        self,
+        watch_ids: List[str],
+        titles: Optional[List[Optional[str]]] = None,
+        source_urls: Optional[List[Optional[str]]] = None,
+    ) -> int:
         """Bulk-add; returns count newly added."""
-        if not titles:
-            titles = [None] * len(watch_ids)
+        titles = list(titles or [])
+        source_urls = list(source_urls or [])
         n = 0
-        for wid, tit in zip(watch_ids, titles):
-            if self.add(wid, tit):
+        for index, wid in enumerate(watch_ids):
+            title = titles[index] if index < len(titles) else None
+            source_url = source_urls[index] if index < len(source_urls) else None
+            if self.add(wid, title, source_url):
                 n += 1
         return n
 
@@ -120,16 +142,20 @@ class WatchQueue:
         # _done is authoritative (survives reloads even if a per-item status field is stale)
         return [i["watch_id"] for i in self._items if i["watch_id"] not in self._done]
 
+    def pending_items(self) -> List[dict]:
+        """Pending records, including the original yt-dlp source."""
+        return [dict(i) for i in self._items if i["watch_id"] not in self._done]
+
     def count_pending(self) -> int:
         # authoritative on _done (matches pending_ids; robust across reloads)
         return sum(1 for i in self._items if i["watch_id"] not in self._done)
 
     @property
     def items(self):
-        """Raw item records as stored (each: watch_id, title, status)."""
+        """Raw item records (watch_id, source_url, title, status)."""
         return self._items
 
-    def remaining_work(self) -> int:
+    def remaining_work(self) -> bool:
         """True when nothing is left to do."""
         return not self._items or all(i["watch_id"] in self._done for i in self._items)
 
@@ -143,7 +169,11 @@ class WatchQueue:
         """
         with self._save_lock:
             data = {
-                "items": [{"watch_id": i["watch_id"], "title": i.get("title")} for i in self._items],
+                "items": [{
+                    "watch_id": i["watch_id"],
+                    "source_url": i.get("source_url") or i["watch_id"],
+                    "title": i.get("title"),
+                } for i in self._items],
                 "done": list(self._done),
                 "updated_at": time.time(),
             }
@@ -160,16 +190,20 @@ class WatchQueue:
 
 
 if __name__ == "__main__":
+    from .normalize import make_input
+
     q = WatchQueue.create(default_queue_path())
     print("queue path:", q.path)
-    added = 0
-    for wid in ("dQw4w9WgXcQ", "https://youtu.be/abcDEF12345", "aBcDeFg1234"):
-        if q.add(wid):
-            added += 1
+    sources = ("dQw4w9WgXcQ", "https://youtu.be/abcDEF12345", "aBcDeFg1234")
+    inputs = [make_input(source) for source in sources]
+    added = q.add_all(
+        [item.watch_id for item in inputs],
+        source_urls=[item.source_url for item in inputs],
+    )
     print("newly added:", added, "-> pending count:", q.count_pending())
     assert not q.add("dQw4w9WgXcQ"), "dup should be rejected"
     q.save()
     reloaded = WatchQueue.from_path(q.path)
-    assert [i["watch_id"] for i in reloaded.pending_ids()] == \
+    assert reloaded.pending_ids() == \
         ["dQw4w9WgXcQ", "abcDEF12345", "aBcDeFg1234"], reloaded.pending_ids()
-    print("dedup + reload OK:", [i["watch_id"] for i in reloaded.pending_ids()])
+    print("dedup + reload OK:", reloaded.pending_ids())

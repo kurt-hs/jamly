@@ -19,8 +19,8 @@ import jamly.core as c
 class HtdemucsBuilderTests(unittest.TestCase):
     def test_flags_present_and_ordered(self):
         cmd = c.build_htdemucs_four_stems_cmd("python", "in.wav", "/work", threads=2)
-        # python_exe is element 0; the CLI module + subcommand follow
-        self.assertEqual(cmd[1:4], ["-m", "demucs", "separate"])
+        self.assertEqual(cmd[1:3], ["-m", "demucs"])
+        self.assertNotIn("separate", cmd)
         # model selection uses -n/--name (not --model); htdemucs selects the 4-source model
         self.assertIn("-n", cmd) and self.assertEqual(cmd[cmd.index("-n") + 1], "htdemucs")
         # the audio file is a POSITIONAL argument: demucs takes `tracks` (nargs='*') and has
@@ -52,14 +52,14 @@ class LocateStemsTests(unittest.TestCase):
         return p
 
     def test_finds_only_the_four_known_stems(self):
-        self._write(["separated", "htdemucs", "drums.wav"])
-        self._write(["separated", "htdemucs", "bass.wav"])
-        self._write(["separated", "htdemucs", "other.wav"])
-        self._write(["separated", "htdemucs", "vocals.wav"])
+        self._write(["htdemucs", "track", "drums.wav"])
+        self._write(["htdemucs", "track", "bass.wav"])
+        self._write(["htdemucs", "track", "other.wav"])
+        self._write(["htdemucs", "track", "vocals.wav"])
         # decoys that must be ignored
-        self._write(["separated", "htdemucs", "extra.wav"], data=b"y")
-        self._write(["separated", "htdemucs", "hihat.wav"])
-        self._write(["separated", "htdemucs", "drums.flac"])  # not .wav
+        self._write(["htdemucs", "track", "extra.wav"], data=b"y")
+        self._write(["htdemucs", "track", "hihat.wav"])
+        self._write(["htdemucs", "track", "drums.flac"])  # not .wav
 
         locs = c._locate_stems(self._tmp)
         keys = sorted(os.path.splitext(os.path.basename(p))[0] for p in locs)
@@ -74,15 +74,15 @@ class HtdemucsRunnerTests(unittest.TestCase):
         # engine selection -> availability gate (mocked present) -> official demucs CLI shape.
         import os
         import unittest.mock as mock
-        fake = [os.path.abspath(os.path.join("separated", "htdemucs", "%s.wav" % s))
+        fake = [os.path.abspath(os.path.join("htdemucs", "track", "%s.wav" % s))
                 for s in ("drums", "bass", "other", "vocals")]
-        with mock.patch("jamly.core._dir_has_any", return_value=True), \
+        with mock.patch("jamly.core._module_available", return_value=True), \
              mock.patch("jamly.core.find_python", return_value="python"), \
              mock.patch.object(c, "_locate_stems", return_value=fake), \
-             mock.patch.object(c, "run") as run_mock:
+             mock.patch.object(c, "run", return_value=c.RunResult([], 0, "", "")) as run_mock:
             c.separate_stems("song.wav", engine=c.ENGINE_HTDEMUCS)
-        # module is `demucs`, subcommand `separate` -- NOT the removed htdemucs four-stems entry point
-        self.assertEqual(run_mock.call_args.args[0][1:4], ["-m", "demucs", "separate"])
+        self.assertEqual(run_mock.call_args.args[0][1:3], ["-m", "demucs"])
+        self.assertNotIn("separate", run_mock.call_args.args[0])
         idx = run_mock.call_args.args[0].index("-n")
         self.assertEqual(run_mock.call_args.args[0][idx + 1], "htdemucs")   # -n/--name selects the model
         self.assertNotIn("--four-stems", run_mock.call_args.args[0])       # source count comes from the model
@@ -91,7 +91,7 @@ class HtdemucsRunnerTests(unittest.TestCase):
         # availability gate fails first (mocked as if no demucs dir) -> clear RuntimeError naming package
         import unittest.mock as mock
         with self.assertRaises(RuntimeError) as ctx, \
-             mock.patch("jamly.core._dir_has_any", return_value=False), \
+             mock.patch("jamly.core._module_available", return_value=False), \
              mock.patch("jamly.core.find_python", return_value="python"):
             c.separate_stems("song.wav", engine=c.ENGINE_HTDEMUCS)
         self.assertIn("demucs package is not installed", str(ctx.exception))
@@ -102,7 +102,8 @@ class SeparateStemsFailureTests(unittest.TestCase):
 
     def test_no_python_raises_runtimeerror(self):
         import unittest.mock as m
-        with m.patch("jamly.core.find_python", return_value=None),              m.patch("jamly.core._dir_has_any", return_value=True):
+        with m.patch("jamly.core.find_python", return_value=None), \
+                m.patch("jamly.core._module_available", return_value=True):
             with self.assertRaises(RuntimeError) as ctx:
                 c.separate_stems("song.wav")
         self.assertIn("no python interpreter", str(ctx.exception))
@@ -110,7 +111,8 @@ class SeparateStemsFailureTests(unittest.TestCase):
     def test_missing_package_raises_runtimeerror(self):
         # availability gate fails first (mocked no demucs dir) -> RuntimeError names the package
         import unittest.mock as m
-        with m.patch("jamly.core._dir_has_any", return_value=False),              m.patch("jamly.core.find_python", return_value="python"):
+        with m.patch("jamly.core._module_available", return_value=False), \
+                m.patch("jamly.core.find_python", return_value="python"):
             with self.assertRaises(RuntimeError) as ctx:
                 c.separate_stems("song.wav")
         self.assertIn("demucs package is not installed", str(ctx.exception))

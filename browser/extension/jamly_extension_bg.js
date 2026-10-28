@@ -14,8 +14,10 @@
 importScripts(chrome.runtime.getURL("jamly_client.js"));
 
 var SERVER_URL = "http://127.0.0.1:8765"; // default; settable from the options UI (ac_serverUrl)
-chrome.storage.local.get(["ac_serverUrl"], function (items) {
+var SERVER_TOKEN = "";
+chrome.storage.local.get(["ac_serverUrl", "ac_serverToken"], function (items) {
   if (items && items.ac_serverUrl) SERVER_URL = items.ac_serverUrl;
+  if (items && items.ac_serverToken) SERVER_TOKEN = items.ac_serverToken;
 });
 // re-sync when the user edits the URL in options
 if (chrome.storage && chrome.storage.onChanged) {
@@ -23,19 +25,28 @@ if (chrome.storage && chrome.storage.onChanged) {
     if (area === "local" && changes.ac_serverUrl) {
       SERVER_URL = changes.ac_serverUrl.newValue || "http://127.0.0.1:8765";
     }
+    if (area === "local" && changes.ac_serverToken) {
+      SERVER_TOKEN = changes.ac_serverToken.newValue || "";
+    }
   });
 }
 
 // Poll /status every second and keep the latest snapshot in storage + relay it to the popup.
+var pollInFlight = false;
 setInterval(function () {
-  try {
-    var snap = autoConvertClient.pollStatus(SERVER_URL);
-    if (snap) chrome.storage.local.set({ ac_status: snap });
+  if (pollInFlight) return;
+  pollInFlight = true;
+  autoConvertClient.pollStatus(SERVER_URL, SERVER_TOKEN).then(function (snap) {
+    if (!snap) return;
+    chrome.storage.local.set({ ac_status: snap });
     if (chrome.runtime && chrome.runtime.sendMessage) {
-      // best-effort fan-out to any open popup; failures are caught by the caller
       try { chrome.runtime.sendMessage({ type: "ac.status", payload: snap }); } catch (e) {}
     }
-  } catch (e) { /* server may be idle/unreachable — next tick retries */ }
+  }).catch(function () {
+    // server may be idle/unreachable; the next tick retries
+  }).finally(function () {
+    pollInFlight = false;
+  });
 }, 1000);
 
 // Expose enqueue + config to the popup over an async message channel.
@@ -51,7 +62,7 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
   if (msg.type === "ac.enqueue") {
     var inputs = Array.isArray(msg.inputs) ? msg.inputs.map(String).filter(Boolean) : [];
     var titles = Array.isArray(msg.titles) ? msg.titles.filter(Boolean) : [];
-    autoConvertClient.addInputs(SERVER_URL, inputs, titles).then(function (resp) {
+    autoConvertClient.addInputs(SERVER_URL, inputs, titles, SERVER_TOKEN).then(function (resp) {
       sendResponse({ ok: true, resp: resp });
     }).catch(function (err) {
       sendResponse({ ok: false, error: String(err) });

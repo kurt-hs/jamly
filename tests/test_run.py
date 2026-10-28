@@ -25,12 +25,15 @@ class DownloadCmdTests(unittest.TestCase):
     def test_ytdlp_extract_flags_and_order(self):
         cmd = run_mod.build_download_cmd("yt-dlp.exe", "dQw4w9WgXcQ", "/tmp/work")
         self.assertEqual(cmd[0], "yt-dlp.exe")
-        self.assertEqual(cmd[1], "dQw4w9WgXcQ")
+        self.assertEqual(cmd[-1], "dQw4w9WgXcQ")
         self.assertIn("--extract-audio", cmd)
         self.assertIn("--audio-format", cmd) and self.assertEqual(cmd[cmd.index("--audio-format") + 1], "best")
-        # the extract shares the watch-id prefix (not a literal "audio"), so it matches the stems
+        self.assertEqual(cmd[-1], "dQw4w9WgXcQ")
         idx = cmd.index("-o")
-        self.assertEqual(cmd[idx:idx + 2], ["-o", os.path.join("/tmp/work", "dQw4w9WgXcQ")])
+        self.assertEqual(
+            cmd[idx:idx + 2],
+            ["-o", os.path.join("/tmp/work", "dQw4w9WgXcQ.%(ext)s")],
+        )
 
 
 class MixCmdTests(unittest.TestCase):
@@ -93,13 +96,20 @@ class NamingConsistencyTests(unittest.TestCase):
                     "other": os.path.abspath(os.path.join(workdir, "other.wav")),
                     "vocals": os.path.abspath(os.path.join(workdir, "vocals.wav"))}
 
+        def fake_run(cmd):
+            with open(cmd[-1], "wb") as fh:
+                fh.write(b"RIFF\x00\x00\x00\x00WAVEfake-mix")
+            return RunResult(args=list(cmd), returncode=0, stdout="", stderr="")
+
         args = argparse.Namespace(audio_format=fmt, threads=0, output_dir=out_dir, replace_existing=True)
         mix_cmd = None
         with mock.patch.object(run_mod, "make_workdir", return_value=workdir), \
              mock.patch.object(run_mod, "_find_ytdlp", return_value="fake-ytdlp"), \
+             mock.patch.object(run_mod, "_resolve_run_env", return_value=("scope", "htdemucs", "")), \
+             mock.patch.object(run_mod, "ffmpeg_exe_for", return_value="ffmpeg"), \
              mock.patch.object(run_mod, "_stream_download", fake_stream_download), \
              mock.patch.object(run_mod, "separate", fake_separate), \
-             mock.patch.object(run_mod, "_run") as _run_mock:
+             mock.patch.object(run_mod, "_run", side_effect=fake_run) as _run_mock:
             res = run_mod.process_one(wid, args)
         # capture the no-drums mix command while the _run mock is still in place (restored on exit)
         if _run_mock.call_count == 1:
@@ -128,7 +138,7 @@ class NamingConsistencyTests(unittest.TestCase):
         self.assertEqual(len(stem_inputs), 3)                     # exactly three inputs: bass/other/vocals
         self.assertEqual({os.path.basename(s) for s in stem_inputs}, {"bass.wav", "other.wav", "vocals.wav"})
         self.assertNotIn("drums.wav", (os.path.basename(s) for s in stem_inputs))  # drum stem must never be mixed in
-        self.assertEqual(mix_cmd[-1], nodrums_out)                # the no-drums path is the mix's output
+        self.assertEqual(os.path.basename(mix_cmd[-1]), "no_drums.wav")
 
     def test_process_one_writes_metadata_sidecar_with_parsed_title(self):
         # end-to-end task-4 wiring with live metadata: a confident [Artist] - [Songname] parse must land on
@@ -159,23 +169,37 @@ class NamingConsistencyTests(unittest.TestCase):
                 "artist": None, "uploader": "Metal Blade Records", "duration_seconds": 603}
 
         args = argparse.Namespace(audio_format=fmt, threads=0, output_dir=out_dir, replace_existing=True)
+
+        def fake_run(cmd):
+            with open(cmd[-1], "wb") as fh:
+                fh.write(b"RIFF\x00\x00\x00\x00WAVEfake-mix")
+            return RunResult(args=list(cmd), returncode=0, stdout="", stderr="")
+
         with mock.patch.object(run_mod, "make_workdir", return_value=workdir), \
              mock.patch.object(run_mod, "_find_ytdlp", return_value="fake-ytdlp"), \
+             mock.patch.object(run_mod, "_resolve_run_env", return_value=("scope", "htdemucs", "")), \
+             mock.patch.object(run_mod, "ffmpeg_exe_for", return_value="ffmpeg"), \
              mock.patch.object(run_mod, "_stream_download", fake_stream_download), \
              mock.patch.object(run_mod, "separate", fake_separate), \
              mock.patch.object(run_mod, "_fetch_item_metadata", return_value=meta), \
-             mock.patch.object(run_mod, "_run"):
+             mock.patch.object(run_mod, "_run", side_effect=fake_run):
             res = run_mod.process_one(wid, args, source_url="https://www.youtube.com/watch?v=%s" % wid)
 
         self.assertTrue(res.ok, res.error)
         drums_name = os.path.basename(res.drums_path)
         nodrums_name = os.path.basename(res.nodrums_path)
         # the parsed title drives both stems; neither carries the machine key (it lives in meta only)
-        self.assertEqual(drums_name, "Between the Suried and Me - Extremophile Elite (LIVE)_drums.wav")
-        self.assertEqual(nodrums_name, "Between the Suried and Me - Extremophile Elite (LIVE)_no_drums.wav")
+        self.assertEqual(
+            drums_name,
+            "Between the Suried and Me - Extremophile Elite (LIVE) [dM8WjgRA6o8]_drums.wav",
+        )
+        self.assertEqual(
+            nodrums_name,
+            "Between the Suried and Me - Extremophile Elite (LIVE) [dM8WjgRA6o8]_no_drums.wav",
+        )
 
         # res.title carries the machine key + stage tag alongside the human name
-        self.assertEqual(res.title, "Between the Suried and Me - Extremophile Elite (LIVE) | dM8WjgRA6o8 (<original>)")
+        self.assertEqual(res.title, "Between the Suried and Me - Extremophile Elite (LIVE)")
 
         meta_path = res.meta_path
         self.assertTrue(os.path.exists(meta_path), "expected .meta.json on disk: %s" % meta_path)
@@ -183,7 +207,7 @@ class NamingConsistencyTests(unittest.TestCase):
             written = json.load(fh)
         self.assertEqual(written["watch_id"], wid)
         self.assertEqual(written["title"], "Between the Suried and Me - Extremophile Elite (LIVE)")
-        self.assertEqual(written["artist"], "")          # yt-dlp reports NA -> normalized to empty
+        self.assertEqual(written["artist"], "Between the Suried and Me")
         self.assertEqual(written["uploader"], "Metal Blade Records")
         self.assertEqual(written["duration_seconds"], 603)
 
@@ -215,13 +239,15 @@ class GatherInputsTests(unittest.TestCase):
         got = run_mod.gather_inputs(ns)
         self.assertEqual(
             [i.watch_id for i in got],
-            ["12345678901", "dQw4w9WgXcQ", "aBcDeFg1234"],
+            [run_mod.make_input("https://vimeo.com/12345678901").watch_id,
+             "dQw4w9WgXcQ", "aBcDeFg1234"],
         )
         # each item keeps its original source so yt-dlp can resolve any host, not just YouTube
         self.assertEqual(
             [(i.watch_id, i.source_url) for i in got],
             [
-                ("12345678901", "https://vimeo.com/12345678901"),
+                (run_mod.make_input("https://vimeo.com/12345678901").watch_id,
+                 "https://vimeo.com/12345678901"),
                 ("dQw4w9WgXcQ", "youtube.com/watch?v=dQw4w9WgXcQ"),
                 ("aBcDeFg1234", "aBcDeFg1234"),
             ],
@@ -325,7 +351,8 @@ class FinalizeOutputTests(unittest.TestCase):
                 ok = run_mod.finalize_output("ffmpeg.exe", src, dst, fmt="wav")
             self.assertTrue(ok)
             self.assertFalse(called.called)                 # no encoder needed for raw WAV
-            self.assertEqual(open(src, "rb").read(), open(dst, "rb").read())  # verbatim copy
+            with open(src, "rb") as source, open(dst, "rb") as output:
+                self.assertEqual(source.read(), output.read())
 
     def test_lossy_mp3_reencodes_via_run(self):
         with tempfile.TemporaryDirectory() as d:
@@ -358,6 +385,75 @@ class FinalizeOutputTests(unittest.TestCase):
                 with self.assertRaises(RuntimeError):
                     run_mod.finalize_output("bogus.exe", src, dst, fmt="mp3")
 
+    def test_raw_output_creates_parent_directory(self):
+        with tempfile.TemporaryDirectory() as d:
+            src = self._write_fake_wav(os.path.join(d, "drums.wav"))
+            dst = os.path.join(d, "new", "nested", "drums.wav")
+            run_mod.finalize_output("", src, dst, fmt="wav")
+            self.assertTrue(os.path.isfile(dst))
+
+
+class MetadataFetchTests(unittest.TestCase):
+    def test_dump_single_json_is_parsed_by_field(self):
+        payload = {
+            "id": "abc123",
+            "title": "Artist - Song",
+            "artist": "Artist",
+            "uploader": "Channel",
+            "duration": 123.9,
+        }
+        proc = mock.MagicMock(returncode=0, stdout=json.dumps(payload))
+        with mock.patch.object(run_mod.subprocess, "run", return_value=proc) as called:
+            result = run_mod._fetch_item_metadata("yt-dlp", "https://example.test/item")
+        self.assertEqual(result["title"], "Artist - Song")
+        self.assertEqual(result["artist"], "Artist")
+        self.assertEqual(result["duration_seconds"], 123)
+        cmd = called.call_args.args[0]
+        self.assertIn("--dump-single-json", cmd)
+        self.assertIn("--skip-download", cmd)
+
+
+class ExistingOutputTests(unittest.TestCase):
+    def _args(self, output_dir, replace=False):
+        return argparse.Namespace(
+            audio_format="wav",
+            threads=0,
+            output_dir=output_dir,
+            replace_existing=replace,
+        )
+
+    def test_complete_outputs_are_skipped_without_heavy_work(self):
+        wid = "dQw4w9WgXcQ"
+        with tempfile.TemporaryDirectory() as out:
+            paths = run_mod.stem_output_paths(out, wid, "wav")
+            for path in paths:
+                with open(path, "wb") as fh:
+                    fh.write(b"existing")
+            with mock.patch.object(run_mod, "_resolve_run_env",
+                                   return_value=("scope", "htdemucs", "")), \
+                    mock.patch.object(run_mod, "_find_ytdlp", return_value="yt-dlp"), \
+                    mock.patch.object(run_mod, "ffmpeg_exe_for", return_value="ffmpeg"), \
+                    mock.patch.object(run_mod, "_fetch_item_metadata", return_value={}), \
+                    mock.patch.object(run_mod, "make_workdir") as make_workdir:
+                result = run_mod.process_one(wid, self._args(out), source_url=wid)
+            self.assertEqual(result.status, "skipped")
+            make_workdir.assert_not_called()
+
+    def test_partial_outputs_require_replace_flag(self):
+        wid = "dQw4w9WgXcQ"
+        with tempfile.TemporaryDirectory() as out:
+            drums, _nodrums, _meta = run_mod.stem_output_paths(out, wid, "wav")
+            with open(drums, "wb") as fh:
+                fh.write(b"partial")
+            with mock.patch.object(run_mod, "_resolve_run_env",
+                                   return_value=("scope", "htdemucs", "")), \
+                    mock.patch.object(run_mod, "_find_ytdlp", return_value="yt-dlp"), \
+                    mock.patch.object(run_mod, "ffmpeg_exe_for", return_value="ffmpeg"), \
+                    mock.patch.object(run_mod, "_fetch_item_metadata", return_value={}):
+                result = run_mod.process_one(wid, self._args(out), source_url=wid)
+            self.assertEqual(result.status, "error")
+            self.assertIn("--replace-existing", result.error)
+
 
 class MixFailureTests(unittest.TestCase):
     """A failed no-drums mix must NOT mark the item done with a missing no_drums file."""
@@ -386,6 +482,8 @@ class MixFailureTests(unittest.TestCase):
         args = argparse.Namespace(audio_format="wav", threads=0, output_dir=out_dir, replace_existing=True)
         with mock.patch.object(run_mod, "make_workdir", return_value=workdir), \
              mock.patch.object(run_mod, "_find_ytdlp", return_value="fake-ytdlp"), \
+             mock.patch.object(run_mod, "_resolve_run_env", return_value=("scope", "htdemucs", "")), \
+             mock.patch.object(run_mod, "ffmpeg_exe_for", return_value="ffmpeg"), \
              mock.patch.object(run_mod, "_stream_download", fake_stream_download), \
              mock.patch.object(run_mod, "separate", lambda audio=None, _workdir=None, threads=0, **_rest: self._fake_stems(workdir)), \
              mock.patch.object(run_mod, "_fetch_item_metadata", return_value={}), \
@@ -396,12 +494,9 @@ class MixFailureTests(unittest.TestCase):
         # a non-zero mix exit is recorded as an error, not swallowed into 'done'
         self.assertEqual(res.status, "error")
         self.assertIn("mix failed", res.error)
-        # no <title>_no_drums file was written; only the drums stem (finalized by copy) exists
+        # Atomic finalization leaves neither output behind when the mix fails.
         self.assertIsNone(res.nodrums_path)
-        # res.drums_path is only assigned after the mix succeeds, so check the file on disk
-        # directly -- the copy landed there before the mix was dispatched.
-        self.assertTrue(os.path.exists(os.path.join(out_dir, "%s_drums.wav" % wid)),
-                        "drums stem should still be present")
+        self.assertFalse(os.path.exists(os.path.join(out_dir, "%s_drums.wav" % wid)))
         self.assertFalse([f for f in os.listdir(out_dir) if "no_drums" in f], "no no-drums file written")
 
     def test_successful_mix_marks_item_done(self):
@@ -427,6 +522,8 @@ class MixFailureTests(unittest.TestCase):
 
         with mock.patch.object(run_mod, "make_workdir", return_value=workdir), \
              mock.patch.object(run_mod, "_find_ytdlp", return_value="fake-ytdlp"), \
+             mock.patch.object(run_mod, "_resolve_run_env", return_value=("scope", "htdemucs", "")), \
+             mock.patch.object(run_mod, "ffmpeg_exe_for", return_value="ffmpeg"), \
              mock.patch.object(run_mod, "_stream_download", fake_stream_download), \
              mock.patch.object(run_mod, "separate", lambda audio=None, _workdir=None, threads=0, **_rest: self._fake_stems(workdir)), \
              mock.patch.object(run_mod, "_fetch_item_metadata", return_value={}), \
@@ -504,6 +601,58 @@ class MainRetryTests(unittest.TestCase):
                     os.environ.pop("JAMLY_QUEUE", None)
                 else:
                     os.environ["JAMLY_QUEUE"] = prev
+
+    def test_main_passes_original_source_to_worker(self):
+        from jamly.normalize import make_input
+        source = "https://soundcloud.com/artist/song"
+        item = make_input(source)
+        seen = []
+        with tempfile.TemporaryDirectory() as tmp:
+            qpath = os.path.join(tmp, "jamly_queue.json")
+            with mock.patch.dict(os.environ, {"JAMLY_QUEUE": qpath}), \
+                    mock.patch.object(run_mod, "gather_inputs", return_value=[item]), \
+                    mock.patch.object(run_mod, "_find_ytdlp", return_value="yt-dlp"), \
+                    mock.patch.object(run_mod, "find_ffmpeg", return_value="/tools"), \
+                    mock.patch.object(run_mod, "resolve_engine", return_value="htdemucs"), \
+                    mock.patch.object(run_mod, "describe_tools", return_value=None), \
+                    mock.patch.object(
+                        run_mod,
+                        "process_one",
+                        side_effect=lambda wid, args, source_url=None: (
+                            seen.append((wid, source_url))
+                            or run_mod.ItemResult(watch_id=wid, status="done")
+                        ),
+                    ):
+                rc = run_mod.main(["-i", source])
+        self.assertEqual(rc, 0)
+        self.assertEqual(seen, [(item.watch_id, source)])
+
+    def test_main_resumes_pending_queue_without_new_input(self):
+        import jamly.watch_queue as wq_mod
+        wid = "aBcDeFg1234"
+        with tempfile.TemporaryDirectory() as tmp:
+            qpath = os.path.join(tmp, "jamly_queue.json")
+            queue = wq_mod.WatchQueue(path=qpath)
+            queue.add(wid, source_url="https://youtu.be/%s" % wid)
+            queue.save()
+            with mock.patch.dict(os.environ, {"JAMLY_QUEUE": qpath}), \
+                    mock.patch.object(run_mod, "gather_inputs", return_value=[]), \
+                    mock.patch.object(run_mod, "_find_ytdlp", return_value="yt-dlp"), \
+                    mock.patch.object(run_mod, "find_ffmpeg", return_value="/tools"), \
+                    mock.patch.object(run_mod, "resolve_engine", return_value="htdemucs"), \
+                    mock.patch.object(run_mod, "describe_tools", return_value=None), \
+                    mock.patch.object(
+                        run_mod,
+                        "process_one",
+                        return_value=run_mod.ItemResult(watch_id=wid, status="done"),
+                    ) as process:
+                rc = run_mod.main([])
+            self.assertEqual(rc, 0)
+            process.assert_called_once()
+            self.assertEqual(
+                process.call_args.kwargs["source_url"],
+                "https://youtu.be/%s" % wid,
+            )
 
 
 if __name__ == "__main__":

@@ -13,8 +13,11 @@ REM ============================================================================
 setlocal
 where python >nul 2>nul || (echo "python not found on PATH" & exit /b 1)
 set "PYTHON=python"
-if "%~1"=="" set "PORT=8765"
+set "PORT=%~1"
+if "%PORT%"=="" set "PORT=8765"
 
-cd /d "%~dp0\.\.."   REM repo root (two levels up from scripts\windows\) so import jamly works
+for %%I in ("%~dp0\..\..") do set "REPO_ROOT=%%~fI"
+cd /d "%REPO_ROOT%"
+set "PYTHONPATH=%REPO_ROOT%\src"
 echo jamly server: starting on http://127.0.0.1:%PORT%  (scope=%CD%)
 "%PYTHON%" -m jamly.server --port %PORT% --scope "%CD%"

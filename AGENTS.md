@@ -42,9 +42,8 @@ python -m pytest                    # pythonpath=["src"] from pyproject.toml
 python -m unittest discover -s tests  # each test file shims src onto sys.path
 ```
 
-- Every test passes under both runners, and no test is skipped except the two SSE-integration
-  methods noted below (which skip by design). If either runner reports failures or skips, that is
-  wrong — do not paper over it by editing any count in this file; fix the cause.
+- Every test passes under both runners without skips. If either runner reports failures or skips,
+  fix the cause rather than changing an expected count.
 - Tests must be **portable across machines**, never dependent on this box's Python or PATH. Mock
   any environment-specific lookup (locating an interpreter, scanning a portable yt-dlp cache) with
   `mock.patch`; do not call code that relies on host filesystem/PATH state and then assert real results.
@@ -55,12 +54,8 @@ python -m unittest discover -s tests  # each test file shims src onto sys.path
 - `mock.patch` targets use **full dotted paths** (`"jamly.core.X"`), never bare `"core.X"`.
 - Source stays ASCII-only so it compiles and loads under any locale; keep `py_compile` clean.
 
-### The two skipped SSE-integration tests are intentional
-
-Racing an infinite streaming worker thread against one long-lived socket read is inherently
-flaky under loose daemon threads, so both integration methods in `test_server.py` skip cleanly
-instead of hanging/racing. A bounded-stream harness (e.g. FastAPI-style `TestClient`) can drive
-them later; the reusable helpers (`_read_sse_currents`, `_post_add`, `_FakeResult`) are retained for that.
+SSE integration tests use `GET /status?once=1`, which emits the same event as the continuous stream
+and then closes. Keep browser and server tests bounded this way.
 
 ## Hygiene
 

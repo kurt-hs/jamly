@@ -43,11 +43,12 @@ from jamly.server import ItemServer, _is_loopback_host, build_parser
 class _FakeResult:
     """Stands in for :func:`run.process_one`'s return value during live-stream tests."""
 
-    def __init__(self, ok=True, stage="mix", title=None, error=None):
+    def __init__(self, ok=True, stage="mix", title=None, error=None, status=None):
         self.ok = ok
         self.stage = stage
         self.title = title
         self.error = error
+        self.status = status or ("done" if ok else "error")
 
 
 def _stub_process_one(result):
@@ -56,7 +57,7 @@ def _stub_process_one(result):
     Returns a context manager. The server looks up ``process_one`` in its module globals at call
     time, so patching it here makes every worker cycle use our stub instead of real yt-dlp/ffmpeg.
     """
-    def _fake(wid, args):
+    def _fake(wid, args, source_url=None):
         return result
 
     return mock.patch.object(_server_module(), "process_one", side_effect=_fake)
@@ -131,7 +132,7 @@ def _poll_status(base_url):
     ``last_completed`` on every tick, so repeated polls observe monotonic progress. Returns [] if
     nothing readable yet.
     """
-    req = Request(base_url + "/status")
+    req = Request(base_url + "/status?once=1")
     try:
         with urlopen(req, timeout=5) as resp:
             events = []
@@ -298,7 +299,7 @@ class ServerIntegrationTests(unittest.TestCase):
         extension/userscript context, so every response (and the OPTIONS preflight) must carry
         CORS headers; without them the browsers would block the body and the popup/stem could not
         talk to the queue over HTTP."""
-        wid = "corsTestId01"
+        wid = "corsTest001"
         with _stub_process_one(_FakeResult(ok=True, stage="mix", title=wid)):
             srv, port, qpath, worker_t, server_t = _start_server()
             threads = (worker_t, server_t)
@@ -331,6 +332,7 @@ class ServerIntegrationTests(unittest.TestCase):
                     self.assertEqual(r.status, 204)
                     self.assertEqual(hdrs.get("Access-Control-Allow-Origin"), "*")
                     self.assertIn("POST", hdrs.get("Access-Control-Allow-Methods", ""))
+                    self.assertIn("Authorization", hdrs.get("Access-Control-Allow-Headers", ""))
                 finally:
                     c.close()
             finally:
@@ -414,7 +416,7 @@ class S2WriteAuthTests(unittest.TestCase):
 
     def test_post_add_accepted_when_no_token_configured(self):
         # default/legacy behaviour: no server token -> writes are not gated.
-        wid = "noauthTestId01"
+        wid = "noAuth00001"
         with _stub_process_one(_FakeResult(ok=True, stage="mix", title=wid)):
             srv, port, qpath, worker_t, server_t = _start_server()
             threads = (worker_t, server_t)
@@ -471,6 +473,48 @@ class S2WriteAuthTests(unittest.TestCase):
             self.assertEqual(body["newly_added"], 1)
         finally:
             _cleanup(srv, qpath, threads)
+
+
+class ServerLifecycleTests(unittest.TestCase):
+    def test_stop_terminates_serve_forever_thread(self):
+        qpath = os.path.join(
+            tempfile.gettempdir(), "jamly-stop-%s.json" % uuid.uuid4().hex)
+        args = build_parser().parse_args(["--port", "0", "--queue", qpath])
+        srv = ItemServer(args)
+        thread = threading.Thread(target=srv.start, daemon=True)
+        thread.start()
+        time.sleep(0.1)
+        srv.stop()
+        thread.join(timeout=2)
+        self.assertFalse(thread.is_alive())
+
+    def test_worker_receives_original_source(self):
+        source = "https://soundcloud.com/artist/song"
+        qpath = os.path.join(
+            tempfile.gettempdir(), "jamly-source-%s.json" % uuid.uuid4().hex)
+        args = build_parser().parse_args(["--port", "0", "--queue", qpath])
+        srv = ItemServer(args)
+        from jamly.normalize import make_input
+        item = make_input(source)
+        srv.queue.add(item.watch_id, source_url=item.source_url)
+        seen = []
+        try:
+            with mock.patch.object(
+                _server_module(),
+                "process_one",
+                side_effect=lambda wid, args, source_url=None: (
+                    seen.append((wid, source_url))
+                    or _FakeResult(ok=True)
+                ),
+            ):
+                self.assertTrue(srv._process_one())
+            self.assertEqual(seen, [(item.watch_id, source)])
+        finally:
+            srv.stop()
+            try:
+                os.remove(qpath)
+            except OSError:
+                pass
 
 
 class ServerArgParseTests(unittest.TestCase):

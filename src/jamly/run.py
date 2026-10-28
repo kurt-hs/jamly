@@ -1,13 +1,14 @@
 """Main CLI orchestrator for jamly.
 
-Per input (YouTube link / partial URL / bare watch id) the pipeline is::
+Per input (any yt-dlp source) the pipeline is::
 
     download -> yt-dlp best-audio extract   (container chosen natively by the stream)
          -> separate_stems() four-stems      (torch `demucs` CLI, model htdemucs)
-         -> ffmpeg no-drums mix               (bass + other + vocals, 2ch)
+         -> ffmpeg no-drums mix               (bass + other + vocals)
          -> per-stem encode-or-copy           (lossy format default; raw WAV on request)
 
-Outputs per item: ``<title>_drums.<fmt>`` and ``<title>_no_drums.<fmt>`` where ``<fmt>`` is the
+Outputs per item: ``<title> [<id>]_drums.<fmt>`` and
+``<title> [<id>]_no_drums.<fmt>`` where ``<fmt>`` is the
 chosen audio format (see :func:`build_parser`'s ``--audio-format``); lossy MP3 is the default,
 raw WAV is opt-in. Each output keeps a ``.meta.json`` sidecar.
 Heavy/networked steps are delegated to core (and the subprocesses it spawns); this module's own
@@ -24,10 +25,12 @@ import shutil
 import subprocess
 import sys
 import json
+import tempfile
+import uuid
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
-from .normalize import normalize_inputs_full, extract_watch_id, Input
+from .normalize import normalize_inputs_full, make_input, Input
 from .core import (
     AUDIO_FORMATS, DEFAULT_OUTPUT_FORMAT, FORMAT_WAV,
     build_stem_encode_cmd,
@@ -42,9 +45,9 @@ from jamly.watch_queue import WatchQueue, default_queue_path
 
 # best-effort metadata lookup timeout (seconds); the whole thing is wrapped so a slow/failing yt-dlp
 # never blocks or fails item processing -- process_one degrades to the watch-id fallback.
-METADATA_FETCH_TIMEOUT = 300
+METADATA_FETCH_TIMEOUT = 60
 
-ENGINE_CHOICES = ("auto", "htdemucs")  # portable-only: exactly one engine; 'uvr5' no longer exists
+ENGINE_CHOICES = ("auto", "htdemucs")
 
 
 # module-level logger; quiet by default so importing this module never prints (tests/callers opt in).
@@ -98,7 +101,7 @@ def _stream_download(cmd: List[str]) -> 'RunResult':
 class ItemResult:
     watch_id: str
     title: Optional[str] = None
-    status: str = "pending"      # lifecycle: pending|download|separate|mix|done|error
+    status: str = "pending"      # lifecycle: pending|download|separate|mix|done|skipped|error
     stage: str = ""              # which pipeline stage is in progress ("" when idle)
     drums_path: Optional[str] = None
     nodrums_path: Optional[str] = None
@@ -107,12 +110,12 @@ class ItemResult:
 
     @property
     def ok(self) -> bool:
-        return self.status == "done"
+        return self.status in ("done", "skipped")
 
     @property
     def finished(self) -> bool:
         # finished at all -- success ("done") OR failure ("error"); distinct from ``ok`` above.
-        return self.status in ("done", "error")
+        return self.status in ("done", "skipped", "error")
 
 
 @dataclass
@@ -121,7 +124,7 @@ class Plan:
     watch_id: str
     title: Optional[str] = None
     workdir: str = ""           # per-item temp dir holding the extracted audio + stems
-    output_dir: str = ""         # where <title>_drums.wav / _no_drums.wav land
+    output_dir: str = ""         # where the named drums/no-drums pair lands
     engine: str = "auto"
     threads: int = 0
 
@@ -140,16 +143,15 @@ def build_download_cmd(
     """Extract best audio into <workdir>/<watch_id>.<ext>; container decided by yt-dlp.
 
     The extract passes the *source url* (full URL / partial path, or a bare id if that is all we
-    have) to yt-dlp so any host it understands resolves -- not just YouTube. The watch-id prefix is
-    kept for output filenames only, so every stem produced later stays traceable to one name.
+    have) to yt-dlp so any host it understands resolves. The stable id is kept for output filenames.
     When ``source_url`` is None (e.g. a bare id was fed in), the bare id itself is used as yt-dlp's
     URL argument -- matching the historical YouTube-only behaviour.
 
     ``suppress_subs`` forwards to :func:`build_ytdlp_extract_cmd` so subtitle downloads are skipped
-    for this lossless-audio pipeline on every host; pass False only if a specific build rejects it.
+    for this audio-only pipeline on every host; pass False only if a specific build rejects it.
     None means "no host-specific override" -> the builder's portable default applies."""
     url = source_url if source_url else watch_id
-    out = os.path.join(workdir, watch_id)
+    out = os.path.join(workdir, watch_id + ".%(ext)s")
     from .core import build_ytdlp_extract_cmd as b
     # None => let the builder apply its portable default; an explicit value is forwarded verbatim.
     return b(ytdlp_exe, url, output_template=out, ffmpeg_dir=ffmpeg_dir,
@@ -182,9 +184,8 @@ def extract_title_hint(wid: str) -> Optional[str]:
 def gather_inputs(args) -> List[Input]:
     """Combine --input/-i values and stdin (if piped), then normalize/dedupe into :class:`Input`\nobjects.
 
-    Each item carries the extracted watch id *and* the original source text, so yt-dlp receives a
-    full URL / partial path (not just a bare id) for any host it understands -- while output names
-    stay rooted on the short watch id. The resumable queue keys only on ``watch_id``."""
+    Each item carries a stable filesystem-safe id and the original source text. The resumable queue
+    keys on the stable id and retains the source needed by yt-dlp."""
     # argparse dest for -i/--input is 'input'; gather_inputs accepts any iterable of strings
     sources = list(getattr(args, "input", []) or [])
     if sys.stdin.isatty() is False:
@@ -200,7 +201,7 @@ def gather_inputs(args) -> List[Input]:
 def resolve_engine(args, scope_dir: str) -> Optional[str]:
     """Pick a usable engine. `args.engine` overrides auto-selection; returns None if none.
 
-    Portable-only: there is exactly one engine (the demucs PyPI CLI). Auto resolves to
+    There is exactly one engine (the Demucs PyPI CLI). Auto resolves to
     ``ENGINE_HTDEMUCS`` when the package is available and ``None`` otherwise; an explicit choice
     must name that same engine -- any other value never runs, so a stale/unknown selection degrades
     to None rather than executing."""
@@ -215,9 +216,7 @@ def resolve_engine(args, scope_dir: str) -> Optional[str]:
 
 
 def make_workdir() -> str:
-    d = os.path.join(_abs(os.getcwd()), "_tmp", "autoconvert_%s" % os.urandom(4).hex())
-    os.makedirs(d, exist_ok=True)
-    return d
+    return tempfile.mkdtemp(prefix="jamly-")
 
 
 def locate_extracted(workdir: str) -> Optional[str]:
@@ -273,12 +272,14 @@ def stem_output_paths(output_dir: str, watch_id: str, fmt: str,
                       parsed: Optional[Tuple[str, str]] = None) -> tuple:
     """Consistent output paths for one item's stems + sidecar.
 
-    Both stems share the human prefix -- a confident ``[Artist] - [Songname]`` parse when available
-    (see :func:`naming.parse_title_artist`), otherwise the bare watch id so outputs stay uniquely
-    traceable on every platform and match the yt-dlp extract <wid>.<ext>; each stem then carries an
-    indicative suffix (<_drums / _no_drums>). The meta file always mirrors the bare watch id. Pure.
+    Both stems share a sanitized human prefix and always retain the stable id. The metadata sidecar
+    is named directly from that id.
     """
-    prefix = stem_prefix(watch_id, parsed)
+    safe_id = sanitize_filename(watch_id)
+    prefix = sanitize_filename(stem_prefix(watch_id, parsed))
+    if parsed:
+        max_human = max(1, 180 - len(safe_id) - 3)
+        prefix = "%s [%s]" % (prefix[:max_human].rstrip(), safe_id)
     nodrums = os.path.join(output_dir, "%s_no_drums.%s" % (prefix, fmt))
     drums = os.path.join(output_dir, "%s_drums.%s" % (prefix, fmt))
     meta = os.path.join(output_dir, "%s.meta.json" % watch_id)
@@ -286,133 +287,166 @@ def stem_output_paths(output_dir: str, watch_id: str, fmt: str,
 
 
 def _fetch_item_metadata(ytdlp_exe: str, source_url: Optional[str]) -> Optional[dict]:
-    """Best-effort real title/artist/uploader/duration from yt-dlp --print.
+    """Best-effort real title/artist/uploader/duration from yt-dlp JSON.
 
     Returns a dict with keys title, artist, author, uploader, duration_seconds and id -- or None if
-    the lookup fails (offline, bare id, or error). Never raises: process_one falls back to parsing
-    the raw input text, then the watch-id prefix, when this returns None.
+    the lookup fails (offline, bare id, or error). Never raises.
     """
     try:
-        cmd = [
-            ytdlp_exe,
-            "--print",
-            "%(title)s|%(artist)s|%(author)s|%(uploader)s|%(duration)s|%(id)s",
-            source_url,
-        ]
+        if not source_url:
+            return None
+        cmd = [ytdlp_exe, "--dump-single-json", "--skip-download", "--no-playlist", source_url]
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=METADATA_FETCH_TIMEOUT)
     except Exception:  # noqa: BLE001 - metadata is best-effort; any failure degrades to fallback
         return None
     if proc.returncode != 0 or not proc.stdout.strip():
         return None
-    fields = {}
-    for pair in proc.stdout.splitlines():
-        pair = pair.strip()
-        if not pair:
-            continue
-        key, _, value = pair.partition("|")
-        if key and value.strip():
-            fields[key] = value.strip()
-    dur = fields.get("duration", "")
     try:
-        fields["duration_seconds"] = int(dur) if dur != "" else None
-    except ValueError:
-        pass
-    return {k: v for k, v in fields.items() if k}
+        payload = json.loads(proc.stdout)
+    except (TypeError, ValueError):
+        return None
+    fields = {
+        "title": payload.get("title"),
+        "artist": payload.get("artist") or payload.get("creator"),
+        "author": payload.get("channel") or payload.get("uploader"),
+        "uploader": payload.get("uploader") or payload.get("channel"),
+        "duration": payload.get("duration"),
+        "id": payload.get("id"),
+    }
+    dur = fields.get("duration")
+    try:
+        fields["duration_seconds"] = int(dur) if dur is not None else None
+    except (TypeError, ValueError):
+        fields["duration_seconds"] = None
+    return {k: v for k, v in fields.items() if v not in (None, "")}
+
+
+def _temporary_output_path(path: str) -> str:
+    root, ext = os.path.splitext(os.path.abspath(path))
+    return "%s.tmp-%s%s" % (root, uuid.uuid4().hex[:10], ext)
 
 
 def process_one(wid: str, args, progress=None, source_url: Optional[str] = None) -> ItemResult:
-    """Run the full pipeline for ONE watch id; returns an ItemResult.
-
-    Kept separate from run_pipeline so a persistent queue can drive one item at a time,
-    mark it done in the queue file, and resume later. Heavy steps are delegated to
-    core's subprocess runners (yt-dlp + ffmpeg required on PATH/scope).
-
-
-    ``source_url`` is the original input text (full URL / partial path / bare id) kept from
-    normalization; it is passed straight to yt-dlp so any host it understands resolves -- not just
-    YouTube. When None, only a bare id was fed in and that same id is used as yt-dlp's URL arg."""
+    """Run the full pipeline for one stable input id."""
     res = ItemResult(watch_id=wid)
-    workdir = make_workdir()
-    audio_path = None
-    stems: Dict[str, str] = {}
+    workdir = ""
+    temporary_outputs: List[str] = []
+    source = source_url or wid
     try:
         scope, engine, ffmpeg_dir = _resolve_run_env(args)
+        ytdlp_exe = _find_ytdlp(scope)
+        ffmpeg_exe = ffmpeg_exe_for(ffmpeg_dir)
+        if not ytdlp_exe:
+            raise RuntimeError("yt-dlp is not installed or not on PATH")
+        if not engine:
+            raise RuntimeError("demucs is not installed; reinstall jamly with its runtime dependencies")
+        if not ffmpeg_exe:
+            raise RuntimeError("ffmpeg and ffprobe are required on PATH")
+
+        output_dir = os.path.abspath(os.path.expanduser(args.output_dir))
+        os.makedirs(output_dir, exist_ok=True)
+        fmt = getattr(args, "audio_format", DEFAULT_OUTPUT_FORMAT) or DEFAULT_OUTPUT_FORMAT
+        item_meta = _fetch_item_metadata(ytdlp_exe, source) or {}
+        parsed = parse_title_artist(item_meta.get("title"))
+        if not parsed and item_meta.get("artist") and item_meta.get("title"):
+            parsed = (item_meta["artist"], item_meta["title"])
+        drums_out, nodrums_out, meta_path = stem_output_paths(
+            output_dir, wid, fmt, parsed=parsed)
+
+        existing = [path for path in (drums_out, nodrums_out, meta_path) if os.path.exists(path)]
+        if existing and not args.replace_existing:
+            if len(existing) == 3:
+                res.status = "skipped"
+                res.title = item_meta.get("title") or wid
+                res.drums_path = drums_out
+                res.nodrums_path = nodrums_out
+                res.meta_path = meta_path
+                return res
+            raise RuntimeError(
+                "partial outputs already exist; pass --replace-existing: %s"
+                % ", ".join(existing))
+
         if progress:
             progress(wid, "pending", 0, 0)
-        ytdlp_exe = _find_ytdlp(scope)
-        # subtitle-suppression override for this host (env), else the portable default
+        workdir = make_workdir()
         cmd = build_download_cmd(
-            ytdlp_exe, wid, workdir, source_url=source_url, ffmpeg_dir=ffmpeg_dir or "",
-            suppress_subs=_resolve_suppress_subs())
+            ytdlp_exe,
+            wid,
+            workdir,
+            source_url=source,
+            ffmpeg_dir=ffmpeg_dir or "",
+            suppress_subs=_resolve_suppress_subs(),
+        )
         res.status, res.stage = "download", "download"
         audio_path = _stream_download(cmd).ok and locate_extracted(workdir)
         if not audio_path:
             raise RuntimeError("yt-dlp extract produced no audio file")
 
         res.status, res.stage = "separate", "separate"
-        stems = separate(audio_path, workdir, args.threads or 0)
-        drums = stems.get("drums")
-        if not drums:
-            raise RuntimeError("no 'drums' stem produced by separation")
+        stems: Dict[str, str] = separate(audio_path, workdir, args.threads or 0)
+        missing = [name for name in ("drums", "bass", "other", "vocals") if not stems.get(name)]
+        if missing:
+            raise RuntimeError("separation did not produce: %s" % ", ".join(missing))
 
         res.status, res.stage = "mix", "mix"
-        # All three outputs share the watch id as their common prefix: the yt-dlp extract is
-        # <wid>.<ext>, and each stem adds an indicative suffix (<_drums / _no_drums>). The id is
-        # URL-safe, unique per video, and known before extraction -- so it's a stable filename basis
-        # on every platform (no title to rely on yet, no unicode/special chars, no truncation).
-        fmt = getattr(args, "audio_format", DEFAULT_OUTPUT_FORMAT) or DEFAULT_OUTPUT_FORMAT
-        # best-effort real title/artist/uploader/duration from yt-dlp --print; None -> fall back to
-        # parsing the raw input text (a bare id / partial path has no usable fields) then the watch-
-        # id prefix. The real title is parsed for filenames, while .meta.json records every field.
-        item_meta = _fetch_item_metadata(ytdlp_exe, source_url)
-        # item_meta may be None or a dict missing keys (yt-dlp can drop an empty title line); use
-        # .get() so a partial/empty result degrades to the input-text fallback instead of KeyError.
-        parsed = parse_title_artist((item_meta or {}).get("title") or source_url)
-        drums_out, nodrums_out, meta_path = stem_output_paths(args.output_dir, wid, fmt, parsed=parsed)
-        # Finalize the primary (drums) stem first. Both stems are produced together before success;
-        # doing it here means a drum re-encode failure surfaces immediately and never leaves its
-        # no-drums complement half-mixed on disk (the workdir is wiped in finally regardless).
-        finalize_output(ffmpeg_exe_for(ffmpeg_dir), drums, drums_out, fmt)
-        res.status, res.stage = "mix", "mix"
-        # No-drums mix: ffmpeg blends bass+other+vocals (drums excluded by construction) into
-        # nodrums_out. build_mix_cmd takes the established 5-arg form -- (ffmpeg, bass, other,
-        # vocals, output) -- matching core.build_ffmpeg_mix_cmd and its tests; 'drums' is intentionally
-        # omitted so it never lands in the mix.
-        mix_cmd = build_mix_cmd(ffmpeg_exe_for(ffmpeg_dir), stems["bass"],
-                                stems["other"], stems["vocals"], nodrums_out)
+        nodrums_wav = os.path.join(workdir, "no_drums.wav")
+        mix_cmd = build_mix_cmd(
+            ffmpeg_exe, stems["bass"], stems["other"], stems["vocals"], nodrums_wav)
         mix_res = _run(mix_cmd)
         if not mix_res.ok:
             _print_tail(mix_res.stderr)
-            raise RuntimeError("mix failed (exit %d): %s"
-                               % (mix_res.returncode, " ".join(mix_res.args[:4])))
+            raise RuntimeError(
+                "mix failed (exit %d): %s"
+                % (mix_res.returncode, " ".join(mix_res.args[:4])))
 
-        # both stems succeeded: surface the human name and write the structured sidecar. output_dir
-        # already holds the written stems, so its parent exists -- safe to open the meta file there.
+        drums_tmp = _temporary_output_path(drums_out)
+        nodrums_tmp = _temporary_output_path(nodrums_out)
+        meta_tmp = _temporary_output_path(meta_path)
+        temporary_outputs.extend((drums_tmp, nodrums_tmp, meta_tmp))
+        finalize_output(ffmpeg_exe, stems["drums"], drums_tmp, fmt)
+        finalize_output(ffmpeg_exe, nodrums_wav, nodrums_tmp, fmt)
+
+        title = item_meta.get("title") or ""
+        artist = item_meta.get("artist") or (parsed[0] if parsed else "")
+        uploader = item_meta.get("uploader") or ""
+        duration_seconds = item_meta.get("duration_seconds") or 0
+        with open(meta_tmp, "w", encoding="utf-8") as fh:
+            json.dump(
+                meta_dict(
+                    watch_id=wid,
+                    source_url=source,
+                    title=title,
+                    artist=artist,
+                    uploader=uploader,
+                    duration=duration_seconds,
+                ),
+                fh,
+                ensure_ascii=False,
+                indent=2,
+            )
+
+        for temporary, final in (
+            (drums_tmp, drums_out),
+            (nodrums_tmp, nodrums_out),
+            (meta_tmp, meta_path),
+        ):
+            os.replace(temporary, final)
+            temporary_outputs.remove(temporary)
+
         res.status, res.stage = "done", ""
-        if item_meta and "title" in item_meta:
-            title = item_meta["title"] or None
-            artist = item_meta.get("artist") or None
-            uploader = item_meta.get("uploader") or None
-            duration_seconds = item_meta.get("duration_seconds") or 0
-        else:
-            # no live metadata -- best-effort parse of the raw input, then bare watch id everywhere
-            title = parsed[0] if parsed else None
-            artist = parsed[1] if parsed else None
-            uploader = None
-            duration_seconds = 0
-        res.title = build_metadata_name(wid, (parsed[0], parsed[1]) if parsed else None, "original")
-        human_meta_path = os.path.abspath(meta_path)
-        with open(human_meta_path, "w", encoding="utf-8") as fh:
-            json.dump(meta_dict(
-                watch_id=wid, source_url=source_url, title=title, artist=artist,
-                uploader=uploader, duration=duration_seconds), fh)
+        res.title = title or build_metadata_name(wid, parsed, "original")
         res.drums_path = drums_out
         res.nodrums_path = nodrums_out
-        res.meta_path = human_meta_path
+        res.meta_path = meta_path
     except Exception as exc:  # noqa: BLE001 - record and continue across the queue
         res.status, res.stage, res.error = "error", "", str(exc)
     finally:
-        if not args.replace_existing:
+        for path in temporary_outputs:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+        if workdir:
             shutil.rmtree(workdir, ignore_errors=True)
     return res
 
@@ -423,7 +457,7 @@ def run_pipeline(inputs: List[Input], args, progress=None) -> List[ItemResult]:
     Thin wrapper over process_one so a persistent queue (#15/#16) can drive one item at a
     time and save/resume incrementally. `progress(wid, stage, idx, total)` is called before
     each heavy step (optional hook)."""
-    scope = os.environ.get("JAMLY_SCOPE") or os.getcwd()
+    scope = getattr(args, "scope", None) or os.environ.get("JAMLY_SCOPE") or os.getcwd()
     engine = resolve_engine(args, scope)
     print("jamly: %d input(s), engine=%s" % (len(inputs), engine or "n/a"))
 
@@ -438,7 +472,6 @@ def run_pipeline(inputs: List[Input], args, progress=None) -> List[ItemResult]:
 
 
 def separate(audio_path, workdir, threads=0):
-    # portable-only: exactly one demucs engine (htdemucs) via the official CLI; see core.separate_stems.
     from .core import separate_stems as ss
     return ss(audio=audio_path, workdir=workdir, threads=threads)
 
@@ -460,6 +493,7 @@ def finalize_output(ffmpeg_exe: str, src_wav: str, dst_path: str, fmt: str) -> b
     so it works even when ffmpeg is unavailable; a lossy target requires ffmpeg to encode -- if that
     step fails we raise so the item is marked errored rather than "done" with a missing file.
     """
+    os.makedirs(os.path.dirname(os.path.abspath(dst_path)), exist_ok=True)
     if fmt == FORMAT_WAV:
         shutil.copy2(_abs(src_wav), _abs(dst_path))   # raw WAV -> verbatim, no encoder needed
         return True
@@ -480,7 +514,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("-i", "--input", action="append", metavar="URL_OR_ID",
                    help="YouTube link/id/partial URL (repeatable). Also reads stdin when piped.")
     p.add_argument("-o", "--output-dir", default="output",
-                   help="Directory for <title>_drums.<fmt> / _no_drums.<fmt> (default: output)")
+                   help="Directory for the drums/no-drums pair (default: output)")
+    p.add_argument("--scope", default=None,
+                   help="Working scope for tool resolution and the default queue (default: cwd)")
+    p.add_argument("--queue", default=None,
+                   help="Queue file path (default: env JAMLY_QUEUE or <scope>/jamly_queue.json)")
     p.add_argument("--audio-format", choices=AUDIO_FORMATS, default=DEFAULT_OUTPUT_FORMAT,
                    help=("Final audio format; 'wav' = lossless/raw WAVs, '%s' = reasonably-encoded lossy (default)"
                          % DEFAULT_OUTPUT_FORMAT))
@@ -508,12 +546,13 @@ def _colored(text: str, kind) -> str:
 
 
 def echo_inputs(raw, titles):
-    """Show how each input parsed -> normalized watch id (+ best-effort title hint).
+    """Show how each input maps to its stable queue id (+ best-effort title hint).
 
     ``raw`` may be bare-id strings or the :class:`Input` objects returned by gather_inputs; either
-    way this computes each item's own normalized id (via ``extract_watch_id``) so blank / invalid /
+    way this computes each item's stable id so blank / invalid /
     duplicate entries are all shown and flagged -- giving a transparent view of the dedup result."""
     kept = dropped = 0
+    seen = set()
     for i, w in enumerate(raw, 1):
         # accept bare-id strings or Input objects (gather_inputs returns the latter); either way
         # echo its own normalized id so blank / invalid / duplicate entries are all flagged.
@@ -527,17 +566,24 @@ def echo_inputs(raw, titles):
             try:
                 # ``w`` may be an :class:`Input`; extract from its string source (not the object,
                 # which has no .strip()) so a valid bare id / URL is recognised, not flagged invalid.
-                wid = extract_watch_id(source)
+                wid = make_input(source).watch_id
             except Exception:
                 wid = ""
                 tag = "  (invalid)"
-        kept += bool(wid)
-        dropped += not bool(wid)
+        if wid and wid in seen:
+            tag = "  (duplicate)"
+            dropped += 1
+        elif wid:
+            seen.add(wid)
+            kept += 1
+        else:
+            dropped += 1
         line = "%2d. %s -> %s%s" % (i, w, wid, tag)
         hint = '   "%s"' % hint if hint else ""
         _log.note(line + hint)
     tail = "; dropped %d (%d blank / invalid / duplicate)" % (len(raw) - kept, dropped) if dropped else ""
-    _log.step("%d raw input(s) -> %d watch id(s) after normalize+dedup%s" % (len(raw), kept, tail))
+    _log.step("%d raw input(s) -> %d stable id(s) after normalize+dedup%s" % (
+        len(raw), kept, tail))
 
 
 def describe_tools(ytdlp_path: str = "", ffmpeg_dir: str = "") -> None:
@@ -574,22 +620,24 @@ def main(argv=None) -> int:
     ensure_utf8_output()
 
     args = build_parser().parse_args(argv)
-    scope_dir = os.environ.get("JAMLY_SCOPE") or os.getcwd()
+    scope_dir = args.scope or os.environ.get("JAMLY_SCOPE") or os.getcwd()
     qpath = getattr(args, "queue", None) or os.environ.get("JAMLY_QUEUE") \
         or default_queue_path(scope_dir)
 
     queue = WatchQueue.from_path(qpath)
     raw_inputs = gather_inputs(args)
-    if not raw_inputs:
-        _log.warn("no input provided (pass -i URL, pipe URLs via stdin, or seed the queue file)")
+    if raw_inputs:
+        titles = [extract_title_hint(i.source_url) for i in raw_inputs]
+        echo_inputs(raw_inputs, titles)
+        newly = queue.add_all(
+            [i.watch_id for i in raw_inputs],
+            titles,
+            [i.source_url for i in raw_inputs],
+        )
+        _log.note("seeded %d new item(s) into %s" % (newly, qpath))
+    elif not queue.pending_ids():
+        _log.warn("no input provided and the queue has no pending items")
         return 2
-
-    # show how each input parsed -> normalized id (+ title hint), then dedup by watch_id into the
-    # queue (the queue keys on ids; original sources are used for yt-dlp resolution only).
-    titles = [extract_title_hint(getattr(i, "source_url", i)) for i in raw_inputs]
-    echo_inputs(raw_inputs, titles)
-    newly = queue.add_all([i.watch_id for i in raw_inputs], titles)
-    _log.note("seeded %d new item(s) into %s" % (newly, qpath))
 
     if args.dry_run:
         pending = queue.pending_ids()
@@ -606,9 +654,9 @@ def main(argv=None) -> int:
     _log.step("engine=%s" % (engine or "none available"))
 
     # drive the queue one item at a time: mark done + save after each (resumable)
-    remaining = list(queue.pending_ids())
+    remaining = list(queue.pending_items())
     if not remaining:
-        _log.note("nothing to do (%d queued, all complete)" % len(remaining))
+        _log.note("nothing to do (all queued items are complete)")
         return 0
     _log.step("processing %d pending item(s); queue=%s" % (len(remaining), qpath))
 
@@ -618,14 +666,27 @@ def main(argv=None) -> int:
     def _stage_badge(status: str) -> str:
         # done/error reuse the browser vocab's exact glyphs (U+2714 / U+2717) so both surfaces
         # render identical icons; other stages fall back to a dim info bullet.
-        icon = {"done": "\u2714", "error": "\u2717"}.get(status, SYMBOL["info"])
-        label = {"done": "DONE", "error": "ERROR"}.get(status, status or "PENDING")
-        color = {"done": "green", "error": "red", "separate": "cyan", "mix": "yellow", "download": "blue"}.get(status, "grey")
+        icon = {"done": "\u2714", "skipped": "\u2714", "error": "\u2717"}.get(
+            status, SYMBOL["info"])
+        label = {
+            "done": "DONE",
+            "skipped": "SKIPPED",
+            "error": "ERROR",
+        }.get(status, status or "PENDING")
+        color = {
+            "done": "green",
+            "skipped": "green",
+            "error": "red",
+            "separate": "cyan",
+            "mix": "yellow",
+            "download": "blue",
+        }.get(status, "grey")
         return "%s %s" % (_log._c(icon, color), _log._c(label, color))
 
     ok = err = done = 0
-    for i, wid in enumerate(remaining):
-        res = process_one(wid, args)
+    for i, item in enumerate(remaining):
+        wid = item["watch_id"]
+        res = process_one(wid, args, source_url=item.get("source_url") or wid)
         badge = _stage_badge(res.status)
         title = (' "%s"' % res.title) if res.title else ""
         _log.step("%2d/%d  %s%s%s" % (i + 1, len(remaining), badge, "  ", wid[:16] + title))

@@ -32,10 +32,10 @@ extension + userscript assets.
 It does **not** cover third-party tools this project drives at runtime — each keeps
 its own license:
 
-- **htdemucs / Demucs** (Meta) — invoked as `python -m htdemucs`; ships under its
-  own terms. Not bundled in source here; the `.th` weights are downloaded/reused, not committed.
-- **audio-separator / UVR5 ("Ultimate Vocal Remover")** — external Python package and an optional local install we detect/reuse.
-- **ffmpeg / ffprobe** (FFmpeg) and the BtbN static build it downloads into `.portable/` at runtime.
-- **yt-dlp** — standalone extractor invoked as a subprocess; its own license applies to any bundled source you fetch through it.
+- **Demucs / htdemucs** (Meta) — installed as a Python dependency and invoked with
+  `python -m demucs`; model weights are downloaded by Demucs and are not committed here.
+- **PyTorch** — installed transitively by Demucs.
+- **ffmpeg / ffprobe** (FFmpeg) — system tools invoked as subprocesses.
+- **yt-dlp** — installed as a Python dependency and invoked as a subprocess.
 
 If you redistribute our code, keep this LICENSE.md and the copyright notice above.

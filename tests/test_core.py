@@ -22,7 +22,8 @@ class YtdlpCmdTests(unittest.TestCase):
                                        ffmpeg_dir=r"C:\f\ffmpeg")
         self.assertEqual(cmd[0], "yt-dlp.exe")
         self.assertIn("--extract-audio", cmd)
-        self.assertEqual(cmd[-2:], ["-o", "%(title)s.%(ext)s"])
+        self.assertEqual(cmd[cmd.index("-o") + 1], "%(title)s.%(ext)s")
+        self.assertEqual(cmd[-1], "https://youtu.be/dQw4w9WgXcQ")
         # --ffmpeg-location must be present so the mux step has BOTH ffmpeg + ffprobe
         self.assertIn("C:\\f\\ffmpeg", cmd)
         # portable default suppresses subtitle writes on every host (the option yt-dlp accepts)
@@ -37,7 +38,7 @@ class YtdlpCmdTests(unittest.TestCase):
         self.assertIn("--no-write-subs", cmd)
 
     def test_suppress_subs_default_and_override(self):
-        # default: skip subtitle writes for this lossless-audio pipeline on every host
+        # default: skip subtitle writes for this audio-only pipeline on every host
         cmd = build_ytdlp_extract_cmd("yt-dlp.exe", "https://youtu.be/dQw4w9WgXcQ")
         self.assertIn("--no-write-subs", cmd)
         # a specific build that rejects the flag -> opt out explicitly
@@ -71,7 +72,7 @@ class YtdlpCmdTests(unittest.TestCase):
         # normal URL sources are unaffected (no '--' injected)
         plain = build_ytdlp_extract_cmd("yt-dlp.exe", "https://youtu.be/dQw4w9WgXcQ")
         self.assertNotIn("--", plain)
-        self.assertEqual(plain[1], "https://youtu.be/dQw4w9WgXcQ")
+        self.assertEqual(plain[-1], "https://youtu.be/dQw4w9WgXcQ")
 
 
 class DemucsCmdTests(unittest.TestCase):
@@ -82,7 +83,8 @@ class DemucsCmdTests(unittest.TestCase):
         self.assertIn("htdemucs", cmd)         # -n/--name selects the model
         # demucs takes audio files as POSITIONAL arguments; there is no --audio option
         self.assertNotIn("--audio", cmd)
-        self.assertEqual(cmd[cmd.index("separate") + 1], "in.wav")   # audio is positional
+        self.assertNotIn("separate", cmd)
+        self.assertEqual(cmd[-1], "in.wav")
         self.assertEqual(cmd[cmd.index("--out") + 1], "w")   # --out sets the output dir
         # portable-only: no per-device override flag (auto on every host), and NO --four-stems flag
         self.assertNotIn("--device", cmd)
@@ -95,7 +97,10 @@ class DemucsCmdTests(unittest.TestCase):
 
     def test_threads_override(self):
         cmd = build_htdemucs_four_stems_cmd(python_exe="python.exe", input_audio="in.wav", workdir="w", threads=4)
-        self.assertEqual(cmd[cmd.index("-j") + 1], "4")   # -j/--jobs sets the worker countclass FfmpegCmdTests(unittest.TestCase):
+        self.assertEqual(cmd[cmd.index("-j") + 1], "4")
+
+
+class FfmpegCmdTests(unittest.TestCase):
     def test_mix_non_drum_stems(self):
         cmd = build_ffmpeg_mix_cmd("ffmpeg.exe", "bass.wav", "other.wav", "vocals.wav", "out.wav")
         self.assertEqual(cmd[0], "ffmpeg.exe")
@@ -105,12 +110,13 @@ class DemucsCmdTests(unittest.TestCase):
         self.assertIn("amix=inputs=3", cmd[cmd.index("-filter_complex") + 1])
         self.assertNotIn("-mixer_channels", cmd)            # rejected by newer ffmpeg (exit 8)
         # -map must point at the amix filter output, not the raw first input (0? kept only bass)
-        self.assertEqual(cmd[cmd.index("-map") + 1], "[0:a]")
+        self.assertEqual(cmd[cmd.index("-map") + 1], "[mix]")
+        self.assertIn("normalize=0", cmd[cmd.index("-filter_complex") + 1])
         self.assertTrue(cmd[-1].endswith("out.wav"))
 
-    def test_shortest_flag(self):
+    def test_float_wav_output(self):
         cmd = build_ffmpeg_mix_cmd("ffmpeg.exe", "bass.wav", "other.wav", "vocals.wav", "out.wav")
-        self.assertIn("-shortest", cmd)
+        self.assertEqual(cmd[cmd.index("-c:a") + 1], "pcm_f32le")
 
 
 class PureHelperTests(unittest.TestCase):
@@ -138,6 +144,9 @@ class PureHelperTests(unittest.TestCase):
     def test_sanitize_allowed_set(self):
         s = sanitize_filename("a b c", allowed="abcdefghijklmnopqrstuvwxyz")
         self.assertEqual(s, "abc")
+
+    def test_sanitize_caps_utf8_bytes(self):
+        self.assertLessEqual(len(sanitize_filename("\U0001f941" * 100).encode("utf-8")), 180)
 
     def test_ensure_output_dir_creates_and_returns_abs(self):
         d = ensure_output_dir(os.path.join(os.getcwd(), "_t_out"))
@@ -245,20 +254,18 @@ class DetectEngineTests(unittest.TestCase):
 
     def test_returns_htdemucs_when_demucs_installed(self):
         import unittest.mock as mock
-        with mock.patch.object(core, "_dir_has_any", return_value=True) as m:
+        with mock.patch.object(core, "_module_available", return_value=True) as available:
             self.assertEqual(core.detect_engine(), core.ENGINE_HTDEMUCS)
-            args = m.call_args[0][1]
-            self.assertEqual(args, ("demucs",))
+            available.assert_called_once_with("demucs")
 
     def test_returns_none_when_demucs_missing(self):
         import unittest.mock as mock
-        with mock.patch.object(core, "_dir_has_any", return_value=False):
+        with mock.patch.object(core, "_module_available", return_value=False):
             self.assertIsNone(core.detect_engine())
 
     def test_no_fallback_to_other_engines(self):
         # portable-only: a missing demucs package is not treated as another engine being usable
         import unittest.mock as mock
-        with mock.patch.object(core, "_dir_has_any", return_value=False) as m:
+        with mock.patch.object(core, "_module_available", return_value=False) as available:
             self.assertIsNone(core.detect_engine())
-            args = m.call_args[0][1]
-            self.assertEqual(args, ("demucs",))
+            available.assert_called_once_with("demucs")

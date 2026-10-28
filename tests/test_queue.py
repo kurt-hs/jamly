@@ -58,6 +58,17 @@ class PersistenceTests(unittest.TestCase):
         self.assertIn("d", again.pending_ids())
         self.assertTrue(reloaded.is_complete("b"))
 
+    def test_source_url_survives_reload(self):
+        d = self._tmp()
+        q = WatchQueue(path=os.path.join(d, "queue.json"))
+        q.add("src-abc", source_url="https://soundcloud.com/artist/song")
+        q.save()
+        reloaded = WatchQueue.from_path(q.path)
+        self.assertEqual(
+            reloaded.pending_items()[0]["source_url"],
+            "https://soundcloud.com/artist/song",
+        )
+
     def test_init_accepts_done_list(self):
         q = WatchQueue(done=["done_id"])
         self.assertTrue(q.is_complete("done_id"))

@@ -118,11 +118,21 @@ class StemOutputPathsNamedTests(unittest.TestCase):
         out = tempfile.mkdtemp()
         try:
             drums, nodrums, meta = run_mod.stem_output_paths(out, "vid1", "mp3", parsed=("Band", "Song"))
-            self.assertEqual(os.path.basename(drums), "Band - Song_drums.mp3")
-            self.assertEqual(os.path.basename(nodrums), "Band - Song_no_drums.mp3")
+            self.assertEqual(os.path.basename(drums), "Band - Song [vid1]_drums.mp3")
+            self.assertEqual(os.path.basename(nodrums), "Band - Song [vid1]_no_drums.mp3")
             self.assertEqual(os.path.basename(meta), "vid1.meta.json")
         finally:
             shutil.rmtree(out, ignore_errors=True)
+
+    def test_long_title_never_truncates_stable_id(self):
+        drums, nodrums, _meta = run_mod.stem_output_paths(
+            "/out",
+            "dQw4w9WgXcQ",
+            "wav",
+            parsed=("A" * 120, "B" * 120),
+        )
+        self.assertIn("[dQw4w9WgXcQ]", os.path.basename(drums))
+        self.assertIn("[dQw4w9WgXcQ]", os.path.basename(nodrums))
 
 
 if __name__ == "__main__":

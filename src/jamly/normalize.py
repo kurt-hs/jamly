@@ -1,45 +1,39 @@
-"""Input normalization for any source URL that ``yt-dlp`` understands.
+"""Input normalization for any source that ``yt-dlp`` understands.
 
 Pure standard-library Python (no third-party deps) so it is trivially portable
 across Windows, macOS and Linux and easy to unit-test without spawning anything.
 
-The tool accepts whatever ``yt-dlp`` can fetch audio from -- not just YouTube. Each input
-normalizes to a short, URL-safe **watch id** used for stable output filenames, while the
-original source text is kept verbatim (as-is) so it can be handed straight to yt-dlp for any
-host it understands.
+YouTube inputs keep their 11-character video id. Other URLs and extractor expressions receive a
+stable hash-based id while retaining the original source text for yt-dlp.
 
-Accepted forms -> normalized watch id:
+Accepted forms -> stable id:
     bare id                 dQw4w9WgXcQ            (11 chars from [A-Za-z0-9_-])
     youtube.com/watch?v=ID  https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=...
     youtu.be/ID             https://youtu.be/dQw4w9WgXcQ
     shorts                  https://youtube.com/shorts/dQw4w9WgXcQ
     embed                   https://www.youtube.com/embed/dQw4w9WgXcQ
     partial path            youtube.com/watch?v=dQw4w9WgXcQ
-    any host                https://vimeo.com/123456789   (and any other yt-dlp source)
+    any host                https://vimeo.com/123456789
+    extractor expression    ytsearch1:artist song
 
-A single input (str) or an iterable of inputs may be passed. Duplicates are removed, order
-preserved; invalid/blank entries raise ValueError / are dropped respectively.
+A single input (str) or an iterable of inputs may be passed. Duplicates are removed and order is
+preserved; blank entries are dropped.
 """
 from __future__ import annotations
 
 import re
+import hashlib
 from dataclasses import dataclass
 from typing import List, Optional, Sequence, Union
 
-# A watch id is exactly 11 chars from [A-Za-z0-9_-]. Casing is preserved as-is
-# (case-insensitive matching only) so repeated runs stay stable. This format is shared by many
-# hosts (YouTube, Vimeo, ...); it is deliberately host-agnostic so the tool follows yt-dlp's own
-# notion of "a short id in a URL" rather than hard-coding any single provider.
+# A YouTube video id is exactly 11 chars from [A-Za-z0-9_-]. Casing is preserved.
 WATCH_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
 
-# URL forms: optional scheme, then ANY host (letters/digits/dots/dashes), a slash after it,
-# an OPTIONAL known path prefix (watch?v= / shorts / embed), then the 11-char id. The host is
-# intentionally unrestricted so Vimeo/Bandcamp/any yt-dlp-supported site resolves; requiring a
-# slash means a bare "watch?v=..." without a host does NOT match here (a bare id is handled
-# separately by WATCH_ID_RE).
+# YouTube-specific URL forms. Other hosts are passed through instead of pretending their ids use
+# YouTube's fixed 11-character format.
 YT_URL_RE = re.compile(
     r"(?:https?:)?"
-    r"[A-Za-z0-9.\-_]+/"
+    r"(?:www\.|music\.)?(?:youtube\.com|youtu\.be)/"
     r"(?:watch\?(?:[^&#]*&|#)?v=|shorts?\/|embeds?\/)?"
     r"([A-Za-z0-9_-]{11})",
     re.IGNORECASE,
@@ -47,7 +41,7 @@ YT_URL_RE = re.compile(
 
 
 class InputError(ValueError):
-    """Raised when a single input cannot be normalized to a watch id."""
+    """Raised when an input is blank or otherwise unusable."""
 
 
 @dataclass(frozen=True)
@@ -91,23 +85,28 @@ def extract_watch_id(input_text: Optional[str]) -> str:
 
 
 def make_input(input_text: Optional[str]) -> Input:
-    """Build one :class:`Input` from raw text, pairing the extracted watch id with the original
-    source. The source is stripped but otherwise passed through verbatim so yt-dlp can resolve it
-    for any host."""
+    """Build one :class:`Input` while retaining arbitrary yt-dlp sources."""
     if input_text is None:
         raise InputError("empty/None input")
     src = (input_text or "").strip()
-    return Input(watch_id=extract_watch_id(src), source_url=src)
+    if not src:
+        raise InputError("blank input")
+    try:
+        input_id = extract_watch_id(src)
+    except InputError:
+        digest = hashlib.sha256(src.encode("utf-8")).hexdigest()[:16]
+        input_id = "src-%s" % digest
+    return Input(watch_id=input_id, source_url=src)
 
 
 def normalize_inputs(
     inputs: Union[str, Sequence[Optional[str]], None],
     dedupe: bool = True,
 ) -> List[str]:
-    """Normalize one or many inputs into an ordered list of watch ids.
+    """Normalize one or many inputs into an ordered list of stable ids.
 
-    A single string is treated as one input (not a sequence). Blank/None items are skipped; invalid
-    items raise InputError. With dedupe=True duplicates are removed while preserving first-seen order.
+    A single string is treated as one input (not a sequence). Blank/None items are skipped.
+    With dedupe=True duplicates are removed while preserving first-seen order.
 
     Returns bare ids by design: the resumable queue keys on ids and resumes without needing the
     original source URLs, so this keeps that contract stable."""
@@ -126,7 +125,7 @@ def normalize_inputs(
             continue
         if not isinstance(item, str):
             raise InputError("non-string input in %r" % (seq,))
-        wid = extract_watch_id(item)  # raises InputError on failure
+        wid = make_input(item).watch_id
         if dedupe and wid in seen:
             continue
         out.append(wid)
@@ -142,7 +141,7 @@ def normalize_inputs_full(
     """Like :func:`normalize_inputs`, but also keep the original source for each item.
 
     Used by the execution path so yt-dlp receives a full URL / partial path (not just a bare id),
-    while output filenames stay rooted on the short watch id."""
+    while output filenames stay rooted on the stable id."""
     if inputs is None:
         return []
     if isinstance(inputs, str):
@@ -158,7 +157,7 @@ def normalize_inputs_full(
             continue
         if not isinstance(item, str):
             raise InputError("non-string input in %r" % (seq,))
-        inp = make_input(item)  # raises InputError on failure
+        inp = make_input(item)
         if dedupe and inp.watch_id in seen:
             continue
         out.append(inp)
@@ -180,7 +179,7 @@ if __name__ == "__main__":
     ]
     print("single:")
     for s in samples:
-        print("   %r -> %s" % (extract_watch_id(s), make_input(s).watch_id))
+        print("   %r -> %s" % (s, make_input(s).watch_id))
     print("multi (dedupe):")
     ids = ["dQw4w9WgXcQ", "https://youtu.be/dQw4w9WgXcQ", None, "  youtube.com/shorts/DQW4W9WGXCQ  "]
     print("   ", normalize_inputs(ids))

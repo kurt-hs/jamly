@@ -4,20 +4,18 @@ Shares the persistent WatchQueue protocol with run.py. A background worker runs 
 queued item at a time via run.process_one, calling mark_done + save() after each item so
 progress is resumable and can be streamed over SSE:
 
-    python server.py --port 8765 [--scope .] [--queue jamly_queue.json]
+    python -m jamly.server --port 8765 [--scope .] [--queue jamly_queue.json]
 
 Endpoints:
     GET /status   SSE stream of {pending, done, current, progress} (text/event-stream)
-    POST /add     seed inputs; returns newly queued ids (dedup by exact id)
+    POST /add     seed yt-dlp sources; returns the number newly queued
     GET  /items   current pending list as JSON
     GET  /healthz health probe
 
-Stdlib only. Heavy steps are delegated to run.process_one (yt-dlp + ffmpeg/GPU required on
-PATH/scope); the HTTP layer itself is exercised in tests with a fake process_one."""
-from __future__ import annotations   # noqa: F401  (makes all annotations lazy strings; needed so
-                                     # ``X | None`` in instance-attr annotations works on 3.9+,
-                                     # matching pyproject's requires-python = ">=3.9")
+Heavy steps are delegated to run.process_one; the HTTP layer is exercised with a fake worker."""
+from __future__ import annotations
 import argparse
+import hmac
 import json
 import os
 import socket
@@ -26,10 +24,11 @@ import traceback
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlsplit
 
 from jamly.watch_queue import WatchQueue, default_queue_path
 from .core import AUDIO_FORMATS, DEFAULT_OUTPUT_FORMAT
-from .normalize import extract_watch_id
+from .normalize import make_input
 from .run import process_one
 
 # hosts that keep the queue reachable only by local processes; binding anywhere else is an explicit
@@ -48,7 +47,7 @@ def _authorized(header: str, token: str) -> bool:
     parts = header.split(None, 1)
     if len(parts) != 2 or parts[0].lower() != "bearer":
         return False
-    return parts[1].strip() == token
+    return hmac.compare_digest(parts[1].strip(), token)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -104,7 +103,7 @@ class ItemServer:
 
     def __init__(self, args) -> None:
         self.args = args
-        scope = os.environ.get("JAMLY_SCOPE") or (args.scope or os.getcwd())
+        scope = args.scope or os.environ.get("JAMLY_SCOPE") or os.getcwd()
         qpath = getattr(args, "queue", None) or os.environ.get("JAMLY_QUEUE") \
             or default_queue_path(scope)
         self.queue_path = os.path.abspath(qpath)
@@ -116,7 +115,11 @@ class ItemServer:
             "pending": list(self.queue.pending_ids()),
             "done": list(self.queue.done_ids()),
             "current": None,   # {"watch_id","stage","status","title","error"} or null
-            "progress": {"total": len(self.queue), "pending": 0, "done": 0},
+            "progress": {
+                "total": len(self.queue),
+                "pending": self.queue.count_pending(),
+                "done": len(self.queue.done_ids()),
+            },
             # terminal record per finished item (done/error); stream so observers reliably see
             # each completion regardless of when they connect (single-slot ``current`` only ever
             # shows the last in-flight item).
@@ -149,6 +152,17 @@ class ItemServer:
         # socketserver sets handler.server to this instance; expose our ItemServer to handlers
         self._server._item_server = self
 
+    def _refresh_status_locked(self) -> None:
+        pending = list(self.queue.pending_ids())
+        done = list(self.queue.done_ids())
+        self._status["pending"] = pending
+        self._status["done"] = done
+        self._status["progress"] = {
+            "total": len(self.queue),
+            "pending": len(pending),
+            "done": len(done),
+        }
+
     # -- worker ------------------------------------------------------------- #
     def _process_one(self) -> bool:
         """Process exactly one pending item, keeping the in-memory queue + status synced.
@@ -159,17 +173,23 @@ class ItemServer:
         for which process_one raised is left pending (retry next cycle)."""
         # robust against an empty queue: remaining_work() is True when there are no items, but then
         # there is nothing to pick (a bare `next(...)` would raise StopIteration). Guard explicitly.
-        pending_wids = [i["watch_id"] for i in self.queue.items if i["watch_id"] not in self.queue.done_ids()]
-        if not pending_wids:
+        with self._status_lock:
+            pending_items = self.queue.pending_items()
+        if not pending_items:
             return False   # empty queue or everything already done -> the idle loop just waits
-        wid = pending_wids[0]
+        item = pending_items[0]
+        wid = item["watch_id"]
         with self._status_lock:
             cur = {"watch_id": wid, "stage": None, "status": "pending", "title": None, "error": None}
             self._status["current"] = dict(cur)
 
         # run the (possibly heavy) inference OUTSIDE any lock; the real worker updates progress
         # under short internal locks. If it raises here we leave the item pending for a retry.
-        res = process_one(wid, self.args)
+        res = process_one(
+            wid,
+            self.args,
+            source_url=item.get("source_url") or wid,
+        )
         if not res.ok:
             with self._status_lock:
                 self._status["current"] = {"watch_id": wid, "stage": res.stage or "",
@@ -178,29 +198,29 @@ class ItemServer:
             # terminal 'done' state so clients/tests can see the finished item before the next cycle
             with self._status_lock:
                 self._status["current"] = {"watch_id": wid, "stage": res.stage or "",
-                                           "status": "done", "title": res.title, "error": None}
+                                           "status": res.status, "title": res.title, "error": None}
         # record this item's terminal state so it is observable even after ``current`` moves on
         with self._status_lock:
             rec = {"watch_id": wid, "stage": res.stage or "",
-                   "status": "done" if res.ok else "error", "title": res.title,
+                   "status": res.status if res.ok else "error", "title": res.title,
                    "error": None if res.ok else res.error}
             self._status["completed"].append(rec)
+            self._status["completed"] = self._status["completed"][-100:]
 
         # success OR error -> record completion so it never re-runs on restart (avoids an infinite
         # loop hammering a persistent failure). Only PENDING items are moved to _done.
         try:
-            self.queue.mark_done(wid)
+            with self._status_lock:
+                self.queue.mark_done(wid)
+                self._refresh_status_locked()
         except Exception as exc:  # noqa: BLE001 - keep going; the item stays pending and retries
             with self._status_lock:
                 self._status["current"]["error"] = "queue-mark-error: %s" % exc
-
-        with self._status_lock:
-            self._status["pending"] = list(self.queue.pending_ids())
-            self._status["done"] = list(self.queue.done_ids())
         # persist AFTER recording completion so the done-set survives a restart (the worker previously
         # updated the in-memory queue but never saved -> a restart re-loaded finished items as pending).
         try:
-            self.queue.save()
+            with self._status_lock:
+                self.queue.save()
         except OSError as exc:  # noqa: BLE001 - keep going; next cycle retries the save
             with self._status_lock:
                 self._status["current"]["error"] = "queue-save-error: %s" % exc
@@ -220,7 +240,7 @@ class ItemServer:
                     self._status["current"] = {"watch_id": None, "stage": "", "status": "error",
                                                "title": None, "error": str(exc)}
             # floor at _MIN_IDLE_SLEEP_S so the loop always yields to other threads (HTTP handler)
-            time.sleep(min(self.args.idle_wait_s, self._MIN_IDLE_SLEEP_S))
+            time.sleep(max(self.args.idle_wait_s, self._MIN_IDLE_SLEEP_S))
 
     def start(self) -> None:
         """Launch the worker thread and serve HTTP. Binding happens in __init__."""
@@ -237,10 +257,10 @@ class ItemServer:
         if server is not None:
             # Only wait for the poller when we actually started serving; otherwise just release
             # the socket (a never-started server's shutdown would block forever on __is_shut_down).
-            if getattr(server, "_serving", False):
+            if self._serving:
                 server.shutdown()
+                self._serving = False
             server.server_close()
-            self._server.server_close()
 
 
 class QueueStatusHandler(BaseHTTPRequestHandler):
@@ -262,7 +282,9 @@ class QueueStatusHandler(BaseHTTPRequestHandler):
     def _cors(self):
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type")
+        if self.headers.get("Access-Control-Request-Private-Network", "").lower() == "true":
+            self.send_header("Access-Control-Allow-Private-Network", "true")
 
     def do_OPTIONS(self):  # CORS preflight -> allow the cross-origin GET/POST above
         self.send_response(204)
@@ -281,7 +303,9 @@ class QueueStatusHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):  # noqa: N802 (http.server API)
-        path = self.path.split("?")[0].rstrip("/") or "/"
+        parsed_url = urlsplit(self.path)
+        path = parsed_url.path.rstrip("/") or "/"
+        query = parse_qs(parsed_url.query)
         if path == "/status":
             s = self._server_obj
             # send SSE headers once, before streaming body lines
@@ -300,7 +324,7 @@ class QueueStatusHandler(BaseHTTPRequestHandler):
                     with s._status_lock:
                         snap = json.loads(json.dumps(s._status))   # deep copy under lock
                         pr = snap["progress"]
-                        total = pr["total"] or 1
+                        total = pr["total"]
                         done = len(snap["done"])
                         cur = snap.get("current") or {"watch_id": None, "stage": "", "status": "idle",
                                                        "title": None, "error": None}
@@ -310,6 +334,9 @@ class QueueStatusHandler(BaseHTTPRequestHandler):
                     self.wfile.write(("data: %s\n\n" % line).encode("utf-8"))
                     self.wfile.write((": tick p=%d/%d d=%d\n\n" % (pr["pending"], total, done)).encode("utf-8"))
                     self.wfile.flush()   # a write error here means the client disconnected
+                    if query.get("once") == ["1"]:
+                        self.close_connection = True
+                        return
                     # pace the stream to --interval-ms (default 1s). Without this the loop
                     # writes as fast as the client reads -- a busy spin that starves the HTTP
                     # handler thread and makes /status stall for observers.
@@ -318,11 +345,13 @@ class QueueStatusHandler(BaseHTTPRequestHandler):
             except (BrokenPipeError, ConnectionResetError):
                 self.close_connection = True   # stop the keep-alive loop on a dead socket
                 return  # client disconnected; drop this SSE connection
+            return
         if path == "/items":
             s = self._server_obj
             with s._status_lock:
-                self._send_json({"pending": list(s.queue.pending_ids()),
-                                 "done": list(s.queue.done_ids())})
+                body = {"pending": list(s.queue.pending_ids()),
+                        "done": list(s.queue.done_ids())}
+            self._send_json(body)
             return
         if path == "/healthz":
             s = self._server_obj
@@ -331,12 +360,16 @@ class QueueStatusHandler(BaseHTTPRequestHandler):
         self._send_json({"error": "not found"}, status=404)
 
     def do_POST(self):  # noqa: N802
-        path = self.path.split("?")[0].rstrip("/") or "/"
+        path = urlsplit(self.path).path.rstrip("/") or "/"
         if path != "/add":
             self._send_json({"error": "unknown endpoint"}, status=404)
             return
         # read the request body up front so a rejected write never leaves unread bytes on a keep-alive socket
         length = int(self.headers.get("Content-Length", 0) or 0)
+        if length > 1024 * 1024:
+            self.close_connection = True
+            self._send_json({"error": "request body is too large"}, status=413)
+            return
         raw = self.rfile.read(length) if length else b""
         # S2 hardening: when a server token is configured, reject writes without it before touching the queue.
         s = self._server_obj
@@ -352,35 +385,43 @@ class QueueStatusHandler(BaseHTTPRequestHandler):
             return
         try:
             payload = json.loads(raw.decode("utf-8")) if raw.strip() else {}
-            inputs = [str(i).strip() for i in (payload.get("inputs") or [])]
+            raw_inputs = payload.get("inputs") or []
             titles = payload.get("titles")
         except (ValueError, TypeError):
             self._send_json({"error": "invalid JSON body"}, status=400)
             return
+        if not isinstance(raw_inputs, list) or not all(isinstance(i, str) for i in raw_inputs):
+            self._send_json({"error": "'inputs' must be a list of strings"}, status=400)
+            return
+        if titles is not None and not isinstance(titles, list):
+            self._send_json({"error": "'titles' must be a list"}, status=400)
+            return
+        inputs = [i.strip() for i in raw_inputs if i.strip()]
         if not inputs:
             self._send_json({"queued": [], "note": "provide a non-empty 'inputs' list"}, status=400)
             return
-        # Normalise each raw input to its watch id BEFORE storing -- otherwise a full URL
-        # becomes the queue's "id" (the dedup + naming key), and part of it lands where the
-        # file path expects. A bare id (including legacy non-11-char ones) is kept as-is;
-        # only URL-shaped inputs are reduced to the id yt-dlp would use.
         normalized = []
         for src in inputs:
             try:
-                normalized.append(extract_watch_id(src))
-            except Exception:  # noqa: BLE001 - unparseable -> keep the raw text (legacy)
-                normalized.append(src)
+                normalized.append(make_input(src))
+            except Exception as exc:  # noqa: BLE001 - return an actionable input error
+                self._send_json({"error": "invalid input %r: %s" % (src, exc)}, status=400)
+                return
         s = self._server_obj
         with s._status_lock:
             # add while holding the lock so the response counts are stable even under idle=0 churn;
             # items may be marked done by the worker only after this handler releases the lock.
-            newly = s.queue.add_all(normalized, titles)
+            newly = s.queue.add_all(
+                [item.watch_id for item in normalized],
+                titles,
+                [item.source_url for item in normalized],
+            )
             pending_count = len(s.queue.pending_ids())
-            s._status["pending"] = list(s.queue.pending_ids())
-            s._status["done"] = list(s.queue.done_ids())
+            s._refresh_status_locked()
         # persist immediately so the worker sees them right away (resumable state)
         try:
-            s.queue.save()
+            with s._status_lock:
+                s.queue.save()
         except OSError as exc:
             self._send_json({"queued": inputs, "newly_added": newly, "pending_count": pending_count,
                              "warn": "save-error: %s" % exc}, status=207)

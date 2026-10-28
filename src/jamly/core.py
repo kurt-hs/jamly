@@ -15,6 +15,7 @@ import platform
 import shutil
 import subprocess
 import sys
+import importlib.util
 from dataclasses import dataclass
 from typing import List, Optional
 
@@ -173,6 +174,8 @@ def run(args: List[str], check: bool = False, capture: bool = True,
 
             _pump()
             returncode = proc.wait()
+            if proc.stdout is not None:
+                proc.stdout.close()
             if check and returncode != 0:
                 raise RuntimeError("command failed (exit %d): %s" % (returncode, " ".join(cmd[:4])))
             # Live mode captured nothing into text buffers -- report empty strings (never the live
@@ -209,18 +212,12 @@ def build_ytdlp_extract_cmd(
     """yt-dlp best-audio extraction; container decided natively by the stream.
 
     ``suppress_subs`` is an explicit knob (not a hidden per-host assumption): when True the tool
-    asks yt-dlp to skip subtitle writes for this lossless-audio pipeline. It defaults True so every
+    asks yt-dlp to skip subtitle writes for this audio-only pipeline. It defaults True so every
     host behaves identically; pass False only if your specific build rejects the flag -- see
     DESIGN.md section 7. Suppression uses ``--no-write-subs`` (the option yt-dlp actually accepts);
     the historic ``--no-subs`` alias is rejected by yt-dlp.
     """
-    cmd = [str(ytdlp_exe)]
-    # a bare watch id can start with '-' (base64url ids use '-'/'_'); passed raw, yt-dlp parses it
-    # as a flag (e.g. '-bcdefghij' -> '-b cdefghij' -> "batch file cdefghij could not be read").
-    # '--' ends option parsing so a leading-dash source is treated as the positional URL/id arg.
-    if str(url).startswith("-"):
-        cmd.append("--")
-    cmd.append(str(url))
+    cmd = [str(ytdlp_exe), "--no-playlist"]
     if suppress_subs:
         cmd += ["--no-write-subs"]
     if ffmpeg_dir:
@@ -232,6 +229,11 @@ def build_ytdlp_extract_cmd(
         # no custom muxer -> let yt-dlp's bundled ffmpeg handle it (may need ffprobe too)
         cmd += ["--extract-audio", "--audio-format", "best", "--audio-quality", "0"]
     cmd += ["-o", str(output_template)]
+    # A bare id can start with '-'. Put the option terminator immediately before the source so all
+    # Jamly-owned flags remain options while yt-dlp treats the source literally.
+    if str(url).startswith("-"):
+        cmd.append("--")
+    cmd.append(str(url))
     return cmd
 
 
@@ -245,13 +247,13 @@ def build_ytdlp_extract_cmd(
 # reasonably-encoded lossy default. The table maps each lossy format to its ffmpeg codec +
 # constant-bitrate; an empty entry means "no re-encode" (raw).
 FORMAT_WAV = "wav"        # lossless / raw -- no re-encode, stem copied verbatim
-FORMAT_MP3 = "mp3"         # lossy default -- libmp3lame V0 320kbps (broadly playable)
+FORMAT_MP3 = "mp3"         # lossy default -- libmp3lame 320kbps CBR (broadly playable)
 
 # All formats the CLI accepts. ORDER matters: it becomes argparse's choice order.
 AUDIO_FORMATS = (FORMAT_WAV, FORMAT_MP3)
 DEFAULT_OUTPUT_FORMAT = FORMAT_MP3   # lossy is the default -- smaller files out of the box
 
-# Per-format ffmpeg encoder settings for lossy targets. V0 320kbps MP3 keeps near-CD quality while
+# Per-format ffmpeg encoder settings for lossy targets. 320kbps MP3 keeps high quality while
 # staying far smaller than WAV and playing in Windows media libraries, generic players, and drag-and-drop.
 _LOSSY_ENCODERS = {
     FORMAT_MP3: {"codec": "libmp3lame", "bitrate": "320k"},
@@ -270,13 +272,16 @@ def build_ffmpeg_mix_cmd(
     Uses an ``amix`` filter rather than ``-map 0?`` + ``-mixer_channels``: demuxing all three
     inputs then combining them in one filter graph is portable across ffmpeg builds. ``-mixer_channels``
     was rejected by newer ffmpeg (exit 8, nothing written) and, even when accepted, ``-map 0?``
-    would keep only the FIRST input -- so the old form could silently drop stems. Each input is
-    stereo, so the mix lands in 2 channels by construction.
+    would keep only the FIRST input -- so the old form could silently drop stems. Channel layout
+    follows the Demucs stems.
     """
-    filter_complex = "[0:a][1:a][2:a]amix=inputs=3:duration=shortest"
+    filter_complex = (
+        "[0:a][1:a][2:a]"
+        "amix=inputs=3:duration=longest:normalize=0:dropout_transition=0[mix]"
+    )
     return [str(ffmpeg_exe), "-nostdin", "-y", "-i", _abs(bass), "-i", _abs(other),
-            "-i", _abs(vocals), "-shortest", "-filter_complex", filter_complex,
-            "-map", "[0:a]", str(output)]
+            "-i", _abs(vocals), "-filter_complex", filter_complex,
+            "-map", "[mix]", "-c:a", "pcm_f32le", str(output)]
 
 
 def build_stem_encode_cmd(
@@ -311,9 +316,22 @@ def sanitize_filename(name: str, allowed: Optional[str] = None) -> str:
     if allowed is not None:
         return "".join(c for c in name.lower() if c in allowed)
     unsafe = r"\/:*?\"<>|"
-    out = [c if c != "/" else "-" for c in name]  # replace path separators with hyphen
+    out = ["-" if c in ("/", "\\") else c for c in str(name)]
+    out = [c for c in out if ord(c) >= 32]
     out = [c if c not in unsafe else "" for c in out]
-    return "".join(out).strip().strip(".")
+    cleaned = " ".join("".join(out).split()).strip(" .")
+    stem = cleaned.split(".", 1)[0].upper()
+    reserved = {"CON", "PRN", "AUX", "NUL"} | {
+        "%s%d" % (prefix, number)
+        for prefix in ("COM", "LPT")
+        for number in range(1, 10)
+    }
+    if stem in reserved:
+        cleaned = "_" + cleaned
+    encoded = cleaned.encode("utf-8")
+    if len(encoded) > 180:
+        cleaned = encoded[:180].decode("utf-8", "ignore").rstrip(" .")
+    return cleaned or "untitled"
 
 
 def ensure_output_dir(path: str) -> str:
@@ -322,24 +340,19 @@ def ensure_output_dir(path: str) -> str:
 
 
 # --------------------------------------------------------------------------- #
-# stem separation. Portable-only: there is a single path -- the torch-based `demucs` PyPI CLI
-# (`python -m demucs separate`). No UVR5/audio-separator reuse, no reused `.th` weights, and no
+# stem separation. There is a single path -- the torch-based `demucs` PyPI CLI
+# (`python -m demucs`). No UVR5/audio-separator reuse, no reused `.th` weights, and no
 # onnxruntime model detection.
 # --------------------------------------------------------------------------- #
 ENGINE_AUTO = "auto"
 ENGINE_HTDEMUCS = "htdemucs"  # the only separation engine; four-source via the official `demucs` CLI
 
 
-def _site_packages() -> str:
-    """Return a directory that contains installed packages (no import side effects)."""
-    for p in sys.path:
-        if not p or p == "-":
-            continue
-        cand = os.path.join(_abs(p), "site-packages") if PLATFORM_WINDOWS else \
-               os.path.join(_abs(p))
-        if os.path.isdir(cand):
-            return cand
-    return ""
+def _module_available(name: str) -> bool:
+    try:
+        return importlib.util.find_spec(name) is not None
+    except (ImportError, ValueError):
+        return False
 
 
 
@@ -349,19 +362,12 @@ def detect_engine(scope_dir: str = "") -> Optional[str]:
     """Availability check for the single separation engine (no heavy imports).
 
     Returns ``ENGINE_HTDEMUCS`` when the torch-based `demucs` PyPI CLI is importable from site-packages,
-    else ``None``. Portable-only: there is no local UVR5/audio-separator reuse and no onnxruntime model
+    else ``None``. There is no local UVR5/audio-separator reuse and no onnxruntime model
     detection -- a missing package means separation is not possible rather than falling back to another engine.
     """
-    if _dir_has_any(_site_packages(), ("demucs",)):
+    if _module_available("demucs"):
         return ENGINE_HTDEMUCS
     return None
-
-
-def _dir_has_any(root: str, names) -> bool:
-    try:
-        return any(n in os.listdir(_abs(root)) for n in names)
-    except OSError:
-        return False
 
 
 def find_python() -> Optional[str]:
@@ -384,23 +390,24 @@ def build_htdemucs_four_stems_cmd(
 ) -> List[str]:
     """Official Demucs PyPI CLI separation (torch-based; NOT the onnxruntime variant).
 
-    Mirrors ``python -m demucs separate``: ``-n/--name htdemucs`` selects the 4-source model,
-    and ``--out`` places results in <workdir>/separated/<model>/<track>/{drums,bass,other,vocals}.wav
+    Mirrors ``python -m demucs``: ``-n/--name htdemucs`` selects the 4-source model,
+    and ``--out`` places results in <workdir>/<model>/<track>/{drums,bass,other,vocals}.wav
     (exactly what :func:`_locate_stems` walks). No ``--four-stems`` flag exists -- source count comes
     from the model. The input audio is passed as a **positional** argument (``tracks``, ``nargs='*'``);
     demucs has no ``--audio`` option. Requires ``pip install demucs``.
     """
-    cmd = [str(python_exe), "-m", "demucs", "separate", str(input_audio),
-           "--out", str(workdir), "-n", str(model_name)]
+    cmd = [str(python_exe), "-m", "demucs", "--out", str(workdir),
+           "-n", str(model_name)]
     if threads and threads > 0:
         cmd += ["-j", str(threads)]
+    cmd.append(str(input_audio))
     return cmd
 
 
 def _locate_stems(workdir: str) -> List[str]:
-    """Return the absolute paths of {drums,bass,other,vocals}.wav under workdir/separated/*/."""
+    """Return the four known stem WAVs anywhere under the unique work directory."""
     found = []
-    for root, _dirs, files in os.walk(os.path.join(_abs(workdir), "separated")):
+    for root, _dirs, files in os.walk(_abs(workdir)):
         for f in sorted(files):
             if f.lower().endswith(".wav"):
                 stem = os.path.splitext(f)[0]
@@ -418,7 +425,7 @@ def separate_stems(
 ) -> dict:
     """Separate `audio` into four stems; return {track: abs_path} for the WAVs found.
 
-    Portable-only: always runs the torch-based `demucs` PyPI CLI (`python -m demucs separate`). No UVR5/
+    Always runs the torch-based `demucs` PyPI CLI (`python -m demucs`). No UVR5/
     audio-separator reuse and no local `.th` weights -- separation fetches its own weights on demand. Raises
     RuntimeError (with last stderr lines) if separation fails or the demucs package is not installed. Heavy
     imports are lazy so importing this module never pulls torch.
@@ -429,9 +436,8 @@ def separate_stems(
     workdir = _abs(workdir) if workdir else os.path.join(_abs(os.getcwd()), "stems", _sanitize(audio))
     os.makedirs(workdir, exist_ok=True)
 
-    # The maintained Demucs v4 CLI lives in the `demucs` PyPI package (torch-based); detect it by its
-    # site-packages directory. Lightweight and import-free so importing this module never pulls torch.
-    if not (_dir_has_any(_site_packages(), ("demucs",))):
+    # find_spec is lightweight and does not import torch or Demucs.
+    if not _module_available("demucs"):
         raise RuntimeError("the demucs package is not installed; run `pip install demucs` to enable four-stem separation")
 
     cmd = build_htdemucs_four_stems_cmd(py, audio, workdir, threads=threads)
@@ -449,4 +455,3 @@ def separate_stems(
 def _sanitize(audio: str) -> str:
     # reuse core's own path-safety helper (no cross-module import needed)
     return sanitize_filename(audio or "audio")
-

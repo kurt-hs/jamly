@@ -4,7 +4,7 @@ YouTube titles/metadata are user-generated and unreliable: ``%(artist)s``/``%(au
 often empty -- e.g. the upload "Between the Buried and Me - Extremophile Elite (LIVE)" reports
 both fields as NA. Rather than trust those fields, this module derives a *human-readable* stem
 prefix from the raw title when it confidently matches an ``[Artist] - [Songname]`` shape, and
-otherwise falls back to the bare watch id so every output stays uniquely traceable.
+otherwise falls back to the stable input id.
 
 Every function here is pure (no filesystem/network) so the behaviour unit-tests offline under
 both runners. Source stays ASCII-only: parsed names are sanitized with :func:`sanitize_filename`
@@ -69,12 +69,10 @@ def build_metadata_name(
     parsed: Optional[Tuple[str, str]],
     kind: str,
 ) -> str:
-    """Human-readable output filename carrying the stage tag.
+    """Human-readable display label carrying the stable id and stage tag.
 
     When parsed -> ``"<Artist> - <Songname> | <vid> (<original>|<nodrums>|<drumonly>)"`` so the human
-    name stays distinct from the machine key (the ``|`` separator has no spaces in either half); when
-    un-parsed there is no separate name, so it's just ``"<vid> (<kind>)"`` -- a single clean token.
-    Either way the filename is shell-safe and traceable to its watch id."""
+    name stays distinct from the stable id; when unparsed there is no separate human name."""
     prefix = stem_prefix(wid, parsed)
     tag = {
         "original": "<original>",

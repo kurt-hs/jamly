@@ -34,7 +34,9 @@ def _make_bin_dir(path):
             _touch(os.path.join(path, n))
     else:
         for n in ("ffmpeg", "ffprobe"):
-            os.chmod(path, 0o755)
+            binary = os.path.join(path, n)
+            _touch(binary)
+            os.chmod(binary, 0o755)
 
 
 def _yt_dlp_exe_path(base):
@@ -104,6 +106,8 @@ class YtdlpDetectionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as bindir:
             fake = os.path.join(bindir, "yt-dlp.exe" if b.PLATFORM_WINDOWS else "yt-dlp")
             _touch(fake)
+            if not b.PLATFORM_WINDOWS:
+                os.chmod(fake, 0o755)
             import unittest.mock as mock
             with mock.patch.dict(os.environ, {"PATH": bindir}):
                 s = b.find_ytdlp()
@@ -126,27 +130,37 @@ class MainGateTests(unittest.TestCase):
         # python + yt-dlp + ffmpeg all detected -> ready to run (rc 0). argv is ignored by portable main.
         import unittest.mock as mock
         with redirect_stdout(io.StringIO()):
-            with mock.patch.object(b, "detect_system_python", return_value=self._ok(True)),                  mock.patch.object(b, "find_ytdlp", return_value=self._ok(True)),                  mock.patch.object(b, "detect_ffmpeg", return_value=self._ok(True)):
+            with mock.patch.object(b, "detect_system_python", return_value=self._ok(True)), \
+                    mock.patch.object(b, "find_ytdlp", return_value=self._ok(True)), \
+                    mock.patch.object(b, "detect_ffmpeg", return_value=self._ok(True)), \
+                    mock.patch.object(b, "detect_engine", return_value=b.ENGINE_HTDEMUCS):
                 rc = b.main(0)
         self.assertEqual(rc, 0)
 
     def test_not_ready_without_ffmpeg(self):
         # ffmpeg+ffprobe missing -> blocked (rc 3), even though repro + python are present.
         import unittest.mock as mock
-        with mock.patch.object(b, "detect_ffmpeg", return_value=self._ok(False)),              mock.patch.object(b, "detect_system_python", return_value=self._ok(True)),              mock.patch.object(b, "find_ytdlp", return_value=self._ok(True)):
+        with mock.patch.object(b, "detect_ffmpeg", return_value=self._ok(False)), \
+                mock.patch.object(b, "detect_system_python", return_value=self._ok(True)), \
+                mock.patch.object(b, "find_ytdlp", return_value=self._ok(True)), \
+                mock.patch.object(b, "detect_engine", return_value=b.ENGINE_HTDEMUCS):
             rc = b.main(0)
         self.assertEqual(rc, 3)
 
-    def test_ready_when_htdemucs_available(self):
-        # yt-dlp absent but the demucs CLI is available -> has_repro holds via detect_engine().
+    def test_not_ready_without_ytdlp(self):
         import unittest.mock as mock
-        with mock.patch.object(b, "detect_ffmpeg", return_value=self._ok(True)),              mock.patch.object(b, "detect_system_python", return_value=self._ok(True)),              mock.patch.object(b, "find_ytdlp", return_value=self._ok(False)),              mock.patch.object(b, "detect_engine", return_value=b.ENGINE_HTDEMUCS):
+        with mock.patch.object(b, "detect_ffmpeg", return_value=self._ok(True)), \
+                mock.patch.object(b, "detect_system_python", return_value=self._ok(True)), \
+                mock.patch.object(b, "find_ytdlp", return_value=self._ok(False)), \
+                mock.patch.object(b, "detect_engine", return_value=b.ENGINE_HTDEMUCS):
             rc = b.main(0)
-        self.assertEqual(rc, 0)
+        self.assertEqual(rc, 3)
 
 class FindFfmpegTests(unittest.TestCase):
     def test_none_for_empty_scope(self):
-        self.assertIsNone(b.find_ffmpeg(tempfile.mkdtemp()))
+        import unittest.mock as mock
+        with mock.patch.object(b, "which", return_value=None):
+            self.assertIsNone(b.find_ffmpeg(tempfile.mkdtemp()))
 
     def test_returns_dir_with_both_binaries_when_present(self):
         d = b.find_ffmpeg()

@@ -16,32 +16,41 @@
 (function (global) {
   "use strict";
 
-  var DEFAULT_ENDPOINT = "/status";
+  var DEFAULT_ENDPOINT = "/status?once=1";
   var DEFAULT_ADD = "/add";
   var DEFAULT_ITEMS = "/items";
   var DEFAULT_HEALTHZ = "/healthz";
 
   // --- HTTP fetch with XHR fallback + a bounded read -----------------------------------------
-  function _http(base_url, path, method, body) {
+  function _http(base_url, path, method, body, token) {
     return new Promise(function (resolve, reject) {
       try {
         if (typeof global.fetch === "function") {
           var headers = {};
+          if (token) headers["Authorization"] = "Bearer " + token;
           if (body !== undefined && !method.startsWith("GET")) {
             headers["Content-Type"] = "application/json";
             headers["Accept"] = "application/json";
           }
           var ctrl = new AbortController();
-          try { globalThis.setTimeout(function () { ctrl.abort(); }, 10000); } catch (e) {} // best-effort hard cap; no setTimeout in some runtimes
-          fetch(base_url + path, { method: method, headers: headers, body: body === undefined ? null : JSON.stringify(body), signal: ctrl.signal })
+          var timer = null;
+          try { timer = globalThis.setTimeout(function () { ctrl.abort(); }, 10000); } catch (e) {}
+          global.fetch(base_url + path, { method: method, headers: headers, body: body === undefined ? null : JSON.stringify(body), signal: ctrl.signal })
             .then(function (r) { return r.text().then(function (t) { return { status: r.status, text: t }; }); })   // await the async body read so 'text' is a real string, not a Promise
-            .then(resolve, reject);
+            .then(function (value) {
+              if (timer !== null) globalThis.clearTimeout(timer);
+              resolve(value);
+            }, function (error) {
+              if (timer !== null) globalThis.clearTimeout(timer);
+              reject(error);
+            });
           return;
         }
       } catch (e) { /* fetch unavailable -> use XHR path */ }
 
       var x = new XMLHttpRequest();
       x.open(method, base_url + path, true);
+      if (token) x.setRequestHeader("Authorization", "Bearer " + token);
       if (body !== undefined && !method.startsWith("GET")) {
         x.setRequestHeader("Content-Type", "application/json");
         x.setRequestHeader("Accept", "application/json");
@@ -72,19 +81,19 @@
   }
 
   // Poll GET /status once. Returns the parsed snapshot, or null if nothing usable yet.
-  function pollStatus(base_url) {
+  function pollStatus(base_url, token) {
     var url = _base_url(base_url);
-    return _http(url, DEFAULT_ENDPOINT, "GET").then(function (resp) {
+    return _http(url, DEFAULT_ENDPOINT, "GET", undefined, token).then(function (resp) {
       return _extract_status(resp.text);
     });
   }
 
   // POST /add. Returns the parsed response object, or null on failure/empty body.
-  function addInputs(base_url, inputs, titles) {
+  function addInputs(base_url, inputs, titles, token) {
     var url = _base_url(base_url);
     var payload = { inputs: Array.isArray(inputs) ? inputs.map(function (i) { return String(i).trim(); }) : [], titles: Array.isArray(titles) ? titles : [] };
     if (!payload.inputs.length) return Promise.resolve({ error: "provide a non-empty 'inputs' list" });
-    return _http(url, DEFAULT_ADD, "POST", payload).then(function (resp) {
+    return _http(url, DEFAULT_ADD, "POST", payload, token).then(function (resp) {
       var parsed = null;
       try { parsed = JSON.parse(resp.text); } catch (e) { parsed = null; }
       if (!parsed && resp.status === 207) { // save-error: body is empty but status indicates a warning
@@ -94,16 +103,16 @@
     });
   }
 
-  function getItems(base_url) {
+  function getItems(base_url, token) {
     var url = _base_url(base_url);
-    return _http(url, DEFAULT_ITEMS, "GET").then(function (resp) {
+    return _http(url, DEFAULT_ITEMS, "GET", undefined, token).then(function (resp) {
       try { return JSON.parse(resp.text); } catch (e) { return null; }
     });
   }
 
-  function healthz(base_url) {
+  function healthz(base_url, token) {
     var url = _base_url(base_url);
-    return _http(url, DEFAULT_HEALTHZ, "GET").then(function (resp) {
+    return _http(url, DEFAULT_HEALTHZ, "GET", undefined, token).then(function (resp) {
       try { return JSON.parse(resp.text); } catch (e) { return null; }
     });
   }
@@ -121,7 +130,7 @@
       } catch (e) { /* missing/corrupt -> empty queue */ }
     }
     try {
-      var url = "file://" + path.replace(/^\/+/, "");
+      var url = "file:///" + path.replace(/^\/+/, "");
       return _http(url, "", "GET").then(function (resp) {
         if (!resp.text || !resp.text.trim()) return {};
         return JSON.parse(resp.text);

@@ -1,11 +1,9 @@
-"""Dependency detection for the portable pipeline (bootstrap phase).
-This module is intentionally **detection-only** and pure standard-library so it can be
-unit-tested without any network or heavy installs. The later provisioning steps
-(autodownloading yt-dlp / ffmpeg + ffprobe / ONNX model) hook into these same
-functions' results, but are not implemented here -- see DESIGN.md section 10 for the
-provisioning plan and `find_*`/status return values as their contracts.
+"""Dependency detection for the installed pipeline.
+
+Python dependencies are declared by the package. ffmpeg and ffprobe remain system tools and are
+resolved from explicit directories, the project scope, or PATH.
 Environment knobs (all optional; sensible defaults used otherwise):
-    JAMLY_SCOPE      directory that will hold `.portable/` (default: current working dir)
+    JAMLY_SCOPE      directory used for legacy tool lookups (default: current working dir)
 Run directly to print a human-readable tool report and an exit code reflecting whether
 the pipeline is runnable *as-is* on this machine.
 """
@@ -58,7 +56,7 @@ def detect_system_python() -> ToolStatus:
         return ToolStatus("python", path=c, ok=True, note=ver.strip())
     return ToolStatus("python")
 # --------------------------------------------------------------------------- #
-# yt-dlp (official per-OS standalone; self-provisioned later)
+# yt-dlp
 # --------------------------------------------------------------------------- #
 def find_ytdlp(scope_dir: str = "") -> ToolStatus:
     """Search for an existing yt-dlp. Returns the first match, ok=True."""
@@ -70,7 +68,7 @@ def find_ytdlp(scope_dir: str = "") -> ToolStatus:
         ok = (os.path.isfile(path) and not path.endswith(".py")
               and any(name in n for n in ("yt-dlp", "yt-dlp.exe", "yt-dlp_x86.exe", "yt-dlp.bat")))
         return ToolStatus("yt-dlp", path=path, ok=ok)
-    # 1. official per-OS standalone inside the portable scope, probed in BOTH the flat
+    # 1. Reuse a legacy project-local standalone, probing both the flat
     #    <scope>/.portable/<f> direct child and (on Windows) the <os_family>/ subdir so a
     #    downloaded build is found regardless of layout; without both forms we'd miss it.
     names = ("yt-dlp.exe", "yt-dlp_x86.exe", "yt-dlp") if PLATFORM_WINDOWS else ("yt-dlp",)
@@ -106,21 +104,24 @@ def find_ytdlp(scope_dir: str = "") -> ToolStatus:
 # --------------------------------------------------------------------------- #
 def detect_ffmpeg(ffmpeg_dirs: list = None, scope_dir: str = "", additional_dirs=()) -> ToolStatus:
     """Return the first dir that contains BOTH ffmpeg.exe and ffprobe.exe.
-    The bundled UVR5 ffmpeg.exe has no matching ffprobe.exe, so a directory with only
-    ffmpeg is reported as WARN (usable for some yt-dlp builds but not this one). See
-    DESIGN.md section 2 / blocked item: an ffprobe binary must be sourced separately.
+    A directory with only ffmpeg is reported as WARN because yt-dlp metadata and media probing
+    require ffprobe as well.
     """
     if PLATFORM_WINDOWS:
         names = ("ffmpeg.exe", "ffprobe.exe")
     else:
         names = ("ffmpeg", "ffprobe")
     dirs = list(ffmpeg_dirs or []) + list(additional_dirs)
+    ffmpeg_on_path = which("ffmpeg")
+    ffprobe_on_path = which("ffprobe")
+    if ffmpeg_on_path and ffprobe_on_path:
+        ff_dir = os.path.dirname(os.path.abspath(ffmpeg_on_path))
+        fp_dir = os.path.dirname(os.path.abspath(ffprobe_on_path))
+        if ff_dir == fp_dir:
+            dirs.append(ff_dir)
     scope = os.path.abspath(os.path.expanduser(scope_dir)) if scope_dir else os.getcwd()
     portable_ffmpeg = os.path.join(scope, ".portable", "ffmpeg")
-    if PLATFORM_WINDOWS:
-        dirs.append(os.path.join(portable_ffmpeg, "win64"))
-    else:
-        dirs.append(os.path.join(portable_ffmpeg, "linux"))
+    dirs.append(os.path.join(portable_ffmpeg, _os_family()))
     for d in dirs:
         if not os.path.isdir(d):
             continue
@@ -135,13 +136,8 @@ def detect_ffmpeg(ffmpeg_dirs: list = None, scope_dir: str = "", additional_dirs
     port_root = os.path.join(scope, ".portable", _os_family(), "ffmpeg")
     if os.path.isdir(port_root):
         def _scoped(name):
-            for entry in os.walk(port_root):
-                # defensive unpack: a malformed host path can make os.walk yield odd-shaped
-                # tuples -- we only need dirpath + filenames, so one bad component never aborts.
-                try:
-                    dp, fn = entry
-                except ValueError:
-                    dp, fn = entry[0], []
+            for dp, _dirs, filenames in os.walk(port_root):
+                fn = filenames
                 if name in fn and os.path.isfile(os.path.join(dp, name)):
                     return os.path.join(dp, name)
             return ""
@@ -160,8 +156,6 @@ def find_ffmpeg(scope_dir: str = ""):
     """
     ts = detect_ffmpeg(scope_dir=scope_dir)
     return ts.path if ts.ok else None
-# curated cross-machine install-root discovery (§11 / DESIGN.md §10)
-# --------------------------------------------------------------------------- #
 def _dir_has_both(root: str) -> bool:
     """True if `root` holds BOTH ffmpeg+ffprobe (bare names on POSIX, .exe on Windows)."""
     try:
@@ -171,64 +165,8 @@ def _dir_has_both(root: str) -> bool:
         return os.path.isfile(ff) and os.path.isfile(fp)
     except OSError:
         return False
-def _curated_app_roots() -> list:
-    r"""Well-known app locations that may bundle ffmpeg/ffprobe or ship UVR5.
-    Probed AFTER PATH-first so a host's own installs win; this is best-effort coverage of the
-    common cases cross-machine (not an exhaustive scan of every copy on one box). Returns a
-    de-duplicated list of candidate directories: ``AppData\Local\Programs`` (where UVR5 and most
-    editors/muxers install) and ``AppData\Roaming`` (winget/npm installs, standalone yt-dlp).
-    Pure file checks -- no heavy imports.
-    """
-    roots = []
-    seen = set()
-    def _add(path: str):
-        # Only add genuine directories; skip bogus cwd-relative paths that arise when APPDATA /
-        # USERPROFILE are unset (e.g. under git-bash) so os.walk never sees a malformed root.
-        ap = os.path.abspath(os.path.expanduser(os.path.expandvars(path)))
-        if not ap or ap in seen:
-            return
-        try:
-            is_dir = os.path.isdir(ap)
-        except OSError:
-            is_dir = False
-        if not is_dir:
-            return
-        seen.add(ap)
-        roots.append(ap)
-    appdata_roaming = os.environ.get("APPDATA", "")
-    userprofile = os.environ.get("USERPROFILE", "")
-    # AppData\Local\Programs: UVR5 + apps that ship ffmpeg/ffprobe install here as <app>.
-    # AppData\Local\Programs + AppData\Roaming\Local\Programs: UVR5 GUI and apps that ship
-    # ffmpeg/ffprobe here as <app>\.  Both siblings are required so we don't miss the common case.
-    _add(os.path.join(appdata_roaming, "Local", "Programs"))
-    _add(os.path.join(userprofile, "AppData", "Local", "Programs"))
-    # AppData\Roaming: standalone yt-dlp (yt-dlp_win_x86), winget/npm tool folders, etc.
-    _add(os.path.join(appdata_roaming, "Roaming"))
-    return roots
-def _looks_like_ytdlp(path: str) -> bool:
-    """True if `path` is an executable named yt-dlp (accepts .exe/.bat, rejects .py). Pure check."""
-    name = os.path.basename(os.path.normpath(path))
-    return (os.path.isfile(path) and not path.endswith(".py")
-            and any(n in name for n in ("yt-dlp", "yt-dlp.exe", "yt-dlp_x86.exe", "yt-dlp.bat")))
 
 
-def _load_cached(cfg) -> dict:
-    """Return cached roots (ffmpeg + yt-dlp) as-is, or empty if nothing recorded."""
-    out = {"ffmpeg": list(cfg.get_paths("ffmpeg")), "yt-dlp": list(cfg.get_paths("yt-dlp"))}
-    return {k: list(dict.fromkeys(v)) for k, v in out.items()}
-def _exists_exe(path: str) -> bool:
-    """Return True if `path` is an existing executable (existence on Windows; X_OK elsewhere)."""
-    import os as _os
-    p = _os.path.abspath(_os.path.expandvars(path))
-    if not _os.path.isfile(p):
-        return False
-    if PLATFORM_WINDOWS:
-        # Windows does not enforce execute bits; existence is enough.
-        return True
-    try:
-        return bool(_os.access(p, _os.X_OK))
-    except OSError:
-        return False
 # --------------------------------------------------------------------------- #
 # orchestration helpers for the CLI report
 # --------------------------------------------------------------------------- #
@@ -239,25 +177,25 @@ class RunReport:
     python: ToolStatus
     ytdlp: ToolStatus
     ffmpeg: ToolStatus
-    engine: ToolStatus          # htdemucs entry; ok iff repro is available (yt-dlp OR demucs weights)
-    has_repro: bool = False     # derived once, here -- never recomputed downstream
+    engine: ToolStatus
+
+    @property
+    def ready(self) -> bool:
+        return all(entry.ok for entry in (
+            self.python, self.ytdlp, self.ffmpeg, self.engine))
 
 def summarize(scope_dir: str = "") -> RunReport:
-    """Build the dependency status report. Portable-only: exactly one separation engine (the demucs
-    CLI), so there is no UVR5 install, bundled weight repo, or uvr-root ffmpeg to report. The htdemucs
-    entry reflects whether that single engine's weights are usable on this box -- the only repro
-    contributor main gates on."""
+    """Build one dependency status report without importing heavy packages."""
     py = detect_system_python()
     ytdlp = find_ytdlp(scope_dir)
     ffmpeg = detect_ffmpeg(scope_dir=scope_dir)
     engine = detect_engine(scope_dir=scope_dir)
-    has_repro = bool(ytdlp.ok) or (engine == ENGINE_HTDEMUCS)
     return RunReport(py, ytdlp, ffmpeg, ToolStatus(
         "htdemucs",
         path=engine,
-        ok=has_repro,
-        note="demucs CLI (%s)" % ("available" if has_repro else "not available"),
-    ), has_repro)
+        ok=engine == ENGINE_HTDEMUCS,
+        note="demucs CLI (%s)" % ("available" if engine == ENGINE_HTDEMUCS else "not available"),
+    ))
 def main(argv=None) -> int:
 
     scope = getattr(os, "environ", {}).get("JAMLY_SCOPE") or os.getcwd()
@@ -269,22 +207,20 @@ def main(argv=None) -> int:
     for entry in (report.python, report.ytdlp, report.ffmpeg, report.engine):
         print(entry.report())
 
-    has_python = report.python.ok
-    has_ffmpeg = report.ffmpeg.ok
-    has_repro = report.has_repro                  # derived from the same detectors summarize ran -- no re-run
-
     print("=" * 60)
-    if has_python and has_ffmpeg and has_repro:
+    if report.ready:
         print("STATUS: ready to run")
         return 0
     reasons = []
-    if not has_python:
+    if not report.python.ok:
         reasons.append("no system python interpreter found")
-    if not has_ffmpeg:
+    if not report.ffmpeg.ok:
         reasons.append("ffmpeg+ffprobe directory not found (need BOTH binaries)")
-    if not has_repro:
-        reasons.append("yt-dlp and/or htdemucs repro not detected")
-    print("STATUS: needs provisioning -> %s" % "; ".join(reasons))
+    if not report.ytdlp.ok:
+        reasons.append("yt-dlp is not installed or not on PATH")
+    if not report.engine.ok:
+        reasons.append("demucs is not installed")
+    print("STATUS: missing dependencies -> %s" % "; ".join(reasons))
     return 3
 
 
