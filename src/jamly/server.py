@@ -56,7 +56,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8765)
     p.add_argument("--scope", default=None, help="Working scope for engine/ytdlp/ffmpeg resolution (default: cwd)")
-    p.add_argument("--queue", default=None, help="Queue file path (default: env AUTOCV_QUEUE or <scope>/jamly_queue.json)")
+    p.add_argument("--queue", default=None, help="Queue file path (default: env JAMLY_QUEUE or <scope>/jamly_queue.json)")
     p.add_argument("--interval-ms", type=int, default=1000, help="SSE progress event interval")
     p.add_argument("-o", "--output-dir", default="output",
                    help="Directory for <title>_drums.<fmt> / _no_drums.<fmt> (default: output)")
@@ -67,10 +67,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Demucs separation threads (0 = auto; only used when available)")
     p.add_argument("--idle-wait-s", type=float, default=2.0, help="Block this long when the queue is empty")
     # write-auth secret for POST /add: shared between this server and any client that enqueues
-    # with it (also settable via env SPLITFY_SERVER_TOKEN). With no token configured, writes are
+    # with it (also settable via env JAMLY_SERVER_TOKEN). With no token configured, writes are
     # accepted as before; once one is set, every /add must carry a matching Authorization header.
     p.add_argument("--server-token", default=None,
-                   help="Shared secret that gates POST /add (env: SPLITFY_SERVER_TOKEN); "
+                   help="Shared secret that gates POST /add (env: JAMLY_SERVER_TOKEN); "
                         "required to bind off-loopback")
     # shared with the CLI so --replace-existing means exactly the same thing on both entry points
     p.add_argument("--replace-existing", action="store_true",
@@ -104,8 +104,8 @@ class ItemServer:
 
     def __init__(self, args) -> None:
         self.args = args
-        scope = os.environ.get("AUTOCV_SCOPE") or (args.scope or os.getcwd())
-        qpath = getattr(args, "queue", None) or os.environ.get("AUTOCV_QUEUE") \
+        scope = os.environ.get("JAMLY_SCOPE") or (args.scope or os.getcwd())
+        qpath = getattr(args, "queue", None) or os.environ.get("JAMLY_QUEUE") \
             or default_queue_path(scope)
         self.queue_path = os.path.abspath(qpath)
         self.queue = WatchQueue.from_path(self.queue_path)
@@ -127,7 +127,7 @@ class ItemServer:
         # env is authoritative (it crosses process boundaries); --server-token overrides for a
         # single instance. Empty -> no auth required (legacy behaviour).
         # --server-token is an explicit opt-in and overrides the environment; env is the fallback.
-        self._token = getattr(args, "server_token", None) or os.environ.get("SPLITFY_SERVER_TOKEN")
+        self._token = getattr(args, "server_token", None) or os.environ.get("JAMLY_SERVER_TOKEN")
 
         self._stop = threading.Event()
         # True only while start() has launched serve_forever(); stop() uses it to avoid blocking
@@ -140,7 +140,7 @@ class ItemServer:
         # configured. Without one, an unauthenticated client could add items over the network.
         if not _is_loopback_host(self.args.host) and not self._token:
             raise ValueError(
-                "binding %r:%d off-loopback requires --server-token (env: SPLITFY_SERVER_TOKEN); "
+                "binding %r:%d off-loopback requires --server-token (env: JAMLY_SERVER_TOKEN); "
                 "set it to allow non-loopback binds" % (self.args.host,
                                                         max(0, getattr(self.args, "port", 0))))
         # bind the HTTP server eagerly (deterministic port for tests; resumable status)
@@ -294,8 +294,8 @@ class QueueStatusHandler(BaseHTTPRequestHandler):
             try:
                 # paced from the ItemServer's --interval-ms; fall back to 1s if the caller
                 # didn't configure it (e.g. a test stubbing the worker)
-                interval_s = getattr(s, "args", None)
-                interval_s = (interval_s.interval_ms / 1000.0) if interval_s and hasattr(interval_s, "interval_ms") else 1.0
+                args_obj = getattr(s, "args", None)
+                interval_s = (args_obj.interval_ms / 1000.0) if args_obj and hasattr(args_obj, "interval_ms") else 1.0
                 while not s._stop.is_set():
                     with s._status_lock:
                         snap = json.loads(json.dumps(s._status))   # deep copy under lock
@@ -395,7 +395,7 @@ def main(argv=None) -> int:
         # loud opt-in: anyone who can reach this host can read queue status; only writes are gated
         # by the token, so make the exposure unmistakable.
         print("WARNING: bound off-loopback (host=%s); the server is reachable over the network. "
-              "Set SPLITFY_SERVER_TOKEN to require auth on POST /add." % args.host,
+              "Set JAMLY_SERVER_TOKEN to require auth on POST /add." % args.host,
               file=sys.stderr)
     print("jamly server: listening on http://%s:%d  (queue=%s)" % (args.host, args.port, srv.queue_path))
     try:

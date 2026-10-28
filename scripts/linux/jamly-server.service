@@ -14,14 +14,14 @@ Documentation=file:///$(pwd)/README.md
 After=network.target
 
 # Fill in real install locations on THIS box — all three of these must point at the same dir:
-#   WorkingDirectory  == Environment AUTOCV_SCOPE  == --scope arg below.
+#   WorkingDirectory  == Environment JAMLY_SCOPE  == --scope arg below.
 # `python3 -m jamly.server` needs the package importable from that dir, so either do an
 # editable install (`pip install -e .`) or export PYTHONPATH to the repo root. User=root is only
 # needed if that dir isn't writable by your normal user; drop it (and use a real user) otherwise.
 [Service]
 Type=simple
 WorkingDirectory=/opt/jamly             # absolute path to the checkout (edit)
-Environment=AUTOCV_SCOPE=/opt/jamly     # tool resolution scope = repo root
+Environment=JAMLY_SCOPE=/opt/jamly     # tool resolution scope = repo root
 ExecStart=/usr/bin/python3 -m jamly.server --port 8765 --scope /opt/jamly
 Restart=always
 User=root                                  # edit as appropriate

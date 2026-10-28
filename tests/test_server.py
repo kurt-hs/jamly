@@ -393,13 +393,13 @@ class ItemServerBindGuardTests(unittest.TestCase):
 
     def test_token_can_also_come_from_environment(self):
         # env is read at construction time; --server-token overrides it for a single instance.
-        with mock.patch.dict(os.environ, {"SPLITFY_SERVER_TOKEN": "from-env"}, clear=True):
+        with mock.patch.dict(os.environ, {"JAMLY_SERVER_TOKEN": "from-env"}, clear=True):
             srv = self._srv(host="0.0.0.0", port=0, token=None)   # no CLI token -> env supplies auth
             try:
                 self.assertEqual(srv._token, "from-env")
             finally:
                 srv.stop()
-        with mock.patch.dict(os.environ, {"SPLITFY_SERVER_TOKEN": "from-env"}, clear=True):
+        with mock.patch.dict(os.environ, {"JAMLY_SERVER_TOKEN": "from-env"}, clear=True):
             srv = self._srv(host="0.0.0.0", port=0, token="cli-override")
             try:
                 self.assertEqual(srv._token, "cli-override")

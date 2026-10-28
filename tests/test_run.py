@@ -250,20 +250,20 @@ class MainDryRunTests(unittest.TestCase):
             # force isatty True so gather_inputs never blocks on a real stdin read
             with mock.patch.object(sys, "stdin", mock.MagicMock(isatty=lambda: True)):
                 tmp = tempfile.mkdtemp()
-                prev = os.environ.get("AUTOCV_QUEUE")
+                prev = os.environ.get("JAMLY_QUEUE")
                 try:
-                    # main() honours AUTOCV_QUEUE ahead of default_queue_path(cwd), so pointing it at a
+                    # main() honours JAMLY_QUEUE ahead of default_queue_path(cwd), so pointing it at a
                     # temp file keeps the queue write out of the working tree -- no host cwd state.
                     qpath = os.path.join(tmp, "jamly_queue.json")
                     with open(qpath, "w") as fh:
                         fh.write("")
-                    os.environ["AUTOCV_QUEUE"] = os.path.abspath(qpath)
+                    os.environ["JAMLY_QUEUE"] = os.path.abspath(qpath)
                     rc = run_mod.main(["-i", "dQw4w9WgXcQ", "-i", "https://youtu.be/abcDEF12345", "--dry-run"])
                 finally:
                     if prev is None:
-                        os.environ.pop("AUTOCV_QUEUE", None)
+                        os.environ.pop("JAMLY_QUEUE", None)
                     else:
-                        os.environ["AUTOCV_QUEUE"] = prev
+                        os.environ["JAMLY_QUEUE"] = prev
                 self.assertEqual(rc, 0)
         finally:
             sys.stdin = old
@@ -277,7 +277,7 @@ class RunPipelineEmptyTests(unittest.TestCase):
 
 
 class ResolveRunEnvScopeTests(unittest.TestCase):
-    """_resolve_run_env resolves the working scope from args.scope / AUTOCV_SCOPE / cwd.
+    """_resolve_run_env resolves the working scope from args.scope / JAMLY_SCOPE / cwd.
 
     _resolve_run_env no longer consults a reuse cache: ffmpeg is always resolved by a live PATH/app
     scan (find_ffmpeg), so these cases guard only the scope-selection contract that CLI and server
@@ -288,7 +288,7 @@ class ResolveRunEnvScopeTests(unittest.TestCase):
         # getattr() falls back to env/cwd and `python run.py` resolves tools exactly as before.
         cli = argparse.Namespace(engine="auto", threads=0)   # deliberately no .scope
         clean = dict(os.environ)
-        clean.pop("AUTOCV_SCOPE", None)
+        clean.pop("JAMLY_SCOPE", None)
         with mock.patch.dict(os.environ, clean, clear=True):
             scope = run_mod._resolve_run_env(cli)[0]
         self.assertEqual(scope, os.getcwd())   # portable: _resolve_run_env only reads cwd
@@ -301,9 +301,9 @@ class ResolveRunEnvScopeTests(unittest.TestCase):
         self.assertEqual(os.path.normcase(scope), os.path.normcase("/data"))
 
     def test_explicit_scope_beats_autocv_scope(self):
-        # an args.scope override wins over the AUTOCV_SCOPE environment variable.
+        # an args.scope override wins over the JAMLY_SCOPE environment variable.
         srv = argparse.Namespace(scope="/data", engine="auto", threads=0)
-        with mock.patch.dict(os.environ, {"AUTOCV_SCOPE": "/other"}):
+        with mock.patch.dict(os.environ, {"JAMLY_SCOPE": "/other"}):
             scope = run_mod._resolve_run_env(srv)[0]
         self.assertEqual(os.path.normcase(scope), os.path.normcase("/data"))
 
@@ -442,7 +442,7 @@ class MainRetryTests(unittest.TestCase):
     """A failed item must stay PENDING (not marked done) so it is retried on the next run.
 
     Drives the real ``main()`` queue loop with the heavy steps stubbed, so no network / binary is
-    needed. The queue file lives in a temp dir (via AUTOCV_QUEUE) so no host cwd state is touched.
+    needed. The queue file lives in a temp dir (via JAMLY_QUEUE) so no host cwd state is touched.
     """
 
     def _failed(self, wid):
@@ -455,8 +455,8 @@ class MainRetryTests(unittest.TestCase):
         wid = "aBcDeFg1234"
         with tempfile.TemporaryDirectory() as tmp:
             qpath = os.path.join(tmp, "jamly_queue.json")
-            prev = os.environ.get("AUTOCV_QUEUE")
-            os.environ["AUTOCV_QUEUE"] = qpath
+            prev = os.environ.get("JAMLY_QUEUE")
+            os.environ["JAMLY_QUEUE"] = qpath
             try:
                 with mock.patch.object(run_mod, "gather_inputs", return_value=[Input(watch_id=wid, source_url=wid)]), \
                      mock.patch.object(run_mod, "process_one", return_value=self._failed(wid)), \
@@ -473,9 +473,9 @@ class MainRetryTests(unittest.TestCase):
                 self.assertNotIn(wid, queue.done_ids())
             finally:
                 if prev is None:
-                    os.environ.pop("AUTOCV_QUEUE", None)
+                    os.environ.pop("JAMLY_QUEUE", None)
                 else:
-                    os.environ["AUTOCV_QUEUE"] = prev
+                    os.environ["JAMLY_QUEUE"] = prev
 
     def test_successful_item_is_marked_done(self):
         from jamly.run import ItemResult
@@ -484,8 +484,8 @@ class MainRetryTests(unittest.TestCase):
         wid = "zYxWvUt5678"
         with tempfile.TemporaryDirectory() as tmp:
             qpath = os.path.join(tmp, "jamly_queue.json")
-            prev = os.environ.get("AUTOCV_QUEUE")
-            os.environ["AUTOCV_QUEUE"] = qpath
+            prev = os.environ.get("JAMLY_QUEUE")
+            os.environ["JAMLY_QUEUE"] = qpath
             try:
                 ok = ItemResult(watch_id=wid, status="done", stage="mix", drums_path="/x/drums.wav")
                 with mock.patch.object(run_mod, "gather_inputs", return_value=[Input(watch_id=wid, source_url=wid)]), \
@@ -501,9 +501,9 @@ class MainRetryTests(unittest.TestCase):
                 self.assertNotIn(wid, queue.pending_ids())
             finally:
                 if prev is None:
-                    os.environ.pop("AUTOCV_QUEUE", None)
+                    os.environ.pop("JAMLY_QUEUE", None)
                 else:
-                    os.environ["AUTOCV_QUEUE"] = prev
+                    os.environ["JAMLY_QUEUE"] = prev
 
 
 if __name__ == "__main__":

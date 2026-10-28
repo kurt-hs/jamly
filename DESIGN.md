@@ -13,7 +13,6 @@ The Python package lives under `src/jamly/` (stdlib-only; heavy imports such as 
 `server.py` (streaming `/status` SSE status server). Binary discovery is a cache-aware probe: the pinned `.portable/<os>/` scope and a curated list of
 well-known app locations (`_curated_app_roots`) first, with a `which("<tool>")` PATH lookup as a
 last-resort fallback so a host that only has the tool on PATH is still found.
-made robust on hosts where a git-bash-style env can make `os.walk` yield odd-shaped tuples.
 
 Test suite is green under **both** runners (`python -m unittest discover -s tests` and `pytest`). The
 exact test count grows as features are added, so it isn't pinned in this doc; see AGENTS.md for how the
@@ -62,7 +61,7 @@ whole thing runs in a private `.portable/` scope so nothing needs to be installe
 | ffmpeg / ffprobe | A directory with only `ffmpeg.exe` (no `ffprobe`) is NOT usable by this tool — the "needs BOTH" rule holds. Prefer a static build shipping both into `.portable/`; reuse only when the host matches. |
 
 > The shared extractor defaults to injecting `--no-subs`, and this box's custom yt-dlp rejects it, so
-> local CLI runs must set `AUTOCV_SUPPRESS_SUBS=0` (env escape-hatch; default None keeps every other
+> local CLI runs must set `JAMLY_SUPPRESS_SUBS=0` (env escape-hatch; default None keeps every other
 > host identical). Provisioning ffmpeg for macOS is unsupported upstream — no static build ships, so that
 > platform falls back to PATH detection / system ffmpeg.
 
@@ -148,7 +147,7 @@ stretch). No global installs required.
 Three small JSON files are the only persistent on-disk state; all three live at project root and are gitignored:
 
 - **`.portable/<os>/...`** — private tooling scope. Holds reused or self-provisioned binaries (yt-dlp standalone + a static ffmpeg+ffprobe build that ships BOTH, plus `<os_family>/ffmpeg` scoped fallbacks). Python is NOT stored here; it is resolved from PATH/system first.
-- **`jamly_queue.json`** — persistent input queue. Schema `{items:[{watch_id,title,status,added_at}], done:[...], updated_at}`; `done` keeps completed/failed ids for history + dedup. Shared by the CLI and HTTP server through the same JSON protocol (override via env `AUTOCV_QUEUE` or the `--queue` flag). WatchQueue loads an empty queue if the file is missing or invalid, so it never blocks a run.
+- **`jamly_queue.json`** — persistent input queue. Schema `{items:[{watch_id,title,status,added_at}], done:[...], updated_at}`; `done` keeps completed/failed ids for history + dedup. Shared by the CLI and HTTP server through the same JSON protocol (override via env `JAMLY_QUEUE` or the `--queue` flag). WatchQueue loads an empty queue if the file is missing or invalid, so it never blocks a run.
 - **`jamly.json`** — **does not exist.** The ConfigStore/jamly.json persistence design was removed during portabilization; there is no persisted binary/override cache. Tool resolution (python / yt-dlp / ffmpeg) is live detection on every launch (`bootstrap.py` + `core.py`), so nothing here can drift out of sync.
 
 ## Binary discovery (§8)

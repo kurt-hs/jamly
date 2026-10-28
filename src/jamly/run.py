@@ -14,7 +14,7 @@ Heavy/networked steps are delegated to core (and the subprocesses it spawns); th
 gathering/dedup, output naming, stage command building, per-item status, dry-run preview, and CLI
 wiring -- is pure or unit-testable without GPU/network.
 
-Environment knobs (see bootstrap.py): AUTOCV_SCOPE.
+Environment knobs (see bootstrap.py): JAMLY_SCOPE.
 """
 from __future__ import annotations
 
@@ -236,10 +236,10 @@ def locate_extracted(workdir: str) -> Optional[str]:
 def _resolve_suppress_subs() -> Optional[bool]:
     """yt-dlp subtitle-suppression override for this host, or None to use the portable default.
 
-    Reads ``AUTOCV_SUPPRESS_SUBS`` ("0"/"1"). Returns None when unset so callers fall back to the
+    Reads ``JAMLY_SUPPRESS_SUBS`` ("0"/"1"). Returns None when unset so callers fall back to the
     builder's portable default; a value is returned only when a specific build needs it. Host quirks
     live in env, not shared code."""
-    val = os.environ.get("AUTOCV_SUPPRESS_SUBS")
+    val = os.environ.get("JAMLY_SUPPRESS_SUBS")
     return None if val is None else (val != "0")
 
 
@@ -258,10 +258,10 @@ def _resolve_run_env(args) -> tuple:
     Scope resolution order is explicit so the CLI and server share one contract: an ``args.scope``
     override wins when present -- that is the HTTP server's --scope, which must govern tool
     resolution exactly as it governs where the queue file lives (see ItemServer). Otherwise fall
-    back to AUTOCV_SCOPE then cwd. The bare CLI namespace has no scope attribute, so getattr() is
+    back to JAMLY_SCOPE then cwd. The bare CLI namespace has no scope attribute, so getattr() is
     None and ``python run.py`` behaves identically to before.
     """
-    scope = getattr(args, "scope", None) or os.environ.get("AUTOCV_SCOPE") or os.getcwd()
+    scope = getattr(args, "scope", None) or os.environ.get("JAMLY_SCOPE") or os.getcwd()
 
     engine = resolve_engine(args, scope)
     # No reuse cache exists at runtime: always resolve ffmpeg by a live PATH/app scan.
@@ -378,10 +378,6 @@ def process_one(wid: str, args, progress=None, source_url: Optional[str] = None)
         # nodrums_out. build_mix_cmd takes the established 5-arg form -- (ffmpeg, bass, other,
         # vocals, output) -- matching core.build_ffmpeg_mix_cmd and its tests; 'drums' is intentionally
         # omitted so it never lands in the mix.
-        # No-drums mix: ffmpeg blends bass+other+vocals (drums excluded by construction) into
-        # nodrums_out. build_mix_cmd takes the established 5-arg form -- (ffmpeg, bass, other,
-        # vocals, output) -- matching core.build_ffmpeg_mix_cmd and its tests; 'drums' is
-        # intentionally omitted so it never lands in the mix.
         mix_cmd = build_mix_cmd(ffmpeg_exe_for(ffmpeg_dir), stems["bass"],
                                 stems["other"], stems["vocals"], nodrums_out)
         mix_res = _run(mix_cmd)
@@ -427,7 +423,7 @@ def run_pipeline(inputs: List[Input], args, progress=None) -> List[ItemResult]:
     Thin wrapper over process_one so a persistent queue (#15/#16) can drive one item at a
     time and save/resume incrementally. `progress(wid, stage, idx, total)` is called before
     each heavy step (optional hook)."""
-    scope = os.environ.get("AUTOCV_SCOPE") or os.getcwd()
+    scope = os.environ.get("JAMLY_SCOPE") or os.getcwd()
     engine = resolve_engine(args, scope)
     print("jamly: %d input(s), engine=%s" % (len(inputs), engine or "n/a"))
 
@@ -578,8 +574,8 @@ def main(argv=None) -> int:
     ensure_utf8_output()
 
     args = build_parser().parse_args(argv)
-    scope_dir = os.environ.get("AUTOCV_SCOPE") or os.getcwd()
-    qpath = getattr(args, "queue", None) or os.environ.get("AUTOCV_QUEUE") \
+    scope_dir = os.environ.get("JAMLY_SCOPE") or os.getcwd()
+    qpath = getattr(args, "queue", None) or os.environ.get("JAMLY_QUEUE") \
         or default_queue_path(scope_dir)
 
     queue = WatchQueue.from_path(qpath)

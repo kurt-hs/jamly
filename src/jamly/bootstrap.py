@@ -5,7 +5,7 @@ unit-tested without any network or heavy installs. The later provisioning steps
 functions' results, but are not implemented here -- see DESIGN.md section 10 for the
 provisioning plan and `find_*`/status return values as their contracts.
 Environment knobs (all optional; sensible defaults used otherwise):
-    AUTOCV_SCOPE      directory that will hold `.portable/` (default: current working dir)
+    JAMLY_SCOPE      directory that will hold `.portable/` (default: current working dir)
 Run directly to print a human-readable tool report and an exit code reflecting whether
 the pipeline is runnable *as-is* on this machine.
 """
@@ -260,7 +260,7 @@ def summarize(scope_dir: str = "") -> RunReport:
     ), has_repro)
 def main(argv=None) -> int:
 
-    scope = getattr(os, "environ", {}).get("AUTOCV_SCOPE") or os.getcwd()
+    scope = getattr(os, "environ", {}).get("JAMLY_SCOPE") or os.getcwd()
 
     print("jamly dependency detection")
     print("=" * 60)

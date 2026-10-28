@@ -45,20 +45,20 @@ class YtdlpCmdTests(unittest.TestCase):
         self.assertNotIn("--no-write-subs", cmd)
 
     def test_suppress_subs_env_override_reaches_builder(self):
-        # AUTOCV_SUPPRESS_SUBS=0 must actually reach the builder (run.build_download_cmd used
+        # JAMLY_SUPPRESS_SUBS=0 must actually reach the builder (run.build_download_cmd used
         # to short-circuit with 'suppress_subs or True', which made this override a no-op).
         import os
         import jamly.run as run_mod
-        old = os.environ.pop("AUTOCV_SUPPRESS_SUBS", None)
+        old = os.environ.pop("JAMLY_SUPPRESS_SUBS", None)
         try:
-            os.environ["AUTOCV_SUPPRESS_SUBS"] = "0"
+            os.environ["JAMLY_SUPPRESS_SUBS"] = "0"
             self.assertFalse(run_mod._resolve_suppress_subs())   # resolves to False
             cmd = build_ytdlp_extract_cmd("yt-dlp.exe", "https://youtu.be/dQw4w9WgXcQ",
                                           suppress_subs=run_mod._resolve_suppress_subs())
             self.assertNotIn("--no-write-subs", cmd)
         finally:
             if old is not None:
-                os.environ["AUTOCV_SUPPRESS_SUBS"] = old
+                os.environ["JAMLY_SUPPRESS_SUBS"] = old
 
     def test_leading_dash_source_is_not_an_option(self):
         # a bare watch id can start with '-' (base64url); yt-dlp must treat it as the positional
