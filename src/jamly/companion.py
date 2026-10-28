@@ -1,12 +1,15 @@
 """Launch or reconnect to the local exporter without coupling jobs to a browser tab."""
 from __future__ import annotations
 
+import argparse
 from dataclasses import replace
 import html
+import hmac
 import json
 import os
 from pathlib import Path
 import subprocess
+import secrets
 import sys
 import time
 from urllib.error import HTTPError, URLError
@@ -18,7 +21,7 @@ from filelock import FileLock
 
 from .bootstrap import check_runtime, detect_ffmpeg, summarize
 from .config import (
-    instance_path, pairing_token, parse_configured_args, pipeline_options, runtime_paths,
+    instance_path, pairing_token, pairing_proof, parse_configured_args, pipeline_options, runtime_paths,
     state_directory,
 )
 from .runtime import module_command
@@ -32,7 +35,7 @@ class _NoRedirect(HTTPRedirectHandler):
 
 
 def request(base_url: str, token: str, path: str, body=None) -> dict:
-    headers = {"Authorization": "Bearer " + token}
+    headers = {"Authorization": "Bearer " + token} if token else {}
     data = None
     if body is not None:
         headers["Content-Type"] = "application/json"
@@ -40,7 +43,10 @@ def request(base_url: str, token: str, path: str, body=None) -> dict:
     call = Request(base_url + path, data=data, headers=headers)
     # Local pairing credentials must never be sent through an environment-configured proxy.
     with build_opener(ProxyHandler({}), _NoRedirect()).open(call, timeout=3) as response:
-        result = json.load(response)
+        payload = response.read(65537)
+        if len(payload) > 65536:
+            raise ValueError("The local backend returned an oversized control response")
+        result = json.loads(payload)
     if not isinstance(result, dict):
         raise ValueError("The local backend returned an invalid response")
     return result
@@ -59,16 +65,22 @@ def _instance_url(path: Path) -> str | None:
     return "http://%s:%d" % ("[" + host + "]" if ":" in host else host, port)
 
 
-def _connect(url: str, token: str) -> bool:
+def _connect(url: str, token: str, queue: Path) -> bool:
     try:
-        status = request(url, token, "/status")
+        nonce = secrets.token_hex(32)
+        handshake = request(url, "", "/handshake?nonce=" + nonce)
+        proof = handshake.get("proof")
+        expected = pairing_proof(token, nonce, url, queue)
+        if not isinstance(proof, str) or not hmac.compare_digest(proof.encode(), expected.encode()):
+            raise RuntimeError("The local backend identity does not match this queue. Stop the other "
+                               "process before reopening Jamly; no pairing credential was sent.")
     except HTTPError as exc:
         raise RuntimeError("The port belongs to an incompatible or unpaired backend; stop it first") from exc
     except URLError as exc:
         if isinstance(exc.reason, (ConnectionRefusedError, TimeoutError)):
             return False
         raise
-    if status.get("api_version") != 3:
+    if handshake.get("api_version") != 3:
         raise RuntimeError("Update and restart the backend before opening this companion")
     return True
 
@@ -96,7 +108,7 @@ def ensure_backend(args, state: Path, queue: Path, token: str) -> str:
     deadline = time.monotonic() + 5
     while True:
         existing = _instance_url(instance)
-        if existing and _connect(existing, token):
+        if existing and _connect(existing, token, queue):
             return existing
         try:
             with queue_owner(str(queue)):
@@ -129,7 +141,7 @@ def ensure_backend(args, state: Path, queue: Path, token: str) -> str:
             if process.poll() is not None:
                 raise RuntimeError("The backend could not start. See " + str(log_path))
             url = _instance_url(instance)
-            if url and _connect(url, token):
+            if url and _connect(url, token, queue):
                 return url
             time.sleep(.1)
         raise RuntimeError("The backend did not become ready. See " + str(log_path))
@@ -171,11 +183,13 @@ def main(argv=None) -> int:
         token = pairing_token(state, args.server_token)
         with FileLock(str(state / "companion-launch.lock"), timeout=60):
             url = ensure_backend(args, state, queue, token)
-            explicit = {}
+            overrides = argparse.ArgumentParser(add_help=False)
             for key, flags in (("model", ("--model",)), ("audio_format", ("--audio-format",)),
                                ("output_dir", ("--output-dir", "-o"))):
-                if any(arg == flag or arg.startswith(flag + "=") for arg in argv for flag in flags):
-                    explicit[key] = getattr(args, key)
+                overrides.add_argument(*flags, dest=key, default=argparse.SUPPRESS)
+            supplied, _rest = overrides.parse_known_args(argv)
+            options = pipeline_options(args)
+            explicit = {key: options[key] for key in vars(supplied)}
             if explicit:
                 request(url, token, "/settings", explicit)
             launch = request(url, token, "/app/launch", {})

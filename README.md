@@ -56,6 +56,8 @@ jamly-companion
 
 Python 3.11 and 3.12 are supported. `jamly-companion` launches the same interface as the desktop
 packages. `jamly-server` runs just the backend. The standalone CLI remains available below.
+On Intel macOS, use the checkout/development instructions below and install Rust to build sphn;
+that workflow applies the required CMake build constraint. The desktop package avoids these requirements.
 
 ## Separation presets
 
@@ -195,9 +197,10 @@ jobs interrupted by shutdown are resumed on restart.
 
 ## HTTP API
 
-API version **3** requires matching backend and browser components.
+API version **3** requires matching backend and browser components. The health probe, static companion
+assets and loopback-only `/handshake` challenge are public; none exposes a token or local path.
 
-All endpoints except the minimal `/healthz` probe require `Authorization: Bearer <token>`.
+Job, settings and artifact API calls require `Authorization: Bearer <token>`.
 
 | Method and path | Purpose |
 |---|---|
@@ -214,8 +217,8 @@ Saved companion defaults override service-install configuration; explicit backen
 override saved defaults at startup. Changes apply to new submissions, not queued jobs. Runtime flags
 such as device, threads and port take effect when starting a backend, not when reconnecting to one.
 
-This is a local service, not an internet-facing deployment. Browser origins are restricted to
-extensions or explicit `--allow-origin` entries; arbitrary Host headers are rejected. Non-loopback
+This is a local service, not an internet-facing deployment. Browser origins are restricted to the
+same-origin companion, extensions or explicit `--allow-origin` entries; arbitrary Host headers are rejected. Non-loopback
 binding requires an explicit token. Remote use additionally needs appropriate host/origin settings
 and an authenticated TLS deployment, which this project does not configure.
 
@@ -251,6 +254,7 @@ automatically. Native prerequisites are a C/C++ toolchain, Make, Perl,
 Bash and pkg-config. On macOS, use Xcode Command Line Tools and `brew install pkg-config`.
 On Linux, install `build-essential pkg-config perl`. On Windows, use an MSYS2 **MINGW64** terminal
 with `make perl mingw-w64-x86_64-gcc mingw-w64-x86_64-pkgconf`.
+Intel macOS also needs Rust. The project pins CMake 3 for sphn's bundled Opus build.
 
 ```sh
 export UV_PROJECT_ENVIRONMENT=.venv-bundle

@@ -146,7 +146,7 @@ try {
   let port;
   await waitFor(async () => {
     if (chromeError) throw chromeError;
-    if (chrome.exitCode !== null) throw new Error("Chrome exited: " + browserLog);
+    if (chrome.exitCode !== null || chrome.signalCode !== null) throw new Error("Chrome exited: " + browserLog);
     try {
       port = (await fs.readFile(path.join(profile, "DevToolsActivePort"), "utf8")).split("\n")[0];
       return true;
@@ -215,7 +215,7 @@ try {
   throw error;
 } finally {
   if (cdp) cdp.close();
-  if (chrome?.pid && chrome.exitCode === null) {
+  if (chrome?.pid && chrome.exitCode === null && chrome.signalCode === null) {
     const exited = once(chrome, "exit");
     if (process.platform === "win32") {
       execFileSync(path.join(process.env.SystemRoot, "System32/taskkill.exe"),

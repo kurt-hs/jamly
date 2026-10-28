@@ -12,6 +12,7 @@ import subprocess
 import sys
 import sysconfig
 import tarfile
+from urllib.parse import quote
 from urllib.request import urlopen
 import zipfile
 
@@ -37,24 +38,24 @@ def python_notices(destination: Path) -> None:
     }
     triple = triples[(sys.platform, platform.machine().lower())]
     prefix = "cpython-%s+%s-%s-" % (platform.python_version(), release, triple)
-    with urlopen("https://api.github.com/repos/astral-sh/python-build-standalone/releases/tags/" + release,
-                 timeout=60) as response:
-        assets = json.load(response)["assets"]
-    matches = [asset for asset in assets if asset["name"].startswith(prefix)
-               and asset["name"].endswith("-full.tar.zst") and "pgo" in asset["name"]]
+    base = "https://github.com/astral-sh/python-build-standalone/releases/download/" + release
+    with urlopen(base + "/SHA256SUMS", timeout=60) as response:
+        sums = [line.split(maxsplit=1) for line in response.read().decode().splitlines() if line.strip()]
+    matches = [(digest, name.lstrip("*")) for digest, name in sums
+               if name.lstrip("*").startswith(prefix) and name.endswith("-full.tar.zst") and "pgo" in name]
     if len(matches) != 1:
         raise RuntimeError("Cannot identify the matching redistributable Python license archive")
-    asset = matches[0]
-    digest = asset.get("digest", "").removeprefix("sha256:")
+    digest, name = matches[0]
     if len(digest) != 64:
         raise RuntimeError("The Python release does not provide a SHA-256 digest")
     cache = ROOT / "build" / "python-notices"
     cache.mkdir(parents=True, exist_ok=True)
-    archive = cache / asset["name"]
+    url = base + "/" + quote(name, safe="")
+    archive = cache / name
     if not archive.exists():
         partial = archive.with_suffix(".partial")
         try:
-            with urlopen(asset["browser_download_url"], timeout=120) as response, partial.open("wb") as file:
+            with urlopen(url, timeout=120) as response, partial.open("wb") as file:
                 shutil.copyfileobj(response, file)
             if checksum(partial) != digest:
                 raise RuntimeError("Python notice archive checksum mismatch")
@@ -80,7 +81,7 @@ def python_notices(destination: Path) -> None:
     if not copied:
         raise RuntimeError("The Python distribution did not contain dependency notices")
     (destination / "provenance.json").write_text(json.dumps({
-        "url": asset["browser_download_url"], "sha256": digest, "build": release,
+        "url": url, "sha256": digest, "build": release,
     }, indent=2))
 
 

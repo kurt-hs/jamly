@@ -67,7 +67,8 @@ jobs:
             mingw-w64-x86_64-pkgconf
       - run: uv sync --locked --group bundle --managed-python --python 3.12
       - name: Cache pinned native builds
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        id: native-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: build/native-audio
           key: native-audio-${{ matrix.label }}-${{ hashFiles('tools/native_audio.py', 'tools/native-sources.json') }}
@@ -83,6 +84,12 @@ jobs:
       - name: Real Chrome using the packaged companion
         if: runner.os == 'Linux'
         run: node tools/browser_smoke.mjs --runtime dist/desktop/Jamly/jamly-runtime
+      - name: Preserve completed native builds even if a later check fails
+        if: always() && !cancelled() && steps.native-cache.outputs.cache-hit != 'true' && hashFiles('build/native-audio/built.json') != ''
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: build/native-audio
+          key: ${{ steps.native-cache.outputs.cache-primary-key }}
       - name: Upload unsigned preview and corresponding sources
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:

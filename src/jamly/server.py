@@ -7,6 +7,7 @@ import ipaddress
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import signal
 import socket
@@ -22,7 +23,7 @@ from . import __version__
 from .config import (
     add_pipeline_arguments, job_arguments, pairing_token, parse_configured_args,
     pipeline_options, runtime_paths, token_command, instance_path, validate_preferences,
-    write_private_json,
+    write_private_json, pairing_proof,
 )
 from .companion_ui import CompanionUI, CSP
 from .normalize import InputError, make_input
@@ -396,7 +397,7 @@ class QueueStatusHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         url = urlsplit(self.path)
-        public = url.path in ("/", "/app", "/healthz") or url.path.startswith("/app/")
+        public = url.path in ("/", "/app", "/healthz", "/handshake") or url.path.startswith("/app/")
         if not self._allowed_request(auth=not public):
             return
         if url.path in ("/", "/app"):
@@ -410,6 +411,17 @@ class QueueStatusHandler(BaseHTTPRequestHandler):
                 self._bytes(data, kind, policy=CSP)
             except OSError:
                 self._json({"error": "Companion asset is missing; reinstall Jamly or check the URL"}, 404)
+        elif url.path == "/handshake" and self.app.ui.enabled:
+            try:
+                values = parse_qs(url.query, strict_parsing=True, max_num_fields=1)
+                nonce = values.get("nonce", [""])[0]
+                if set(values) != {"nonce"} or not re.fullmatch(r"[a-f0-9]{64}", nonce):
+                    raise ValueError("A 32-byte hexadecimal challenge is required")
+                self._json({"api_version": 3, "proof": pairing_proof(
+                    self.app._token, nonce, self.app.base_url, Path(self.app.queue_path),
+                )})
+            except ValueError as exc:
+                self._json({"error": str(exc)}, 400)
         elif url.path == "/healthz":
             self._json({"ok": not bool(self.app._error), "version": __version__,
                         "api_version": 3, "authentication_required": True})

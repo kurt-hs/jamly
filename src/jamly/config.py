@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import hmac
 import json
 import os
 from pathlib import Path
@@ -92,6 +93,12 @@ def token_path(state_dir: Path) -> Path:
 def instance_path(state: Path, queue: Path) -> Path:
     identity = hashlib.sha256(str(queue).encode()).hexdigest()[:16]
     return state / ("server-" + identity + ".json")
+
+
+def pairing_proof(token: str, nonce: str, url: str, queue: Path) -> str:
+    context = json.dumps(["jamly-backend-v1", nonce, url, os.path.normcase(str(queue.resolve()))],
+                         separators=(",", ":")).encode()
+    return hmac.new(token.encode(), context, hashlib.sha256).hexdigest()
 
 
 def token_command(state_dir: Path) -> str:

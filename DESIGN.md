@@ -73,6 +73,8 @@ open. Neither browser page owns the inference process.
 
 `companion` serializes launches, checks for the authenticated backend associated with its queue,
 and reconnects or starts a separate process. The backend publishes a private instance descriptor.
+Before sending its pairing credential, the launcher verifies a fresh HMAC challenge bound to the
+backend address and queue. A stale port occupied by another application cannot collect the token.
 Closing a page or the short-lived launcher does not stop jobs. Quit invokes orderly shutdown;
 SIGTERM also cancels processing and preserves unfinished work for restart.
 

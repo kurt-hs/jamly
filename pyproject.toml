@@ -32,6 +32,9 @@ jamly-companion = "jamly.companion:main"
 dev = ["pytest>=8", "ruff>=0.14"]
 bundle = ["pyinstaller>=6.16,<7", "zstandard>=0.23"]
 
+[tool.uv.extra-build-dependencies]
+sphn = ["cmake==3.31.6"]
+
 [tool.setuptools.packages.find]
 where = ["src"]
 

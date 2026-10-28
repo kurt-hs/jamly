@@ -157,6 +157,8 @@ def build(work: Path, jobs: int = 4) -> Path:
     execute(["make", parallel], directory)
     execute(["make", "install"], directory)
     directory = source / SOURCES["libsndfile"]["directory"]
+    if os.name == "nt":
+        environment["CFLAGS"] += " -std=gnu11"
     execute(["./configure", "--prefix=" + root, "--build=" + host, "--host=" + host,
              "--disable-static", "--enable-shared", "--disable-external-libs",
              "--disable-mpeg", "--disable-alsa", "--disable-sqlite", "--disable-full-suite"], directory)

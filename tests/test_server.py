@@ -10,7 +10,7 @@ import unittest
 from unittest.mock import Mock, patch
 from urllib.parse import unquote, urlencode, urlsplit
 
-from jamly import config, core, server
+from jamly import companion, config, core, server
 from jamly.outputs import PROCESSING_VERSION, checksum
 from jamly.run import ItemResult
 from jamly.watch_queue import QueueError, WatchQueue
@@ -87,6 +87,25 @@ class ServerTests(unittest.TestCase):
         self.assertIn("frame-ancestors 'none'", headers["Content-Security-Policy"])
         self.assertEqual(self.request("GET", "/app/../../server-token", auth=False)[0], 404)
         self.assertEqual(self.request("POST", "/app/launch", {}, auth=False)[0], 401)
+
+    def test_launcher_verifies_backend_and_queue_before_sending_credentials(self):
+        self.start()
+        received = []
+        original = server.QueueStatusHandler._allowed_request
+
+        def capture(handler, *args, **kwargs):
+            received.append(handler.headers.get("Authorization"))
+            return original(handler, *args, **kwargs)
+
+        with patch.object(server.QueueStatusHandler, "_allowed_request", capture):
+            with self.assertRaisesRegex(RuntimeError, "identity"):
+                companion._connect(self.app.base_url, "test-token", self.root / "different-queue.json")
+            self.assertEqual(received, [None])
+            received.clear()
+            self.assertTrue(companion._connect(self.app.base_url, "test-token", Path(self.app.queue_path)))
+            self.assertEqual(received, [None])
+            companion.request(self.app.base_url, "test-token", "/app/launch", {})
+            self.assertEqual(received, [None, "Bearer test-token"])
 
     def test_launcher_pairs_through_a_private_single_use_file_not_a_url(self):
         self.start()
