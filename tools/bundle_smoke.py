@@ -166,10 +166,14 @@ def main() -> int:
                 binary_root = (executable.parent.parent / "Frameworks" if sys.platform == "darwin"
                                else executable.parent / "_internal")
                 ffmpeg = binary_root / "bin" / ("ffmpeg.exe" if os.name == "nt" else "ffmpeg")
+                fixture_environment = dict(environment)
+                if os.name == "nt":
+                    # Frozen parents supply this DLL directory; this unfrozen fixture builder must too.
+                    fixture_environment["PATH"] = str(binary_root)
                 subprocess.run([
                     str(ffmpeg), "-nostdin", "-y", "-i", str(root / "generated.wav"),
                     "-c:a", "libmp3lame", "-b:a", "320k", str(root / "generated.mp3"),
-                ], check=True, env=environment, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                ], check=True, env=fixture_environment, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
                 handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=str(root))
                 media_server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
                 media_thread = threading.Thread(target=media_server.serve_forever, daemon=True)
