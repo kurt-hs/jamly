@@ -1,452 +1,448 @@
-"""HTTP status server for jamly (#16).
-
-Shares the persistent WatchQueue protocol with run.py. A background worker runs one
-queued item at a time via run.process_one, calling mark_done + save() after each item so
-progress is resumable and can be streamed over SSE:
-
-    python -m jamly.server --port 8765 [--scope .] [--queue jamly_queue.json]
-
-Endpoints:
-    GET /status   SSE stream of {pending, done, current, progress} (text/event-stream)
-    POST /add     seed yt-dlp sources; returns the number newly queued
-    GET  /items   current pending list as JSON
-    GET  /healthz health probe
-
-Heavy steps are delegated to run.process_one; the HTTP layer is exercised with a fake worker."""
+"""Paired local HTTP API with one queue owner and one cancellable worker."""
 from __future__ import annotations
+
 import argparse
 import hmac
+import ipaddress
 import json
 import os
+from pathlib import Path
+import shutil
 import socket
 import sys
-import traceback
 import threading
-import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, quote, unquote, urlsplit
 
-from jamly.watch_queue import WatchQueue, default_queue_path
-from .core import AUDIO_FORMATS, DEFAULT_OUTPUT_FORMAT
-from .normalize import make_input
-from .run import process_one
+from filelock import FileLock, Timeout
 
-# hosts that keep the queue reachable only by local processes; binding anywhere else is an explicit
-# opt-in (and, with S2 hardening, additionally requires a server token). Empty host -> loopback.
+from . import __version__
+from .config import (
+    add_pipeline_arguments, job_arguments, pairing_token, parse_configured_args,
+    pipeline_options, runtime_paths, token_command,
+)
+from .normalize import InputError, make_input
+from .outputs import read_manifest
+from .run import ItemResult, process_one
+from .watch_queue import QueueError, WatchQueue, queue_owner
+
+
 def _is_loopback_host(host: str) -> bool:
-    if not host:
+    if host.lower() == "localhost":
         return True
-    h = host.strip().lower()
-    return h in ("127.0.0.1", "localhost", "::1")
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 def _authorized(header: str, token: str) -> bool:
-    """True when `header` carries a Bearer token matching `token` (scheme case-insensitive)."""
-    if not header or not token:
-        return False
     parts = header.split(None, 1)
-    if len(parts) != 2 or parts[0].lower() != "bearer":
-        return False
-    return hmac.compare_digest(parts[1].strip(), token)
+    return (len(parts) == 2 and parts[0].lower() == "bearer"
+            and hmac.compare_digest(parts[1].strip().encode(), token.encode()))
+
+
+def _port(value: str) -> int:
+    port = int(value)
+    if not 0 <= port <= 65535:
+        raise argparse.ArgumentTypeError("port must be between 0 and 65535")
+    return port
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="jamly HTTP status server (shares the queue protocol)")
-    p.add_argument("--host", default="127.0.0.1")
-    p.add_argument("--port", type=int, default=8765)
-    p.add_argument("--scope", default=None, help="Working scope for engine/ytdlp/ffmpeg resolution (default: cwd)")
-    p.add_argument("--queue", default=None, help="Queue file path (default: env JAMLY_QUEUE or <scope>/jamly_queue.json)")
-    p.add_argument("--interval-ms", type=int, default=1000, help="SSE progress event interval")
-    p.add_argument("-o", "--output-dir", default="output",
-                   help="Directory for <title>_drums.<fmt> / _no_drums.<fmt> (default: output)")
-    p.add_argument("--audio-format", choices=AUDIO_FORMATS, default=DEFAULT_OUTPUT_FORMAT,
-                   help=("Final audio format; 'wav' = lossless/raw WAVs, '%s' = reasonably-encoded lossy (default)"
-                         % DEFAULT_OUTPUT_FORMAT))
-    p.add_argument("-t", "--threads", type=int, default=0,
-                   help="Demucs separation threads (0 = auto; only used when available)")
-    p.add_argument("--idle-wait-s", type=float, default=2.0, help="Block this long when the queue is empty")
-    # write-auth secret for POST /add: shared between this server and any client that enqueues
-    # with it (also settable via env JAMLY_SERVER_TOKEN). With no token configured, writes are
-    # accepted as before; once one is set, every /add must carry a matching Authorization header.
-    p.add_argument("--server-token", default=None,
-                   help="Shared secret that gates POST /add (env: JAMLY_SERVER_TOKEN); "
-                        "required to bind off-loopback")
-    # shared with the CLI so --replace-existing means exactly the same thing on both entry points
-    p.add_argument("--replace-existing", action="store_true",
-                   help="Overwrite existing output files instead of skipping")
-    return p
+    parser = argparse.ArgumentParser(description="Jamly local backend")
+    add_pipeline_arguments(parser)
+    parser.add_argument("--config", help="JSON configuration written by jamly-service")
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=_port, default=8765)
+    parser.add_argument("--server-token", default=None, help="Override the saved pairing token")
+    parser.add_argument("--allow-origin", action="append", default=[],
+                        help="Additional exact browser origin; never use '*'")
+    parser.add_argument("--allow-host", action="append", default=[],
+                        help="Additional HTTP Host name for an explicitly configured proxy/LAN")
+    return parser
 
 
-class _SilentServer(ThreadingHTTPServer):
-    """Threaded HTTP server that quietly swallows expected disconnect errors.
-
-    SSE streams are torn down constantly (client polls, popup closes); the default handler
-    prints a traceback for every BrokenPipe/ConnectionReset, which is noisy and races with
-    interpreter shutdown. We close the socket and ignore those, re-raising anything unexpected."""
+class _HTTPServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
     def handle_error(self, request, client_address):
-        if isinstance(request, socket.socket):
-            try:
-                request.close()
-            except OSError:
-                pass
-        exc = sys.exc_info()[1]
-        if isinstance(exc, (BrokenPipeError, ConnectionResetError)):
-            return   # expected during SSE teardown; stay quiet
-        traceback.print_exc()  # noqa: E402  (unexpected handler error)
+        if isinstance(sys.exc_info()[1], (BrokenPipeError, ConnectionResetError, TimeoutError)):
+            return
+        super().handle_error(request, client_address)
+
+
+class _IPv6Server(_HTTPServer):
+    address_family = socket.AF_INET6
 
 
 class ItemServer:
-    """Owns a WatchQueue + worker thread; streams status to HTTP clients."""
-
-    def __init__(self, args) -> None:
+    def __init__(self, args):
         self.args = args
-        scope = args.scope or os.environ.get("JAMLY_SCOPE") or os.getcwd()
-        qpath = getattr(args, "queue", None) or os.environ.get("JAMLY_QUEUE") \
-            or default_queue_path(scope)
-        self.queue_path = os.path.abspath(qpath)
-        self.queue = WatchQueue.from_path(self.queue_path)
+        explicit_token = args.server_token or os.environ.get("JAMLY_SERVER_TOKEN")
+        args.host = args.host.strip()
+        if not args.host or not _is_loopback_host(args.host) and not explicit_token:
+            raise ValueError("Non-loopback binds require an explicit --server-token")
+        if "*" in args.allow_origin:
+            raise ValueError("Use exact --allow-origin values, not '*'")
+        self.state_dir, queue_path = runtime_paths(args)
+        self.queue_path = str(queue_path)
+        self._owner = queue_owner(self.queue_path)
+        self._owner.__enter__()
+        try:
+            self.queue = WatchQueue.from_path(self.queue_path)
+            self._token = pairing_token(self.state_dir, explicit_token)
+            self._status_lock = threading.RLock()
+            self._stop = threading.Event()
+            self._wake = threading.Event()
+            self._stop_lock = threading.Lock()
+            self._worker = None
+            self._serving = False
+            self._serve_ident = None
+            self._closed = False
+            self._current = None
+            self._error = None
+            server_type = _IPv6Server if ":" in args.host else _HTTPServer
+            self._server = server_type((args.host, args.port), QueueStatusHandler)
+            self._server.item_server = self
+        except BaseException:
+            self._owner.__exit__(*sys.exc_info())
+            raise
 
-        # status shared with the HTTP layer; guarded by _lock
-        self._status_lock = threading.Lock()
-        self._status = {
-            "pending": list(self.queue.pending_ids()),
-            "done": list(self.queue.done_ids()),
-            "current": None,   # {"watch_id","stage","status","title","error"} or null
-            "progress": {
-                "total": len(self.queue),
-                "pending": self.queue.count_pending(),
-                "done": len(self.queue.done_ids()),
-            },
-            # terminal record per finished item (done/error); stream so observers reliably see
-            # each completion regardless of when they connect (single-slot ``current`` only ever
-            # shows the last in-flight item).
-            "completed": [],
-        }
+    def _commit(self, change):
+        candidate = self.queue.copy()
+        value = change(candidate)
+        candidate.save()
+        self.queue = candidate
+        return value
 
-        # write-auth secret shared between this server and any client that enqueues with it.
-        # env is authoritative (it crosses process boundaries); --server-token overrides for a
-        # single instance. Empty -> no auth required (legacy behaviour).
-        # --server-token is an explicit opt-in and overrides the environment; env is the fallback.
-        self._token = getattr(args, "server_token", None) or os.environ.get("JAMLY_SERVER_TOKEN")
+    def enqueue(self, inputs, titles=None, replace=False) -> int:
+        normalized = [make_input(source) for source in inputs]
+        options = dict(pipeline_options(self.args), replace_existing=replace or self.args.replace_existing)
+        with self._status_lock:
+            if self._error or self._stop.is_set():
+                raise QueueError(self._error or "Server is shutting down")
+            added = self._commit(lambda queue: queue.add_all(
+                [item.watch_id for item in normalized], titles,
+                [item.source_url for item in normalized], retry=True, options=options,
+            ))
+        self._wake.set()
+        return added
 
-        self._stop = threading.Event()
-        # True only while start() has launched serve_forever(); stop() uses it to avoid blocking
-        # on a server that was bound in __init__ but never served (BaseServer.shutdown would then
-        # wait forever for the poller's shutdown event, which is only set by a running poller).
-        self._serving: bool = False
-        self._server: _SilentServer | None = None
-        self._worker: threading.Thread | None = None
-        # S2 hardening: refuse to bind anywhere reachable beyond the local host unless a token is
-        # configured. Without one, an unauthenticated client could add items over the network.
-        if not _is_loopback_host(self.args.host) and not self._token:
-            raise ValueError(
-                "binding %r:%d off-loopback requires --server-token (env: JAMLY_SERVER_TOKEN); "
-                "set it to allow non-loopback binds" % (self.args.host,
-                                                        max(0, getattr(self.args, "port", 0))))
-        # bind the HTTP server eagerly (deterministic port for tests; resumable status)
-        self._server = _SilentServer((self.args.host, max(0, getattr(self.args, "port", 0))),
-                                     QueueStatusHandler)
-        # socketserver sets handler.server to this instance; expose our ItemServer to handlers
-        self._server._item_server = self
+    def retry(self, wid: str, replace: bool = False) -> bool:
+        with self._status_lock:
+            if self._error or self._stop.is_set():
+                raise QueueError(self._error or "Server is shutting down")
+            item = self.queue.get(wid)
+            if item is None:
+                raise KeyError(wid)
+            options = dict(item.get("options", {}), replace_existing=replace)
+            added = self._commit(lambda queue: queue.add(wid, retry=True, options=options))
+        self._wake.set()
+        return added
 
-    def _refresh_status_locked(self) -> None:
-        pending = list(self.queue.pending_ids())
-        done = list(self.queue.done_ids())
-        self._status["pending"] = pending
-        self._status["done"] = done
-        self._status["progress"] = {
-            "total": len(self.queue),
-            "pending": len(pending),
-            "done": len(done),
-        }
-
-    # -- worker ------------------------------------------------------------- #
     def _process_one(self) -> bool:
-        """Process exactly one pending item, keeping the in-memory queue + status synced.
-
-        Operates on the single persistent ``self.queue`` (the same instance /items and /status
-        read), so counts never drift. Crash-resume is provided by __init__ loading from disk; a
-        completed or errored item is moved to _done so it never re-runs on restart, while an item
-        for which process_one raised is left pending (retry next cycle)."""
-        # robust against an empty queue: remaining_work() is True when there are no items, but then
-        # there is nothing to pick (a bare `next(...)` would raise StopIteration). Guard explicitly.
         with self._status_lock:
-            pending_items = self.queue.pending_items()
-        if not pending_items:
-            return False   # empty queue or everything already done -> the idle loop just waits
-        item = pending_items[0]
-        wid = item["watch_id"]
-        with self._status_lock:
-            cur = {"watch_id": wid, "stage": None, "status": "pending", "title": None, "error": None}
-            self._status["current"] = dict(cur)
+            pending = self.queue.pending_items()
+            if not pending or self._stop.is_set():
+                return False
+            item = pending[0]
+            wid = item["watch_id"]
+            self._commit(lambda queue: queue.mark_running(wid))
+            self._current = {"watch_id": wid, "stage": "metadata", "status": "running",
+                             "title": item.get("title"), "error": None}
 
-        # run the (possibly heavy) inference OUTSIDE any lock; the real worker updates progress
-        # under short internal locks. If it raises here we leave the item pending for a retry.
-        res = process_one(
-            wid,
-            self.args,
-            source_url=item.get("source_url") or wid,
-        )
-        if not res.ok:
+        def progress(_wid, stage, _index, _total):
             with self._status_lock:
-                self._status["current"] = {"watch_id": wid, "stage": res.stage or "",
-                                           "status": "error", "title": res.title, "error": res.error}
-        else:
-            # terminal 'done' state so clients/tests can see the finished item before the next cycle
-            with self._status_lock:
-                self._status["current"] = {"watch_id": wid, "stage": res.stage or "",
-                                           "status": res.status, "title": res.title, "error": None}
-        # record this item's terminal state so it is observable even after ``current`` moves on
-        with self._status_lock:
-            rec = {"watch_id": wid, "stage": res.stage or "",
-                   "status": res.status if res.ok else "error", "title": res.title,
-                   "error": None if res.ok else res.error}
-            self._status["completed"].append(rec)
-            self._status["completed"] = self._status["completed"][-100:]
+                self._current["stage"] = stage
 
-        # success OR error -> record completion so it never re-runs on restart (avoids an infinite
-        # loop hammering a persistent failure). Only PENDING items are moved to _done.
         try:
-            with self._status_lock:
-                self.queue.mark_done(wid)
-                self._refresh_status_locked()
-        except Exception as exc:  # noqa: BLE001 - keep going; the item stays pending and retries
-            with self._status_lock:
-                self._status["current"]["error"] = "queue-mark-error: %s" % exc
-        # persist AFTER recording completion so the done-set survives a restart (the worker previously
-        # updated the in-memory queue but never saved -> a restart re-loaded finished items as pending).
-        try:
-            with self._status_lock:
-                self.queue.save()
-        except OSError as exc:  # noqa: BLE001 - keep going; next cycle retries the save
-            with self._status_lock:
-                self._status["current"]["error"] = "queue-save-error: %s" % exc
+            result = process_one(
+                wid, job_arguments(self.args, item.get("options", {})),
+                source_url=item["source_url"], progress=progress, cancel_event=self._stop,
+            )
+        except Exception as exc:
+            result = ItemResult(wid, status="error", error=str(exc))
+        status = "pending" if result.status == "cancelled" and self._stop.is_set() else result.status
+        with self._status_lock:
+            self._commit(lambda queue: queue.finish(
+                wid, status, error=result.error if status != "pending" else None,
+                title=result.title, outputs=result.outputs, generation=result.generation,
+            ))
+            self._current = None
         return True
 
-    # Minimum interval between worker iterations even when ``--idle-wait-s`` is 0. A tight
-    # busy-spin (sleep(0)) starves the HTTP handler thread so /status SSE can stall, and it also
-    # leaves no visibility window for observers to read per-item completion between fast cycles.
-    _MIN_IDLE_SLEEP_S = 0.05
-
-    def _loop(self) -> None:
+    def _loop(self):
         while not self._stop.is_set():
             try:
-                self._process_one()
-            except Exception as exc:  # noqa: BLE001 - never let the worker die silently
+                if self._process_one():
+                    continue
+            except Exception as exc:
                 with self._status_lock:
-                    self._status["current"] = {"watch_id": None, "stage": "", "status": "error",
-                                               "title": None, "error": str(exc)}
-            # floor at _MIN_IDLE_SLEEP_S so the loop always yields to other threads (HTTP handler)
-            time.sleep(max(self.args.idle_wait_s, self._MIN_IDLE_SLEEP_S))
+                    self._error = "Cannot persist queue state; fix storage and restart: %s" % exc
+                print(self._error, file=sys.stderr)
+                return
+            self._wake.wait()
+            self._wake.clear()
 
-    def start(self) -> None:
-        """Launch the worker thread and serve HTTP. Binding happens in __init__."""
+    def snapshot(self) -> dict:
+        with self._status_lock:
+            items = self.queue.items
+            terminal = [item for item in items if item["status"] not in ("pending", "running")]
+            visible = [item for item in items if item["status"] in ("pending", "running")] + terminal[-100:]
+            jobs = []
+            for item in reversed(visible):
+                record = {key: item.get(key) for key in (
+                    "watch_id", "title", "source_url", "status", "error", "attempts", "updated_at"
+                )}
+                record["outputs"] = []
+                if item["status"] in ("done", "skipped") and item.get("generation"):
+                    for kind, path in item.get("outputs", {}).items():
+                        if kind in ("drums", "no_drums", "metadata"):
+                            record["outputs"].append({
+                                "kind": kind, "name": Path(path).name,
+                                "url": "/outputs/%s/%s?generation=%s" % (
+                                    quote(item["watch_id"], safe=""), kind, quote(item["generation"], safe="")
+                                ),
+                            })
+                jobs.append(record)
+            return {
+                "api_version": 2, "pending": sum(item["status"] == "pending" for item in items),
+                "done": len(self.queue.done_ids()), "failed": sum(item["status"] == "error" for item in items),
+                "total": len(items), "current": dict(self._current) if self._current else None,
+                "jobs": jobs, "error": self._error,
+            }
+
+    def start(self):
         self._serving = True
-        self._worker = threading.Thread(target=self._loop, name="autoconvert-worker", daemon=True)
+        self._serve_ident = threading.get_ident()
+        self._worker = threading.Thread(target=self._loop, name="jamly-worker", daemon=True)
         self._worker.start()
-        self._server.serve_forever()
+        try:
+            self._server.serve_forever(poll_interval=0.1)
+        finally:
+            self._serving = False
 
-    def stop(self) -> None:
-        if self._stop.is_set():
-            return
-        self._stop.set()
-        server = self._server
-        if server is not None:
-            # Only wait for the poller when we actually started serving; otherwise just release
-            # the socket (a never-started server's shutdown would block forever on __is_shut_down).
-            if self._serving:
-                server.shutdown()
-                self._serving = False
-            server.server_close()
+    def stop(self):
+        with self._stop_lock:
+            if self._closed:
+                return
+            self._stop.set()
+            self._wake.set()
+            if self._serving and self._serve_ident != threading.get_ident():
+                self._server.shutdown()
+            if self._worker is not None:
+                self._worker.join(timeout=15)
+                if self._worker.is_alive():
+                    raise RuntimeError("The worker has not stopped; queue ownership was retained")
+            with self._status_lock:
+                self._server.server_close()
+                self._owner.__exit__(None, None, None)
+                self._closed = True
 
 
 class QueueStatusHandler(BaseHTTPRequestHandler):
-    protocol_version = "HTTP/1.1"   # enables keep-alive + chunked SSE streaming
-
-    def log_message(self, fmt, *args):  # quiet by default; uncomment to debug
-        pass
+    protocol_version = "HTTP/1.1"
 
     @property
-    def _server_obj(self) -> ItemServer:
-        # self.server is the ThreadingHTTPServer instance (socketserver sets it);
-        # we attach our ItemServer to it in start() so handlers can read shared state.
-        return getattr(getattr(self, "server", None), "_item_server", None)
+    def app(self) -> ItemServer:
+        return self.server.item_server
 
-    # Cross-origin support for the browser clients: they run in an extension
-    # (chrome-extension://) or a userscript (https://youtube.com/...) context and
-    # fetch this http(s)://127.0.0.1 server, so without these headers the browsers
-    # would block the response body on CORS grounds.
+    def log_message(self, fmt, *args):
+        pass
+
+    def _allowed_origin(self, origin: str) -> bool:
+        if origin in self.app.args.allow_origin:
+            return True
+        try:
+            parsed = urlsplit(origin)
+        except ValueError:
+            return False
+        return (parsed.scheme in ("chrome-extension", "moz-extension")
+                and bool(parsed.netloc) and parsed.path in ("", "/")
+                and not parsed.username and not parsed.query and not parsed.fragment)
+
     def _cors(self):
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type")
-        if self.headers.get("Access-Control-Request-Private-Network", "").lower() == "true":
-            self.send_header("Access-Control-Allow-Private-Network", "true")
+        origin = self.headers.get("Origin")
+        if origin and self._allowed_origin(origin):
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Vary", "Origin")
 
-    def do_OPTIONS(self):  # CORS preflight -> allow the cross-origin GET/POST above
-        self.send_response(204)
-        self._cors()
-        self.send_header("Access-Control-Max-Age", "86400")
-        self.send_header("Content-Length", "0")
-        self.end_headers()
-
-    def _send_json(self, obj, status=200):
-        body = json.dumps(obj).encode("utf-8")
+    def _json(self, body, status=200):
+        data = json.dumps(body).encode("utf-8")
         self.send_response(status)
         self._cors()
         self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        if self.close_connection:
+            self.send_header("Connection", "close")
         self.end_headers()
-        self.wfile.write(body)
+        self.wfile.write(data)
 
-    def do_GET(self):  # noqa: N802 (http.server API)
-        parsed_url = urlsplit(self.path)
-        path = parsed_url.path.rstrip("/") or "/"
-        query = parse_qs(parsed_url.query)
-        if path == "/status":
-            s = self._server_obj
-            # send SSE headers once, before streaming body lines
-            self.send_response(200)
-            self._cors()
-            self.send_header("Content-Type", "text/event-stream")
-            self.send_header("Cache-Control", "no-cache")
-            self.send_header("Connection", "keep-alive")
-            self.end_headers()
-            try:
-                # paced from the ItemServer's --interval-ms; fall back to 1s if the caller
-                # didn't configure it (e.g. a test stubbing the worker)
-                args_obj = getattr(s, "args", None)
-                interval_s = (args_obj.interval_ms / 1000.0) if args_obj and hasattr(args_obj, "interval_ms") else 1.0
-                while not s._stop.is_set():
-                    with s._status_lock:
-                        snap = json.loads(json.dumps(s._status))   # deep copy under lock
-                        pr = snap["progress"]
-                        total = pr["total"]
-                        done = len(snap["done"])
-                        cur = snap.get("current") or {"watch_id": None, "stage": "", "status": "idle",
-                                                       "title": None, "error": None}
-                    line = json.dumps({"type": "progress", "pending": len(snap["pending"]),
-                                       "done": done, "total": total, "current": cur,
-                                       "last_completed": list(snap.get("completed") or [])})
-                    self.wfile.write(("data: %s\n\n" % line).encode("utf-8"))
-                    self.wfile.write((": tick p=%d/%d d=%d\n\n" % (pr["pending"], total, done)).encode("utf-8"))
-                    self.wfile.flush()   # a write error here means the client disconnected
-                    if query.get("once") == ["1"]:
-                        self.close_connection = True
-                        return
-                    # pace the stream to --interval-ms (default 1s). Without this the loop
-                    # writes as fast as the client reads -- a busy spin that starves the HTTP
-                    # handler thread and makes /status stall for observers.
-                    if interval_s > 0:
-                        time.sleep(interval_s)
-            except (BrokenPipeError, ConnectionResetError):
-                self.close_connection = True   # stop the keep-alive loop on a dead socket
-                return  # client disconnected; drop this SSE connection
-            return
-        if path == "/items":
-            s = self._server_obj
-            with s._status_lock:
-                body = {"pending": list(s.queue.pending_ids()),
-                        "done": list(s.queue.done_ids())}
-            self._send_json(body)
-            return
-        if path == "/healthz":
-            s = self._server_obj
-            self._send_json({"ok": True, "queue_file": s.queue_path}, 200)
-            return
-        self._send_json({"error": "not found"}, status=404)
-
-    def do_POST(self):  # noqa: N802
-        path = urlsplit(self.path).path.rstrip("/") or "/"
-        if path != "/add":
-            self._send_json({"error": "unknown endpoint"}, status=404)
-            return
-        # read the request body up front so a rejected write never leaves unread bytes on a keep-alive socket
-        length = int(self.headers.get("Content-Length", 0) or 0)
-        if length > 1024 * 1024:
+    def _allowed_request(self, auth=True):
+        allowed = {"localhost", "127.0.0.1", "::1", self.app.args.host.lower(),
+                   *[host.lower() for host in self.app.args.allow_host]}
+        try:
+            host = urlsplit("//" + self.headers.get("Host", ""))
+            valid_host = (host.hostname in allowed and not host.username and not host.path
+                          and not host.query and not host.fragment and (host.port is None or host.port > 0))
+        except ValueError:
+            valid_host = False
+        origin = self.headers.get("Origin")
+        if not valid_host or origin and not self._allowed_origin(origin):
             self.close_connection = True
-            self._send_json({"error": "request body is too large"}, status=413)
+            self._json({"error": "Host or browser origin is not allowed"}, 403)
+            return False
+        if auth and not _authorized(self.headers.get("Authorization", ""), self.app._token):
+            self.close_connection = True
+            self._json({"error": "Pair this client using the token from 'jamly-service token'"}, 401)
+            return False
+        return True
+
+    def do_OPTIONS(self):
+        if not self._allowed_request(auth=False):
             return
-        raw = self.rfile.read(length) if length else b""
-        # S2 hardening: when a server token is configured, reject writes without it before touching the queue.
-        s = self._server_obj
-        if s._token and not _authorized(self.headers.get("Authorization", ""), s._token):
-            body = json.dumps({"error": "authorization required"}).encode("utf-8")
-            self.send_response(401)
-            self._cors()
-            self.send_header("Content-Type", "application/json")
-            self.send_header("WWW-Authenticate", 'Bearer realm="jamly-server"')
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)   # body must be written to match Content-Length
+        self.send_response(204)
+        self._cors()
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type")
+        if self.headers.get("Access-Control-Request-Private-Network") == "true":
+            self.send_header("Access-Control-Allow-Private-Network", "true")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def do_GET(self):
+        url = urlsplit(self.path)
+        if not self._allowed_request(auth=url.path != "/healthz"):
+            return
+        if url.path == "/healthz":
+            self._json({"ok": not bool(self.app._error), "version": __version__,
+                        "api_version": 2, "authentication_required": True})
+        elif url.path in ("/status", "/items"):
+            self._json(self.app.snapshot())
+        elif url.path.startswith("/outputs/"):
+            self._output(url)
+        else:
+            self._json({"error": "not found"}, 404)
+
+    def _output(self, url):
+        parts = url.path.split("/")
+        if len(parts) != 4 or parts[3] not in ("drums", "no_drums", "metadata"):
+            self._json({"error": "unknown output"}, 404)
+            return
+        with self.app._status_lock:
+            item = self.app.queue.get(unquote(parts[2]))
+        generation = parse_qs(url.query).get("generation", [None])[0]
+        if not item or item["status"] not in ("done", "skipped"):
+            self._json({"error": "outputs are not ready"}, 409)
+            return
+        if not generation or generation != item.get("generation"):
+            self._json({"error": "output generation changed; refresh the job"}, 409)
+            return
+        started = False
+        try:
+            directory = Path(item["outputs"]["metadata"]).parent
+            lock = FileLock(str(directory.parent / ("." + directory.name + ".lock")), timeout=0)
+            with lock:
+                manifest = read_manifest(directory, verify_hashes=False)
+                if manifest["generation"] != generation:
+                    self._json({"error": "output generation changed; refresh the job"}, 409)
+                    return
+                kind = parts[3]
+                name = "metadata.json" if kind == "metadata" else manifest["outputs"][kind]["file"]
+                path = directory / name
+                with path.open("rb") as file:
+                    self.send_response(200)
+                    self._cors()
+                    self.send_header("Content-Type", "application/octet-stream")
+                    self.send_header("Content-Length", str(os.fstat(file.fileno()).st_size))
+                    self.send_header("Content-Disposition", "attachment; filename*=UTF-8''" + quote(name))
+                    self.send_header("Cache-Control", "no-store")
+                    self.end_headers()
+                    started = True
+                    shutil.copyfileobj(file, self.wfile)
+        except Timeout:
+            self._json({"error": "outputs are being replaced; try again shortly"}, 409)
+        except (OSError, ValueError, KeyError) as exc:
+            if started:
+                self.close_connection = True
+                raise
+            self._json({"error": "output is unavailable: %s" % exc}, 404)
+
+    def do_POST(self):
+        if not self._allowed_request():
             return
         try:
-            payload = json.loads(raw.decode("utf-8")) if raw.strip() else {}
-            raw_inputs = payload.get("inputs") or []
-            titles = payload.get("titles")
-        except (ValueError, TypeError):
-            self._send_json({"error": "invalid JSON body"}, status=400)
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            length = -1
+        if length < 0 or length > 1024 * 1024 or self.headers.get("Transfer-Encoding"):
+            self.close_connection = True
+            self._json({"error": "invalid or oversized request body"}, 400)
             return
-        if not isinstance(raw_inputs, list) or not all(isinstance(i, str) for i in raw_inputs):
-            self._send_json({"error": "'inputs' must be a list of strings"}, status=400)
+        if self.headers.get("Content-Type", "").split(";")[0].strip() != "application/json":
+            self.close_connection = True
+            self._json({"error": "Content-Type must be application/json"}, 415)
             return
-        if titles is not None and not isinstance(titles, list):
-            self._send_json({"error": "'titles' must be a list"}, status=400)
-            return
-        inputs = [i.strip() for i in raw_inputs if i.strip()]
-        if not inputs:
-            self._send_json({"queued": [], "note": "provide a non-empty 'inputs' list"}, status=400)
-            return
-        normalized = []
-        for src in inputs:
-            try:
-                normalized.append(make_input(src))
-            except Exception as exc:  # noqa: BLE001 - return an actionable input error
-                self._send_json({"error": "invalid input %r: %s" % (src, exc)}, status=400)
+        try:
+            self.connection.settimeout(10)
+            payload = json.loads(self.rfile.read(length))
+            if not isinstance(payload, dict):
+                raise ValueError("body must be a JSON object")
+            path = urlsplit(self.path).path
+            if path == "/add":
+                if set(payload) - {"inputs", "titles", "replace_existing"}:
+                    raise ValueError("unknown request field")
+                inputs = payload.get("inputs")
+                if not isinstance(inputs, list) or not inputs or not all(
+                    isinstance(source, str) and source.strip() for source in inputs
+                ):
+                    raise ValueError("inputs must be a non-empty list of non-empty strings")
+                titles = payload.get("titles")
+                if titles is not None and (not isinstance(titles, list) or len(titles) != len(inputs)
+                                           or any(title is not None and not isinstance(title, str) for title in titles)):
+                    raise ValueError("titles must match the inputs list")
+                replace = payload.get("replace_existing", False)
+                if not isinstance(replace, bool):
+                    raise ValueError("replace_existing must be a boolean")
+                added = self.app.enqueue(inputs, titles, replace)
+            elif path.startswith("/retry/"):
+                if set(payload) - {"replace_existing"} or not isinstance(payload.get("replace_existing", False), bool):
+                    raise ValueError("retry accepts only a boolean replace_existing field")
+                added = int(self.app.retry(unquote(path.removeprefix("/retry/")),
+                                           payload.get("replace_existing", False)))
+            else:
+                self._json({"error": "not found"}, 404)
                 return
-        s = self._server_obj
-        with s._status_lock:
-            # add while holding the lock so the response counts are stable even under idle=0 churn;
-            # items may be marked done by the worker only after this handler releases the lock.
-            newly = s.queue.add_all(
-                [item.watch_id for item in normalized],
-                titles,
-                [item.source_url for item in normalized],
-            )
-            pending_count = len(s.queue.pending_ids())
-            s._refresh_status_locked()
-        # persist immediately so the worker sees them right away (resumable state)
-        try:
-            with s._status_lock:
-                s.queue.save()
-        except OSError as exc:
-            self._send_json({"queued": inputs, "newly_added": newly, "pending_count": pending_count,
-                             "warn": "save-error: %s" % exc}, status=207)
-            return
-        self._send_json({"queued": inputs, "newly_added": newly, "pending_count": pending_count})
+            self._json({"newly_added": added, "pending_count": self.app.snapshot()["pending"]}, 202)
+        except (ValueError, InputError, UnicodeError) as exc:
+            self._json({"error": str(exc)}, 400)
+        except KeyError:
+            self._json({"error": "unknown job"}, 404)
+        except (OSError, QueueError) as exc:
+            self._json({"error": "Cannot persist request: %s" % exc}, 503)
 
 
 def main(argv=None) -> int:
-    args = build_parser().parse_args(argv)
-    srv = ItemServer(args)
-    if not _is_loopback_host(args.host):
-        # loud opt-in: anyone who can reach this host can read queue status; only writes are gated
-        # by the token, so make the exposure unmistakable.
-        print("WARNING: bound off-loopback (host=%s); the server is reachable over the network. "
-              "Set JAMLY_SERVER_TOKEN to require auth on POST /add." % args.host,
-              file=sys.stderr)
-    print("jamly server: listening on http://%s:%d  (queue=%s)" % (args.host, args.port, srv.queue_path))
+    parser = build_parser()
     try:
-        srv.start()
+        args = parse_configured_args(parser, argv)
+        server = ItemServer(args)
+    except (OSError, ValueError, QueueError) as exc:
+        print("jamly-server: %s" % exc, file=sys.stderr)
+        return 2
+    print("Jamly listening on %s:%d" % (args.host, server._server.server_address[1]), flush=True)
+    print("Pair browsers with: " + token_command(server.state_dir), flush=True)
+    try:
+        server.start()
     except KeyboardInterrupt:
         pass
     finally:
-        srv.stop()
+        server.stop()
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    raise SystemExit(main())

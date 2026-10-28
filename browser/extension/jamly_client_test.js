@@ -1,109 +1,57 @@
-// jamly_client_test.js — client-side integration test for the shared status protocol.
-//
-// Spins up an in-process HTTP server that mimics the real ItemServer endpoints (GET /status SSE,
-// POST /add) and drives `autoConvertClient` against it over Node's global fetch. This validates the
-// browser-client parsing logic (the "data: {...}" extraction from the SSE stream, JSON shapes, and
-// dedup/trim of inputs) without a real yt-dlp run — the server side itself is covered by
-// tests/test_server.py driving urllib against the live ItemServer. Run with `node jamly_client_test.js`.
-
 "use strict";
-var http = require("http");
+const assert = require("node:assert/strict");
+const http = require("node:http");
+const { test } = require("node:test");
+const client = require("./jamly_client.js");
 
-// alias self so the client's (typeof self !== "undefined" ? self : this) binds to Node's globalThis
-var self = globalThis;
-
-function startFakeServer() {
-  var server = http.createServer(function (req, res) {
-    if (req.method === "GET" && req.url === "/status?once=1") {
-      // mirror the real handler: an SSE data line carrying one progress JSON object + a comment tick
-      res.setHeader("Content-Type", "text/event-stream");
-      var payload = JSON.stringify({
-        pending: 2, done: 0, total: 2,
-        current: { watch_id: "abc123", stage: "mix", status: "pending", title: null, error: null },
-        last_completed: []
-      });
-      res.write("data: " + payload + "\n\n");
-      res.write(": tick p=2 d=0\n\n");
-      return res.end();
-    } else if (req.method === "POST" && req.url === "/add") {
-      if (req.headers.authorization !== "Bearer sekret") {
-        res.statusCode = 401;
-        return res.end(JSON.stringify({ error: "authorization required" }));
+async function backend(t) {
+  const received = [];
+  const server = http.createServer((request, response) => {
+    const chunks = [];
+    request.on("data", chunk => chunks.push(chunk));
+    request.on("end", () => {
+      response.setHeader("Content-Type", "application/json");
+      if (request.headers.authorization !== "Bearer paired") {
+        response.writeHead(401);
+        response.end(JSON.stringify({ error: "Pair the client first" }));
+        return;
       }
-      var chunks = [];
-      req.on("data", function (c) { chunks.push(c); });
-      req.on("end", function () {
-        try {
-          var body = JSON.parse(Buffer.concat(chunks).toString());
-          res.setHeader("Content-Type", "application/json");
-          // trim + dedup inputs exactly as the client sends them; newly_added counts unique ids
-          var sentInputs = (body.inputs || []).map(String).filter(Boolean);
-          res.statusCode = 200;
-          res.end(JSON.stringify({ queued: sentInputs, newly_added: new Set(sentInputs).size, pending_count: sentInputs.length }));
-        } catch (e) {
-          res.statusCode = 400;
-          res.end(JSON.stringify({ error: "invalid JSON body" }));
-        }
-      });
-    } else if (req.method === "GET") {
-      res.setHeader("Content-Type", "application/json");
-      res.statusCode = 200;
-      res.end(JSON.stringify({ pending: [], done: [] }));
-    } else {
-      res.statusCode = 404;
-      res.end();
-    }
-  });
-  server.listen(0);
-  return new Promise(function (resolve) {
-    server.on("listening", function () { resolve("http://127.0.0.1:" + server.address().port); });
-  });
-}
-
-var assert = require("assert");
-
-startFakeServer().then(function (base_url) {
-  var code = "self=globalThis;" + require("fs").readFileSync(__dirname + "/jamly_client.js", "utf8");
-  eval(code);
-
-  return new Promise(function (resolve, reject) {
-    autoConvertClient.pollStatus(base_url).then(function (snap) {
-      assert.ok(snap, "pollStatus returned a snapshot");
-      assert.strictEqual(snap.pending, 2);
-      assert.strictEqual(snap.done, 0);
-      assert.strictEqual(snap.total, 2);
-      assert.deepStrictEqual(snap.current.stage, "mix");
-      console.log("pollStatus parsed from SSE tick: OK (pending=%d done=%d)", snap.pending, snap.done);
-
-      return autoConvertClient.addInputs(
-        base_url,
-        ["  https://youtu.be/abc123 ", "", "https://youtu.be/def456"],
-        [null, null],
-        "sekret"
-      );
-    }).then(function (resp) {
-      assert.strictEqual(resp.newly_added, 2, "newly_added should count unique non-empty inputs");
-      assert.strictEqual(resp.pending_count, 2);
-      // the client trims + drops empty entries server-side too; verify it sent only the two real ones
-      if (Array.isArray(resp.queued)) {
-        assert.ok(resp.queued.every(function (q) { return q.length > 0; }), "empties trimmed");
+      if (request.url === "/status") {
+        response.end(JSON.stringify({ api_version: 2, jobs: [], pending: 0, done: 0 }));
+      } else {
+        received.push({ url: request.url, body: JSON.parse(Buffer.concat(chunks).toString()) });
+        response.writeHead(202);
+        response.end(JSON.stringify({ newly_added: 1 }));
       }
-      console.log("addInputs dedup+trim: OK (newly_added=%d)", resp.newly_added);
-
-      // empty inputs -> client rejects before hitting the server
-      return autoConvertClient.addInputs(base_url, []);
-    }).then(function (resp) {
-      assert.ok(resp.error, "empty input list is rejected by the client");
-      console.log("addInputs empty-list guard: OK (" + resp.error + ")");
-
-      process.stdout.write("\nALL CLIENT CONTRACT TESTS PASSED\n");
-      process.exit(0);
-    }).catch(function (err) {
-      console.error("client test FAILED:", err && err.stack ? err.stack : err);
-      process.exit(1);
     });
   });
-}).catch(function (err) {
-  console.error("bootstrap error:", err);
-  process.exit(1);
+  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  return { config: { url: "http://127.0.0.1:" + server.address().port, token: "paired" }, received };
+}
+
+test("paired JSON status, submission and retry preserve input and options", async t => {
+  const { config, received } = await backend(t);
+  assert.equal((await client.status(config)).api_version, 2);
+  assert.equal((await client.addInputs(config, ["https://example.test/a"], true)).newly_added, 1);
+  await client.retry(config, "src-id", false);
+  assert.deepEqual(received, [
+    { url: "/add", body: { inputs: ["https://example.test/a"], replace_existing: true } },
+    { url: "/retry/src-id", body: { replace_existing: false } },
+  ]);
+});
+
+test("HTTP errors reject rather than becoming successful queue responses", async t => {
+  const { config } = await backend(t);
+  await assert.rejects(client.status({ ...config, token: "" }), /Pair the client first/);
+  await assert.rejects(client.addInputs({ ...config, token: "wrong" }, ["url"]), /Pair the client first/);
+});
+
+test("artifact downloads stay on the paired backend", () => {
+  const config = { url: "https://example.test/jamly" };
+  assert.equal(client.outputURL(config, "/outputs/id/drums?generation=one"),
+               "https://example.test/jamly/outputs/id/drums?generation=one");
+  assert.throws(() => client.outputURL(config, "https://other.example/file"), /invalid/);
+  assert.throws(() => client.outputURL(config, "/outputs/../../private"), /invalid/);
+  assert.throws(() => client.baseURL("http://127.0.0.1/?token=secret"), /base URL/);
 });

@@ -1,34 +1,27 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-<meta charset="utf-8" />
-<style>
-  body { width:320px; margin:0; font:13px/1.5 -apple-system,Segoe UI,Roboto,sans-serif; background:#fff;color:#222; padding:14px; }
-  h2 { font-size:15px; margin:0 0 10px; color:#0e7eea; }
-  label { display:block;font-weight:600;margin-top:8px; }
-  input[type=text], input[type=password] { width:100%; box-sizing:border-box;padding:6px;border-radius:4px;border:1px solid #bbb; }
-  button { margin-top:12px;padding:7px;border:none;border-radius:4px;background:#0e7eea;color:#fff;cursor:pointer;font-weight:600; }
-  .note { font-size:11px;color:#888;margin-top:10px; }
-  #ac_status { margin-top:10px;font-size:11px;color:#666;white-space:nowrap;overflow:hidden;text-overflow:ellipsis; }
-  .badge { display:inline-flex;align-items:center;gap:4px;font-weight:600;font-size:11px;padding:0 5px;border-radius:3px;background:#eee;color:#222;min-width:78px; }
-  .badge .lbl { text-transform:uppercase;letter-spacing:.4px; }
-  .badge.done   { color:#1a7f37; background:#d9eddf; }
-  .badge.error  { color:#b71c1c; background:#f9d5d5; }
-  .badge.pending{ color:#666;    background:#e0e0e0; }
-  .badge.download{ color:#094771; background:#dbeafe; }
-  .badge.separate{ color:#5e35b1; background:#ede7f6; }
-  .badge.mix    { color:#8a6d3b; background:#f2e8cf; }
-</style>
+  <meta charset="utf-8">
+  <title>Jamly pairing</title>
+  <style>
+    body { max-width: 520px; padding: 20px; font: 15px/1.5 system-ui, sans-serif; }
+    label { display: block; margin-top: 12px; }
+    input { width: 100%; box-sizing: border-box; padding: 8px; }
+    button { margin: 12px 8px 12px 0; }
+    #status { white-space: pre-wrap; }
+  </style>
 </head>
 <body>
-<h2>jamly status — options</h2>
-<label for="url">Server URL (where `python -m jamly.server` listens)</label>
-<input id="url" type="text" value="http://127.0.0.1:8765" />
-<label for="token">Server token (required for non-loopback servers)</label>
-<input id="token" type="password" autocomplete="off" />
-<button id="save">Save</button>
-<div class="note">The popup polls this /status endpoint every second and enqueues jobs with POST /add.</div>
-<div id="ac_status">server not reachable</div>
-<script src="jamly_options.js"></script>
+  <h1>Pair with the Jamly backend</h1>
+  <p>Start <code>jamly-server</code>, then run <code>jamly-service token</code>
+    in the same Jamly environment and paste the token below.</p>
+  <label for="url">Backend URL</label>
+  <input id="url" type="url" value="http://127.0.0.1:8765">
+  <label for="token">Pairing token</label>
+  <input id="token" type="password" autocomplete="off">
+  <button id="save">Save and check connection</button>
+  <p id="status" role="status"></p>
+  <script src="jamly_client.js"></script>
+  <script src="jamly_options.js"></script>
 </body>
 </html>

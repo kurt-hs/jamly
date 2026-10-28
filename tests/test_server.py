@@ -1,548 +1,218 @@
-"""HTTP status-server integration tests.
-
-These drive the live ``ItemServer`` over real HTTP and observe per-item completion through the
-streaming ``/status`` SSE endpoint while a background worker processes items concurrently.
-
-Why these are robust (and do NOT hang or race):
-
-* No stdlib-``queue`` shadowing: since the restructure, ``server.py`` imports our own
-  :class:`jamly.watch_queue.WatchQueue` (which now also exposes ``done_ids()`` and an
-  ``.items`` accessor). The HTTP layer therefore loads cleanly under both runners -- this is the
-  resolution of the earlier "queue issue" that broke pytest collection. Tests use only the standard
-  library, so they run anywhere without third-party HTTP clients.
-* Bounded stream, not a long-lived socket race: instead of one reader holding an infinite SSE
-  connection while racing against the worker loop (which stalls under loose daemon threads), each
-  test opens a fresh short-lived ``urllib`` connection per poll and reads at most a bounded number
-  of bytes -- streaming until every added item shows up in ``last_completed``. A fast-finisher's
-  completion is reliably observable because the worker floors its idle sleep at 0.05s, always
-  yielding to the HTTP handler so each write flushes promptly. This mirrors FastAPI's TestClient
-  pattern: a bounded stream read, never an infinite one racing an unbounded worker.
-
-The heavy steps (yt-dlp + ffmpeg/GPU) are stubbed out with :func:`unittest.mock.patch.object` on
-``jamly.server.process_one`` so the tests add no network dependency and finish deterministically.
-
-Core queue behaviour this depends on is covered by :file:`tests/test_queue.py`; here we cover the live
-HTTP/SSE path end to end.
-"""
-
-import os
-import tempfile
-import uuid
+import http.client
 import json
+from pathlib import Path
+import sys
+import tempfile
 import threading
 import time
 import unittest
-from unittest import mock
-from urllib.request import Request, urlopen
-from urllib.error import URLError
-import http.client
-
-from jamly.server import ItemServer, _is_loopback_host, build_parser
-
-
-class _FakeResult:
-    """Stands in for :func:`run.process_one`'s return value during live-stream tests."""
-
-    def __init__(self, ok=True, stage="mix", title=None, error=None, status=None):
-        self.ok = ok
-        self.stage = stage
-        self.title = title
-        self.error = error
-        self.status = status or ("done" if ok else "error")
-
-
-def _stub_process_one(result):
-    """Patch ``server.process_one`` to return a fixed fake result (no network).
-
-    Returns a context manager. The server looks up ``process_one`` in its module globals at call
-    time, so patching it here makes every worker cycle use our stub instead of real yt-dlp/ffmpeg.
-    """
-    def _fake(wid, args, source_url=None):
-        return result
-
-    return mock.patch.object(_server_module(), "process_one", side_effect=_fake)
-
-
-def _server_module():
-    # import lazily so the patch can target the fully-loaded module object
-    from jamly import server as _smod
-    return _smod
-
-
-def _start_server(idle_wait_s=0.0, token=None):
-    """Construct an ItemServer bound to a free ephemeral port; start its worker AND HTTP serving.
-
-    Returns (server, port). ``ItemServer.start()`` launches the queue-worker thread and blocks in
-    ``serve_forever();`` we run it from a dedicated daemon thread so the test body can finish while
-    both loops keep running. Each instance gets its own isolated queue file in a temp dir so tests
-    never share state via the default cwd queue path. Pass ``token`` to spin up a server that gates
-    POST /add with a shared bearer secret (S2 hardening).
-    """
-    # pure string path (never create+remove an on-disk file -> no Windows handle-lock race).
-    # from_path() treats a missing file as an empty queue until .save() is called.
-    qpath = os.path.join(tempfile.gettempdir(), "autocv-test-queue-%s.json" % uuid.uuid4().hex)
-    argv = ["--port", "0", "--idle-wait-s", str(idle_wait_s), "--queue", qpath]
-    if token is not None:
-        argv += ["--server-token", token]
-    args = build_parser().parse_args(argv)
-    srv = ItemServer(args)  # binds eagerly; the assigned port is in _server.server_address[1]
-    # daemon=True so a lingering/failed teardown can never block pytest from exiting.
-    worker_t = threading.Thread(target=srv._loop, name="test-worker", daemon=True)
-    server_t = threading.Thread(target=srv._server.serve_forever, name="test-server", daemon=True)
-    worker_t.start()
-    server_t.start()  # serve_forever blocks this thread until stop(); captured for clean join
-    # serve_forever is running on server_t; mark serving so stop() does a bounded shutdown()
-    # (waits for the poller to signal) instead of closing the socket mid-poll.
-    srv._serving = True
-    return srv, srv._server.server_address[1], qpath, worker_t, server_t
-
-
-def _add_items(base_url, inputs, titles=None):
-    """POST a JSON ``/add`` request; return the parsed response body."""
-    data = json.dumps({"inputs": list(inputs), "titles": list(titles or [])}).encode("utf-8")
-    req = Request(base_url + "/add", data=data)
-    req.add_header("Content-Type", "application/json")
-    with urlopen(req, timeout=10) as resp:  # context manager (http.client); safe on Windows
-        return json.loads(resp.read().decode("utf-8"))
-
-
-def _post(port, inputs=None, titles=None, auth=None):
-    """POST ``/add`` via http.client; return ``(status, parsed_body)`` and never raise on non-2xx."""
-    data = json.dumps({"inputs": list(inputs or []), "titles": list(titles or [])}).encode("utf-8")
-    headers = {"Content-Type": "application/json"}
-    if auth is not None:
-        headers["Authorization"] = auth
-    c = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
-    try:
-        c.request("POST", "/add", body=data, headers=headers)
-        r = c.getresponse()
-        raw = r.read().decode("utf-8", "replace")
-        return r.status, (json.loads(raw) if raw.strip() else None)
-    finally:
-        c.close()
-
-
-def _poll_status(base_url):
-    """One bounded read of ``GET /status``; return the list of SSE JSON events seen in this poll.
-
-    Reads line-by-line until at least one complete SSE event has been consumed, then stops -- so a
-    *paced* stream (events spaced by ``--interval-ms``) stays time-bounded via the socket timeout
-    instead of blocking until a fixed 64KB buffer fills (which a paced stream of small events never
-    does). Each poll opens a fresh short-lived connection; the server re-streams cumulative
-    ``last_completed`` on every tick, so repeated polls observe monotonic progress. Returns [] if
-    nothing readable yet.
-    """
-    req = Request(base_url + "/status?once=1")
-    try:
-        with urlopen(req, timeout=5) as resp:
-            events = []
-            line = resp.readline()
-            while line:
-                text = line.decode("utf-8", "replace").strip()
-                if text.startswith("data: "):
-                    try:
-                        events.append(json.loads(text[len("data: ") :]))
-                    except (ValueError, TypeError):  # noqa: BLE001 - skip malformed chunks defensively
-                        pass
-                    # stop after the first complete event so a paced stream stays time-bounded
-                    if events:
-                        break
-                line = resp.readline()
-    except (URLError, OSError):  # noqa: BLE001 - transient; the caller keeps polling
-        return []
-    return events
-
-
-def _completed_ids(events):
-    """Watch ids that have reached a terminal record in any streamed event."""
-    out = []
-    for e in events:
-        for rec in e.get("last_completed", []) or []:
-            if rec["watch_id"] not in out:
-                out.append(rec["watch_id"])
-    return out
-
-
-def _completed_records(events):
-    """Terminal records (done/error) across streamed events, deduped by watch_id.
-
-    ``last_completed`` grows monotonically with one terminal record per finished item and is re-
-    streamed on every tick; across many polls this helper collapses them to a single representative
-    record per id so counts are stable regardless of how long we polled.
-    """
-    seen = set()
-    out = []
-    for e in events:
-        for rec in e.get("last_completed", []) or []:
-            if rec["watch_id"] not in seen:
-                seen.add(rec["watch_id"])
-                out.append(rec)
-    return out
-
-
-def _cleanup(srv, qpath, threads):
-    """Best-effort teardown of a server instance and its temp queue file."""
-    try:
-        srv.stop()  # sets the stop flag so both loops exit on their next check
-    except Exception:  # noqa: BLE001 - best-effort teardown
-        pass
-    # let any in-flight .save() unwind before removing the queue file (Windows handle race).
-    for t in threads:
-        try:
-            if t.is_alive():
-                t.join(timeout=2.0)
-        except Exception:  # noqa: BLE001 - best-effort teardown
-            pass
-    try:
-        os.remove(qpath)
-    except OSError:  # noqa: BLE001 - already gone or never created
-        pass
-
-
-def _wait_until(port, predicate, deadline=8.0, interval=0.05):
-    """Poll ``GET /status`` until predicate(events) is true; raise AssertionError on timeout."""
-    base_url = "http://127.0.0.1:%d" % port
-    deadline_at = time.time() + deadline
-    while time.time() < deadline_at:
-        events = _poll_status(base_url)
-        if predicate(events):
-            return events
-        time.sleep(interval)
-    raise AssertionError("deadline exceeded waiting for server condition to hold")
-
-
-class ServerIntegrationTests(unittest.TestCase):
-
-    def test_sse_streams_progress_then_completes_all_items(self):
-        """Add two items; stream /status until both appear in ``last_completed`` with status done."""
-        wid_a, wid_b = "aBcDeFg1234", "zYxWvUt5678"
-        titles = {"aBcDeFg1234": "Song A", "zYxWvUt5678": "Song B"}
-        with _stub_process_one(_FakeResult(ok=True, stage="mix", title="Song A")):
-            srv, port, qpath, worker_t, server_t = _start_server()
-            threads = (worker_t, server_t)
-            try:
-                # add while the stub is active so the worker processes items without touching network
-                added = _add_items("http://127.0.0.1:%d" % port, [wid_a, wid_b], [titles[wid_a], titles[wid_b]])
-                self.assertEqual(added["newly_added"], 2)
-                self.assertEqual(added["pending_count"], 2)
-
-                # stream until both terminal records are visible (bounded read; does not hang)
-                events = _wait_until(port, lambda evs: {wid_a, wid_b} <= set(_completed_ids(evs)))
-                recs = _completed_records(events)
-                self.assertEqual({r["watch_id"] for r in recs}, {wid_a, wid_b})
-
-                # every terminal record is 'done' with the expected title/stage, no error text
-                for rec in recs:
-                    self.assertIn(rec["status"], ("done",))
-                    self.assertNotIn("error", str(rec.get("title") or ""))
-            finally:
-                _cleanup(srv, qpath, threads)
-
-    def test_sse_reports_error_status_when_pipeline_fails(self):
-        """A failing item surfaces an 'error' terminal record and is marked done (no infinite retry)."""
-        wid = "aBcDeFg1234"
-        with _stub_process_one(_FakeResult(ok=False, stage="download", title=None, error="boom")):
-            srv, port, qpath, worker_t, server_t = _start_server()
-            threads = (worker_t, server_t)
-            try:
-                added = _add_items("http://127.0.0.1:%d" % port, [wid], ["Song A"])
-                self.assertEqual(added["newly_added"], 1)
-
-                events = _wait_until(port, lambda evs: wid in _completed_ids(evs))
-                recs = [r for r in _completed_records(events) if r["watch_id"] == wid]
-                self.assertEqual(len(recs), 1)   # exactly one terminal record -> not retried forever
-                self.assertEqual(recs[0]["status"], "error")
-                self.assertIn("boom", recs[0].get("error", ""))
-
-                # it is marked done, so a later poll shows nothing new pending for this id
-                events2 = _wait_until(port, lambda evs: wid in _completed_ids(evs), deadline=3.0)
-                recs2 = [r for r in _completed_records(events2) if r["watch_id"] == wid]
-                self.assertEqual(len(recs2), 1)
-            finally:
-                _cleanup(srv, qpath, threads)
-
-    def test_worker_saves_queue_after_finishing_item(self):
-        """The worker persists the queue (mark_done + save) after each item so the done-set
-        survives a restart; a previously-finished item loads as done, not re-queued."""
-        wid = "aBcDeFg1234"
-        with _stub_process_one(_FakeResult(ok=True, stage="mix", title="Song A")):
-            srv, port, qpath, worker_t, server_t = _start_server()
-            threads = (worker_t, server_t)
-            try:
-                added = _add_items("http://127.0.0.1:%d" % port, [wid], ["Song A"])
-                self.assertEqual(added["newly_added"], 1)
-                # wait for the terminal record via /status ...
-                _wait_until(port, lambda evs: wid in _completed_ids(evs))
-                # halt the worker so no .save() races our read (on Windows you cannot os.replace a
-                # file another handle currently has open), then join so it fully unwinds.
-                srv.stop()
-                for t in threads:
-                    try:
-                        if t.is_alive():
-                            t.join(timeout=2.0)
-                    except Exception:  # noqa: BLE001 - best-effort teardown
-                        pass
-                # ... the queue is now quiescent; the on-disk done-set must reflect the finished item
-                import jamly.watch_queue as wq_mod
-                queue = wq_mod.WatchQueue.from_path(qpath)
-                self.assertIn(wid, queue.done_ids())
-                self.assertNotIn(wid, queue.pending_ids())
-                # and a fresh load (simulating a restart) sees it as done, not re-queued
-                reloaded = wq_mod.WatchQueue.from_path(qpath)
-                self.assertIn(wid, reloaded.done_ids())
-                self.assertNotIn(wid, reloaded.pending_ids())
-            finally:
-                _cleanup(srv, qpath, threads)
-
-    def test_cors_headers_on_responses_and_preflight(self):
-        """The browser clients fetch this http://127.0.0.1 server from a cross-origin
-        extension/userscript context, so every response (and the OPTIONS preflight) must carry
-        CORS headers; without them the browsers would block the body and the popup/stem could not
-        talk to the queue over HTTP."""
-        wid = "corsTest001"
-        with _stub_process_one(_FakeResult(ok=True, stage="mix", title=wid)):
-            srv, port, qpath, worker_t, server_t = _start_server()
-            threads = (worker_t, server_t)
-            try:
-                # GET /healthz and POST /add must both advertise CORS on the wire.
-                req = Request("http://127.0.0.1:%d/healthz" % port)
-                with urlopen(req, timeout=5) as resp:
-                    headers = dict(resp.getheaders())
-                self.assertEqual(resp.status, 200)
-                self.assertEqual(headers.get("Access-Control-Allow-Origin"), "*")
-
-                data = json.dumps({"inputs": [wid], "titles": []}).encode("utf-8")
-                req = Request("http://127.0.0.1:%d/add" % port, data=data)
-                req.add_header("Content-Type", "application/json")
-                req.add_header("Origin", "https://youtube.com")
-                with urlopen(req, timeout=5) as resp:
-                    self.assertEqual(resp.status, 200)
-                    self.assertEqual(dict(resp.getheaders()).get("Access-Control-Allow-Origin"), "*")
-
-                # A real cross-origin preflight (as the extension would send) must return 204 with CORS.
-                c = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
-                try:
-                    c.request(
-                        "OPTIONS", "/add",
-                        headers={"Origin": "https://youtube.com",
-                                "Access-Control-Request-Method": "POST"},
-                    )
-                    r = c.getresponse()
-                    hdrs = dict(r.getheaders())
-                    self.assertEqual(r.status, 204)
-                    self.assertEqual(hdrs.get("Access-Control-Allow-Origin"), "*")
-                    self.assertIn("POST", hdrs.get("Access-Control-Allow-Methods", ""))
-                    self.assertIn("Authorization", hdrs.get("Access-Control-Allow-Headers", ""))
-                finally:
-                    c.close()
-            finally:
-                _cleanup(srv, qpath, threads)
-
-
-
-class _LoopbackHostTests(unittest.TestCase):
-    """``_is_loopback_host`` maps the bind host to a loopback/no-auth default."""
-
-    def test_loopback_hosts_are_trusted(self):
-        for host in ("127.0.0.1", "localhost", "::1"):
-            self.assertTrue(_is_loopback_host(host), "%s should be loopback" % host)
-
-    def test_empty_host_defaults_to_loopback(self):
-        # fail-safe: an empty/absent host must never silently widen to all interfaces.
-        self.assertTrue(_is_loopback_host(""))
-
-    def test_exposed_hosts_are_not_loopback(self):
-        for host in ("0.0.0.0", "192.168.1.5", "[::]", "example.com"):
-            self.assertFalse(_is_loopback_host(host), "%s should be treated as exposed" % host)
-
-    def test_case_and_whitespace_insensitive(self):
-        self.assertTrue(_is_loopback_host("  LOCALHOST "))
-        self.assertTrue(_is_loopback_host("127.0.0.1\t"))
-
-
-class ItemServerBindGuardTests(unittest.TestCase):
-    """Binding off-loopback is an explicit opt-in that requires a server token (S2)."""
-
-    def _srv(self, host="0.0.0.0", port=0, token=None):
-        args = build_parser().parse_args(["--host", host, "--port", str(port),
-                                          "--queue", os.path.join(tempfile.gettempdir(),
-                                                                  "autocv-bind-guard-%s.json" % uuid.uuid4().hex)])
-        if token is not None:
-            args.server_token = token
-        return ItemServer(args)
-
-    def test_off_loopback_without_token_is_rejected(self):
-        with self.assertRaises(ValueError) as ctx:
-            self._srv(host="0.0.0.0", port=0, token=None)
-        self.assertIn("server-token", str(ctx.exception))
-
-    def test_off_loopback_with_token_binds(self):
-        srv = self._srv(host="0.0.0.0", port=0, token="sekret")   # must NOT raise -> binds eagerly
-        try:
-            self.assertEqual(srv._server.server_address[0], "0.0.0.0")
-            self.assertEqual(srv._token, "sekret")
-        finally:
-            srv.stop()
-
-    def test_loopback_bind_allowed_without_token(self):
-        # the default path: loopback needs no token and binds cleanly.
-        srv = self._srv(host="127.0.0.1", port=0, token=None)
-        try:
-            self.assertIn("127.0.0.1", srv._server.server_address[0])
-            self.assertIsNone(srv._token)
-        finally:
-            srv.stop()
-
-    def test_token_can_also_come_from_environment(self):
-        # env is read at construction time; --server-token overrides it for a single instance.
-        with mock.patch.dict(os.environ, {"JAMLY_SERVER_TOKEN": "from-env"}, clear=True):
-            srv = self._srv(host="0.0.0.0", port=0, token=None)   # no CLI token -> env supplies auth
-            try:
-                self.assertEqual(srv._token, "from-env")
-            finally:
-                srv.stop()
-        with mock.patch.dict(os.environ, {"JAMLY_SERVER_TOKEN": "from-env"}, clear=True):
-            srv = self._srv(host="0.0.0.0", port=0, token="cli-override")
-            try:
-                self.assertEqual(srv._token, "cli-override")
-            finally:
-                srv.stop()
-
-
-class S2WriteAuthTests(unittest.TestCase):
-    """POST /add is gated by a bearer token when one is configured; accepted when none is."""
-
-    TOKEN = "sekret-abc"
-
-    def test_post_add_accepted_when_no_token_configured(self):
-        # default/legacy behaviour: no server token -> writes are not gated.
-        wid = "noAuth00001"
-        with _stub_process_one(_FakeResult(ok=True, stage="mix", title=wid)):
-            srv, port, qpath, worker_t, server_t = _start_server()
-            threads = (worker_t, server_t)
-            try:
-                status, body = _post(port, [wid], [wid])
-                self.assertEqual(status, 200)
-                self.assertEqual(body["newly_added"], 1)
-                events = _wait_until(port, lambda evs: wid in _completed_ids(evs))
-                recs = [r for r in _completed_records(events) if r["watch_id"] == wid]
-                self.assertEqual(recs[0]["status"], "done")
-            finally:
-                _cleanup(srv, qpath, threads)
-
-    def test_post_add_rejected_without_token_when_configured(self):
-        srv, port, qpath, worker_t, server_t = _start_server(token=self.TOKEN)
-        threads = (worker_t, server_t)
-        try:
-            wid = "aBcDeFg9012"
-            # no Authorization header -> 401, nothing queued and item never runs.
-            status, body = _post(port, [wid], [wid])
-            self.assertEqual(status, 401)
-            self.assertEqual(body.get("error"), "authorization required")
-
-            # wrong bearer -> still rejected (exact match).
-            status, _ = _post(port, [wid], [], auth="Bearer totally-wrong")
-            self.assertEqual(status, 401)
-        finally:
-            _cleanup(srv, qpath, threads)
-
-    def test_post_add_accepted_with_valid_bearer_then_completes(self):
-        # scheme is case-insensitive; a valid token both accepts the write and lets the worker run it.
-        wid = "zYxWvUt9012"
-        with _stub_process_one(_FakeResult(ok=True, stage="mix", title=wid)):
-            srv, port, qpath, worker_t, server_t = _start_server(token=self.TOKEN)
-            threads = (worker_t, server_t)
-            try:
-                status, body = _post(port, [wid], [wid], auth="Bearer %s" % self.TOKEN)
-                self.assertEqual(status, 200)
-                self.assertEqual(body["newly_added"], 1)
-                events = _wait_until(port, lambda evs: wid in _completed_ids(evs))
-                recs = [r for r in _completed_records(events) if r["watch_id"] == wid]
-                self.assertEqual(len(recs), 1)
-                self.assertEqual(recs[0]["status"], "done")
-            finally:
-                _cleanup(srv, qpath, threads)
-
-    def test_scheme_is_case_insensitive(self):
-        srv, port, qpath, worker_t, server_t = _start_server(token=self.TOKEN)
-        threads = (worker_t, server_t)
-        try:
-            # uppercase Bearer + surrounding whitespace all accepted.
-            status, body = _post(port, ["w01"], [], auth="  BEARER %s  " % self.TOKEN)
-            self.assertEqual(status, 200)
-            self.assertEqual(body["newly_added"], 1)
-        finally:
-            _cleanup(srv, qpath, threads)
-
-
-class ServerLifecycleTests(unittest.TestCase):
-    def test_stop_terminates_serve_forever_thread(self):
-        qpath = os.path.join(
-            tempfile.gettempdir(), "jamly-stop-%s.json" % uuid.uuid4().hex)
-        args = build_parser().parse_args(["--port", "0", "--queue", qpath])
-        srv = ItemServer(args)
-        thread = threading.Thread(target=srv.start, daemon=True)
+from unittest.mock import Mock, patch
+
+from jamly import core, server
+from jamly.outputs import PROCESSING_VERSION, checksum
+from jamly.run import ItemResult
+from jamly.watch_queue import QueueError, WatchQueue
+
+
+class ServerTests(unittest.TestCase):
+    wid = "dQw4w9WgXcQ"
+    source = "https://youtu.be/dQw4w9WgXcQ"
+
+    def start(self, process=None):
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        args = server.build_parser().parse_args([
+            "--port", "0", "--queue", str(root / "queue.json"),
+            "--state-dir", str(root),
+            "--output-dir", str(root / "output"), "--server-token", "test-token",
+        ])
+        self.enterContext(patch.object(
+            server, "process_one", side_effect=process or
+            (lambda wid, args, **kwargs: ItemResult(wid, status="done"))
+        ))
+        app = server.ItemServer(args)
+        thread = threading.Thread(target=app.start, daemon=True)
         thread.start()
-        time.sleep(0.1)
-        srv.stop()
-        thread.join(timeout=2)
-        self.assertFalse(thread.is_alive())
 
-    def test_worker_receives_original_source(self):
-        source = "https://soundcloud.com/artist/song"
-        qpath = os.path.join(
-            tempfile.gettempdir(), "jamly-source-%s.json" % uuid.uuid4().hex)
-        args = build_parser().parse_args(["--port", "0", "--queue", qpath])
-        srv = ItemServer(args)
-        from jamly.normalize import make_input
-        item = make_input(source)
-        srv.queue.add(item.watch_id, source_url=item.source_url)
-        seen = []
+        def cleanup():
+            app.stop()
+            thread.join(timeout=3)
+            self.assertFalse(thread.is_alive())
+        self.addCleanup(cleanup)
+        self.app, self.root, self.thread = app, root, thread
+        return app
+
+    def request(self, method, path, body=None, *, auth=True, headers=None, raw=False):
+        headers = dict(headers or {})
+        if auth:
+            headers["Authorization"] = "Bearer test-token"
+        data = None
+        if method == "POST":
+            headers.setdefault("Content-Type", "application/json")
+            data = body if isinstance(body, bytes) else json.dumps(body).encode()
+        connection = http.client.HTTPConnection(
+            "127.0.0.1", self.app._server.server_address[1], timeout=3
+        )
         try:
-            with mock.patch.object(
-                _server_module(),
-                "process_one",
-                side_effect=lambda wid, args, source_url=None: (
-                    seen.append((wid, source_url))
-                    or _FakeResult(ok=True)
-                ),
-            ):
-                self.assertTrue(srv._process_one())
-            self.assertEqual(seen, [(item.watch_id, source)])
+            connection.request(method, path, body=data, headers=headers)
+            response = connection.getresponse()
+            content = response.read()
+            return response.status, content if raw else json.loads(content) if content else {}, dict(response.getheaders())
         finally:
-            srv.stop()
+            connection.close()
+
+    def wait_for(self, predicate):
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            _, state, _ = self.request("GET", "/status")
+            if predicate(state):
+                return state
+            time.sleep(.02)
+        self.fail("Timed out waiting for job state")
+
+    def test_pairing_is_required_for_status_and_queue_mutation(self):
+        self.start()
+        self.assertEqual(self.request("GET", "/healthz", auth=False)[0], 200)
+        self.assertEqual(self.request("GET", "/status", auth=False)[0], 401)
+        self.assertEqual(self.request("POST", "/add", {"inputs": [self.source]}, auth=False)[0], 401)
+        self.assertEqual(self.app.queue.items, [])
+
+    def test_unrelated_origin_or_host_is_rejected_even_with_token(self):
+        self.start()
+        for headers in ({"Origin": "https://unrelated.example"}, {"Host": "unrelated.example"},
+                        {"Origin": "null"}, {"Host": "localhost:invalid"},
+                        {"Origin": "chrome-extension://[invalid"}):
+            code, _, _ = self.request("POST", "/add", {"inputs": [self.source]}, headers=headers)
+            self.assertEqual(code, 403)
+        self.assertEqual(self.app.queue.items, [])
+
+    def test_extension_preflight_allows_authorization_without_wildcard(self):
+        self.start()
+        code, _, headers = self.request("OPTIONS", "/add", auth=False, headers={
+            "Origin": "chrome-extension://example",
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "authorization,content-type",
+        })
+        self.assertEqual(code, 204)
+        self.assertEqual(headers["Access-Control-Allow-Origin"], "chrome-extension://example")
+        self.assertIn("Authorization", headers["Access-Control-Allow-Headers"])
+
+    def test_invalid_payloads_return_client_errors(self):
+        self.start()
+        for body in (None, [], {"inputs": "url"}, {"inputs": [3]}, {"inputs": []},
+                     {"inputs": [self.source], "titles": []},
+                     {"inputs": [self.source], "replace_existing": "true"}, b"{invalid"):
+            with self.subTest(body=body):
+                code, payload, _ = self.request("POST", "/add", body)
+                self.assertEqual(code, 400)
+                self.assertIn("error", payload)
+        self.assertEqual(self.app.queue.items, [])
+
+    def test_stage_progress_and_original_source_reach_worker(self):
+        started, release = threading.Event(), threading.Event()
+        seen = []
+
+        def process(wid, args, *, progress, source_url, cancel_event):
+            seen.append(source_url)
+            progress(wid, "separate", 0, 0)
+            started.set()
+            release.wait(timeout=3)
+            return ItemResult(wid, status="done")
+        self.start(process)
+        self.request("POST", "/add", {"inputs": [self.source]})
+        try:
+            self.assertTrue(started.wait(3))
+            state = self.request("GET", "/status")[1]
+            self.assertEqual(state["current"]["stage"], "separate")
+            self.assertEqual(state["current"]["status"], "running")
+        finally:
+            release.set()
+        state = self.wait_for(lambda state: state["done"] == 1)
+        self.assertIsNone(state["current"])
+        self.assertEqual(seen, [self.source])
+
+    def test_error_survives_reload_and_explicit_retry_succeeds(self):
+        attempts = []
+
+        def process(wid, _args, **_kwargs):
+            attempts.append(wid)
+            return ItemResult(wid, status="error" if len(attempts) == 1 else "done",
+                              error="temporary network failure" if len(attempts) == 1 else None)
+        self.start(process)
+        self.request("POST", "/add", {"inputs": [self.source]})
+        state = self.wait_for(lambda state: state["failed"] == 1)
+        self.assertEqual(state["done"], 0)
+        loaded = WatchQueue.from_path(self.app.queue_path)
+        self.assertEqual(loaded.get(self.wid)["status"], "error")
+        self.assertEqual(loaded.pending_ids(), [])
+        self.request("POST", "/retry/" + self.wid, {})
+        self.wait_for(lambda state: state["done"] == 1)
+        self.assertEqual(len(attempts), 2)
+
+    def test_failed_persistence_does_not_enqueue_a_rejected_request(self):
+        process = Mock(return_value=ItemResult(self.wid, status="done"))
+        self.start(process)
+        with patch.object(WatchQueue, "save", side_effect=OSError("disk full")):
+            code, payload, _ = self.request("POST", "/add", {"inputs": [self.source]})
+        self.assertEqual(code, 503)
+        self.assertIn("disk full", payload["error"])
+        self.assertEqual(self.app.queue.items, [])
+        process.assert_not_called()
+
+    def test_stop_cancels_worker_and_releases_queue_ownership(self):
+        started = threading.Event()
+
+        def process(wid, _args, *, cancel_event, **_kwargs):
             try:
-                os.remove(qpath)
-            except OSError:
-                pass
+                core.run([sys.executable, "-c",
+                          "import time;print('ready',flush=True);time.sleep(60)"],
+                         stream=True, on_line=lambda _line: started.set(), cancel_event=cancel_event)
+            except InterruptedError:
+                return ItemResult(wid, status="cancelled", error="stopped")
+            return ItemResult(wid, status="done")
+        self.start(process)
+        self.request("POST", "/add", {"inputs": [self.source]})
+        self.assertTrue(started.wait(3))
+        with self.assertRaises(QueueError):
+            server.ItemServer(self.app.args)
+        self.app.stop()
+        self.assertFalse(self.app._worker.is_alive())
+        self.assertEqual(WatchQueue.from_path(self.app.queue_path).pending_ids(), [self.wid])
+        replacement = server.ItemServer(self.app.args)
+        replacement.stop()
+
+    def test_artifacts_require_auth_and_matching_generation(self):
+        def process(wid, args, **_kwargs):
+            directory = Path(args.output_dir) / wid / args.audio_format
+            directory.mkdir(parents=True)
+            paths = {}
+            for kind in ("drums", "no_drums"):
+                path = directory / (kind + ".mp3")
+                path.write_bytes(kind.encode())
+                paths[kind] = path
+            metadata = {
+                "processing_version": PROCESSING_VERSION, "generation": "generation-one",
+                "outputs": {kind: {"file": path.name, "sha256": checksum(path)}
+                            for kind, path in paths.items()},
+            }
+            meta_path = directory / "metadata.json"
+            meta_path.write_text(json.dumps(metadata))
+            return ItemResult(wid, status="done", drums_path=str(paths["drums"]),
+                              nodrums_path=str(paths["no_drums"]), meta_path=str(meta_path),
+                              generation="generation-one")
+        self.start(process)
+        self.request("POST", "/add", {"inputs": [self.source]})
+        state = self.wait_for(lambda state: state["done"] == 1)
+        output = next(item for item in state["jobs"][0]["outputs"] if item["kind"] == "drums")
+        self.assertEqual(self.request("GET", output["url"], auth=False)[0], 401)
+        code, body, _ = self.request("GET", output["url"], raw=True)
+        self.assertEqual((code, body), (200, b"drums"))
+        self.assertEqual(self.request("GET", output["url"].replace("generation-one", "stale"))[0], 409)
+        self.assertEqual(self.request("GET", "/outputs/" + self.wid + "/../server-token")[0], 404)
 
 
-class ServerArgParseTests(unittest.TestCase):
-    """The server must expose the same flags as the CLI, so shared process_one code never crashes
-    on an unexpected attribute. --replace-existing in particular is read unconditionally by
-    run.process_one's finally; a missing attr there would crash every item on the server."""
-
-    def test_server_parser_carries_replace_existing_by_default(self):
-        args = build_parser().parse_args([])
-        self.assertFalse(args.replace_existing)   # parity with the CLI default (wipe after each item)
-
-    def test_server_parser_honors_replace_existing_flag(self):
-        args = build_parser().parse_args(["--replace-existing"])
-        self.assertTrue(args.replace_existing)
-
-    def test_server_parser_carries_threads_and_output_dir(self):
-        # process_one reads args.threads and args.output_dir unconditionally; the server parser must
-        # define both (or every server job crashes with AttributeError). Defaults mirror the CLI.
-        args = build_parser().parse_args([])
-        self.assertEqual(args.threads, 0)
-        self.assertEqual(args.output_dir, "output")
-        self.assertEqual(args.audio_format, "mp3")
-
-    def test_server_parser_honors_threads_and_output_dir(self):
-        args = build_parser().parse_args(["-t", "4", "-o", "custom-out"])
-        self.assertEqual(args.threads, 4)
-        self.assertEqual(args.output_dir, "custom-out")
-
-
-if __name__ == "__main__":
-    unittest.main(verbosity=2)
+class HostTests(unittest.TestCase):
+    def test_only_real_loopback_hosts_are_trusted(self):
+        for host in ("127.0.0.1", "localhost", "::1"):
+            self.assertTrue(server._is_loopback_host(host))
+        for host in ("", "0.0.0.0", "evil.example", "127.0.0.1.evil.example"):
+            self.assertFalse(server._is_loopback_host(host))

@@ -1,209 +1,221 @@
-"""Persistent, resumable input queue for jamly (progress + dedup).
-
-Backed by a small JSON file so the CLI and the HTTP server (#16) share one protocol::
-
-    {
-      "items": [{"watch_id":"dQw4w9WgXcQ","source_url":"https://youtu.be/...",
-                 "title":null}],
-      "done":  ["xYz..."],   # completed/failed ids (kept for history + dedup)
-      "updated_at": <epoch float>
-    }
-
-WatchQueue is path-backed but also usable in-memory; persistence is isolated so it can be
-unit-tested with a temp file. add() de-duplicates by watch id (order-preserving).
-"""
+"""Durable job state, explicit retries, and exclusive queue ownership."""
 from __future__ import annotations
 
+from contextlib import contextmanager
+import copy
 import json
 import os
+from pathlib import Path
+import re
 import threading
 import time
 import uuid
-from typing import List, Optional
+
+from filelock import FileLock, Timeout
+
+from .config import state_directory
+
+
+class QueueError(RuntimeError):
+    pass
 
 
 def default_queue_path(scope_dir: str = "") -> str:
-    """Default queue-file location (visible next to outputs; gitignored state file)."""
-    base = scope_dir if scope_dir else "."
-    return os.path.join(os.path.abspath(base), "jamly_queue.json")
+    return str(state_directory(scope_dir or None) / "jamly_queue.json")
+
+
+@contextmanager
+def queue_owner(path: str):
+    Path(path).absolute().parent.mkdir(parents=True, exist_ok=True)
+    lock = FileLock(str(Path(path).absolute()) + ".owner.lock")
+    try:
+        lock.acquire(timeout=0)
+    except Timeout as exc:
+        raise QueueError(
+            "This queue is already owned by another Jamly process. "
+            "Submit through the browser/API or stop that process before using the CLI."
+        ) from exc
+    try:
+        yield
+    finally:
+        lock.release()
 
 
 class WatchQueue:
-    """Deduplicating, resumable list of watch ids with per-item status."""
-
     PENDING = "pending"
     DONE = "done"
+    STATUSES = {"pending", "running", "done", "skipped", "error", "cancelled"}
 
-    def __init__(self, path: str = "", items: Optional[list] = None, done: Optional[list] = None):
-        self.path = os.path.abspath(path) if path else ""
-        self._items: List[dict] = list(items) if items else []
-        self._done: List[str] = list(done) if done else []
-        # serialises save() so concurrent writers (the CLI loop AND the HTTP worker both call
-        # save() on the same queue) never race the write-temp + os.replace -> WinError 5 on Windows.
+    def __init__(self, path: str = "", items=None, done=None):
+        self.path = str(Path(path).absolute()) if path else ""
+        self._items = copy.deepcopy(items or [])
+        self._revision = 0
         self._save_lock = threading.Lock()
+        for wid in done or []:
+            if not any(item["watch_id"] == wid for item in self._items):
+                self.add(wid)
+            self.mark_done(wid)
 
-    # -- construction -------------------------------------------------------- #
     @classmethod
     def from_path(cls, path: str) -> "WatchQueue":
-        """Load a queue file (empty if missing/invalid)."""
-        q = cls(path=path)
-        if not os.path.isfile(q.path):
-            return q
+        queue = cls(path)
+        if not Path(path).exists():
+            return queue
         try:
-            with open(q.path, "r", encoding="utf-8") as fh:
-                data = json.load(fh)
-        except (OSError, ValueError):
-            return q
-        done = [str(d).strip() for d in data.get("done", []) if str(d).strip()]
-        items = [i for i in data.get("items", []) if isinstance(i, dict)]
-        # de-dup on load, order-preserving
-        seen = set()
-        uniq = []
-        for i in items:
-            wid = str(i.get("watch_id") or "").strip()
-            if not wid or wid in seen:
-                continue
-            seen.add(wid)
-            uniq.append({
-                "watch_id": wid,
-                "source_url": str(i.get("source_url") or wid),
-                "title": i.get("title"),
-                "status": q.DONE if wid in done else q.PENDING,
-            })
-        return cls(path=q.path, items=uniq, done=done)
+            data = json.loads(Path(path).read_text(encoding="utf-8"))
+            if not isinstance(data, dict) or not isinstance(data.get("items"), list):
+                raise ValueError("expected an object with an items list")
+            done = data.get("done", [])
+            if not isinstance(done, list):
+                raise ValueError("done must be a list")
+            queue._revision = int(data.get("revision", 0))
+            seen = set()
+            for record in data["items"]:
+                if not isinstance(record, dict):
+                    raise ValueError("each job must be an object")
+                wid = record.get("watch_id")
+                if not isinstance(wid, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", wid):
+                    raise ValueError("job has an invalid stable id")
+                if wid in seen:
+                    continue
+                seen.add(wid)
+                status = record.get("status", "done" if wid in done else "pending")
+                if status not in cls.STATUSES:
+                    raise ValueError("unknown job status: %r" % status)
+                # Only a job interrupted while running is automatically resumed.
+                if status == "running":
+                    status = "pending"
+                source = record.get("source_url") or wid
+                if not isinstance(source, str):
+                    raise ValueError("source_url must be a string")
+                options = record.get("options", {})
+                if not isinstance(options, dict):
+                    raise ValueError("job options must be an object")
+                queue._items.append(dict(
+                    record, watch_id=wid, source_url=source, status=status,
+                    options=options, title=record.get("title"),
+                ))
+        except (OSError, ValueError, TypeError) as exc:
+            raise QueueError("Cannot load queue %s: %s" % (path, exc)) from exc
+        return queue
 
     @classmethod
     def create(cls, path: str) -> "WatchQueue":
-        """Return an empty queue bound to `path` (no file written until .save())."""
-        return cls(path=path)
+        return cls(path)
 
-    # -- mutation ------------------------------------------------------------- #
-    def add(
-        self,
-        watch_id: str,
-        title: Optional[str] = None,
-        source_url: Optional[str] = None,
-    ) -> bool:
-        """Add a watch id if not already known; returns True iff it was newly added."""
-        wid = (watch_id or "").strip()
-        if not wid or wid in self._done or any(i["watch_id"] == wid for i in self._items):
-            return False
+    def add(self, watch_id: str, title=None, source_url=None, *, retry=False, options=None) -> bool:
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", watch_id):
+            raise ValueError("invalid stable id")
+        previous = next((item for item in self._items if item["watch_id"] == watch_id), None)
+        if previous is not None:
+            if previous["status"] in ("pending", "running") or not retry:
+                return False
+            previous.update(status="pending", error=None, outputs={}, generation=None,
+                            source_url=source_url or previous["source_url"],
+                            options=copy.deepcopy(options if options is not None else previous["options"]),
+                            updated_at=time.time())
+            if title:
+                previous["title"] = title
+            return True
         self._items.append({
-            "watch_id": wid,
-            "source_url": (source_url or wid).strip(),
-            "title": title,
-            "status": self.PENDING,
+            "watch_id": watch_id, "source_url": source_url or watch_id, "title": title,
+            "status": "pending", "error": None, "outputs": {}, "options": copy.deepcopy(options or {}),
+            "attempts": 0, "updated_at": time.time(),
         })
         return True
 
-    def add_all(
-        self,
-        watch_ids: List[str],
-        titles: Optional[List[Optional[str]]] = None,
-        source_urls: Optional[List[Optional[str]]] = None,
-    ) -> int:
-        """Bulk-add; returns count newly added."""
-        titles = list(titles or [])
-        source_urls = list(source_urls or [])
-        n = 0
-        for index, wid in enumerate(watch_ids):
-            title = titles[index] if index < len(titles) else None
-            source_url = source_urls[index] if index < len(source_urls) else None
-            if self.add(wid, title, source_url):
-                n += 1
-        return n
+    def add_all(self, watch_ids, titles=None, source_urls=None, *, retry=False, options=None) -> int:
+        titles, source_urls = list(titles or []), list(source_urls or [])
+        return sum(self.add(
+            wid, titles[index] if index < len(titles) else None,
+            source_urls[index] if index < len(source_urls) else None,
+            retry=retry, options=options,
+        ) for index, wid in enumerate(watch_ids))
+
+    def get(self, watch_id: str) -> dict | None:
+        return next((copy.deepcopy(item) for item in self._items if item["watch_id"] == watch_id), None)
+
+    def copy(self) -> "WatchQueue":
+        result = WatchQueue(self.path, items=self.items)
+        result._revision = self._revision
+        return result
 
     def remove(self, watch_id: str) -> bool:
-        wid = (watch_id or "").strip()
         before = len(self._items)
-        self._items = [i for i in self._items if i["watch_id"] != wid]
+        self._items = [item for item in self._items if item["watch_id"] != watch_id]
         return len(self._items) != before
 
-    def is_complete(self, watch_id: str) -> bool:
-        """True once an item has finished (success or failure)."""
-        wid = (watch_id or "").strip()
-        return wid in self._done
+    def mark_running(self, watch_id: str) -> None:
+        self.finish(watch_id, "running")
+        for item in self._items:
+            if item["watch_id"] == watch_id:
+                item["attempts"] = item.get("attempts", 0) + 1
+
+    def finish(self, watch_id: str, status: str, *, error=None, outputs=None,
+               title=None, generation=None) -> None:
+        if status not in self.STATUSES:
+            raise ValueError("unknown job status")
+        for item in self._items:
+            if item["watch_id"] == watch_id:
+                item.update(status=status, error=error, updated_at=time.time())
+                if outputs is not None:
+                    item["outputs"] = dict(outputs)
+                if title:
+                    item["title"] = title
+                if generation is not None:
+                    item["generation"] = generation
+                return
+        raise QueueError("Unknown job: %s" % watch_id)
 
     def mark_done(self, watch_id: str) -> None:
-        """Record that an item is complete; moves it to _done and stamps its status."""
-        wid = (watch_id or "").strip()
-        if wid not in self._done and any(i["watch_id"] == wid for i in self._items):
-            self._done.append(wid)
-            for i in self._items:
-                if i["watch_id"] == wid and i["status"] == self.PENDING:
-                    i["status"] = self.DONE
+        self.finish(watch_id, "done")
 
-    def done_ids(self) -> List[str]:
-        """Watch ids recorded complete (authoritative on _done; survives reloads)."""
-        return [wid for wid in self._done]
+    def is_complete(self, watch_id: str) -> bool:
+        return watch_id in self.done_ids()
 
-# -- queries -------------------------------------------------------------- #
-    def pending_ids(self) -> List[str]:
-        # _done is authoritative (survives reloads even if a per-item status field is stale)
-        return [i["watch_id"] for i in self._items if i["watch_id"] not in self._done]
+    def done_ids(self) -> list[str]:
+        return [item["watch_id"] for item in self._items if item["status"] in ("done", "skipped")]
 
-    def pending_items(self) -> List[dict]:
-        """Pending records, including the original yt-dlp source."""
-        return [dict(i) for i in self._items if i["watch_id"] not in self._done]
+    def pending_ids(self) -> list[str]:
+        return [item["watch_id"] for item in self.pending_items()]
+
+    def pending_items(self) -> list[dict]:
+        return [copy.deepcopy(item) for item in self._items if item["status"] == "pending"]
 
     def count_pending(self) -> int:
-        # authoritative on _done (matches pending_ids; robust across reloads)
-        return sum(1 for i in self._items if i["watch_id"] not in self._done)
+        return len(self.pending_ids())
 
     @property
-    def items(self):
-        """Raw item records (watch_id, source_url, title, status)."""
-        return self._items
+    def items(self) -> list[dict]:
+        return copy.deepcopy(self._items)
 
-    def remaining_work(self) -> bool:
-        """True when nothing is left to do."""
-        return not self._items or all(i["watch_id"] in self._done for i in self._items)
-
-    # -- persistence ---------------------------------------------------------- #
     def save(self) -> None:
-        """Atomically write the queue file (write-temp + rename).
-
-        Guarded by a per-instance lock so concurrent callers (the CLI loop and the HTTP worker both
-        save the same queue) are serialised -- otherwise two os.replace() calls on the same
-        destination race and Windows raises WinError 5 (access denied).
-        """
-        with self._save_lock:
-            data = {
-                "items": [{
-                    "watch_id": i["watch_id"],
-                    "source_url": i.get("source_url") or i["watch_id"],
-                    "title": i.get("title"),
-                } for i in self._items],
-                "done": list(self._done),
-                "updated_at": time.time(),
-            }
-            if self.path:
-                os.makedirs(os.path.dirname(self.path), exist_ok=True)
-                # unique temp name so the on-disk target is never a half-written file.
-                tmp = "%s.tmp.%d.%s" % (self.path, os.getpid(), uuid.uuid4().hex[:8])
-                with open(tmp, "w", encoding="utf-8") as fh:
-                    json.dump(data, fh, ensure_ascii=False, indent=2)
-                os.replace(tmp, self.path)
+        if not self.path:
+            return
+        path = Path(self.path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with self._save_lock, FileLock(self.path + ".write.lock", timeout=5):
+            try:
+                current = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+                if not isinstance(current, dict):
+                    raise ValueError("queue must be an object")
+            except ValueError as exc:
+                raise QueueError("Queue changed to an invalid document; refusing to overwrite it") from exc
+            if current.get("revision", 0) != self._revision:
+                raise QueueError("Queue changed in another process; refusing to overwrite newer jobs")
+            next_revision = self._revision + 1
+            data = {"items": self.items, "done": self.done_ids(), "revision": next_revision,
+                    "updated_at": time.time()}
+            temporary = path.with_name(path.name + ".tmp-" + uuid.uuid4().hex)
+            try:
+                with temporary.open("w", encoding="utf-8") as file:
+                    json.dump(data, file, ensure_ascii=False, indent=2)
+                    file.flush()
+                    os.fsync(file.fileno())
+                os.replace(temporary, path)
+                self._revision = next_revision
+            finally:
+                temporary.unlink(missing_ok=True)
 
     def __len__(self) -> int:
         return len(self._items)
-
-
-if __name__ == "__main__":
-    from .normalize import make_input
-
-    q = WatchQueue.create(default_queue_path())
-    print("queue path:", q.path)
-    sources = ("dQw4w9WgXcQ", "https://youtu.be/abcDEF12345", "aBcDeFg1234")
-    inputs = [make_input(source) for source in sources]
-    added = q.add_all(
-        [item.watch_id for item in inputs],
-        source_urls=[item.source_url for item in inputs],
-    )
-    print("newly added:", added, "-> pending count:", q.count_pending())
-    assert not q.add("dQw4w9WgXcQ"), "dup should be rejected"
-    q.save()
-    reloaded = WatchQueue.from_path(q.path)
-    assert reloaded.pending_ids() == \
-        ["dQw4w9WgXcQ", "abcDEF12345", "aBcDeFg1234"], reloaded.pending_ids()
-    print("dedup + reload OK:", reloaded.pending_ids())

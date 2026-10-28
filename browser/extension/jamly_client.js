@@ -1,167 +1,71 @@
-/* jamly_client.js — shared HTTP-contract client for the jamly status server.
-
-   Shared by the Tampermonkey userscript (jamly.user.js) and the WebExtension
-   background variant (see manifest.json). Both clients talk to the SAME protocol so a user can
-   enqueue from either UI against one running `python -m jamly.server`. The contract:
-
-       GET  /status   -> JSON snapshot {pending, done, total, current, last_completed}
-       POST /add      body {"inputs":[...], "titles":[...]} -> {queued, newly_added, pending_count}
-       GET  /items    -> {pending:[], done:[]}
-       GET  /healthz  -> {ok:true,...}
-
-   The server streams /status as text/event-stream (one progress JSON object per tick). This module
-   is DOM-free so it can be dropped into any context (userscript, extension popup, or a local test)
-   and validates with `node --check jamly_client.js`.
-*/
 (function (global) {
   "use strict";
 
-  var DEFAULT_ENDPOINT = "/status?once=1";
-  var DEFAULT_ADD = "/add";
-  var DEFAULT_ITEMS = "/items";
-  var DEFAULT_HEALTHZ = "/healthz";
-
-  // --- HTTP fetch with XHR fallback + a bounded read -----------------------------------------
-  function _http(base_url, path, method, body, token) {
-    return new Promise(function (resolve, reject) {
-      try {
-        if (typeof global.fetch === "function") {
-          var headers = {};
-          if (token) headers["Authorization"] = "Bearer " + token;
-          if (body !== undefined && !method.startsWith("GET")) {
-            headers["Content-Type"] = "application/json";
-            headers["Accept"] = "application/json";
-          }
-          var ctrl = new AbortController();
-          var timer = null;
-          try { timer = globalThis.setTimeout(function () { ctrl.abort(); }, 10000); } catch (e) {}
-          global.fetch(base_url + path, { method: method, headers: headers, body: body === undefined ? null : JSON.stringify(body), signal: ctrl.signal })
-            .then(function (r) { return r.text().then(function (t) { return { status: r.status, text: t }; }); })   // await the async body read so 'text' is a real string, not a Promise
-            .then(function (value) {
-              if (timer !== null) globalThis.clearTimeout(timer);
-              resolve(value);
-            }, function (error) {
-              if (timer !== null) globalThis.clearTimeout(timer);
-              reject(error);
-            });
-          return;
-        }
-      } catch (e) { /* fetch unavailable -> use XHR path */ }
-
-      var x = new XMLHttpRequest();
-      x.open(method, base_url + path, true);
-      if (token) x.setRequestHeader("Authorization", "Bearer " + token);
-      if (body !== undefined && !method.startsWith("GET")) {
-        x.setRequestHeader("Content-Type", "application/json");
-        x.setRequestHeader("Accept", "application/json");
-        x.send(body === undefined ? null : JSON.stringify(body));
-      } else {
-        x.send(null);
-      }
-      x.onload = function () { resolve({ status: x.status, text: x.responseText }); };
-      x.onerror = function () { reject(new Error("network error")); };
-    });
-  }
-
-  // The server writes "data: {...}\n\n: tick ...\n\n". Extract the outermost JSON object.
-  function _extract_status(text) {
-    if (!text) return null;
-    var m = text.match(/\{[\s\S]*\}/);
-    if (!m) return null;
-    try {
-      var obj = JSON.parse(m[0]);
-      // only accept the documented progress shape (guards against partial reads)
-      if (obj && typeof obj === "object") return obj;
-    } catch (e) { /* malformed -> null */ }
-    return null;
-  }
-
-  function _base_url(base_url) {
-    return (base_url || "").replace(/\/+$/, "");
-  }
-
-  // Poll GET /status once. Returns the parsed snapshot, or null if nothing usable yet.
-  function pollStatus(base_url, token) {
-    var url = _base_url(base_url);
-    return _http(url, DEFAULT_ENDPOINT, "GET", undefined, token).then(function (resp) {
-      return _extract_status(resp.text);
-    });
-  }
-
-  // POST /add. Returns the parsed response object, or null on failure/empty body.
-  function addInputs(base_url, inputs, titles, token) {
-    var url = _base_url(base_url);
-    var payload = { inputs: Array.isArray(inputs) ? inputs.map(function (i) { return String(i).trim(); }) : [], titles: Array.isArray(titles) ? titles : [] };
-    if (!payload.inputs.length) return Promise.resolve({ error: "provide a non-empty 'inputs' list" });
-    return _http(url, DEFAULT_ADD, "POST", payload, token).then(function (resp) {
-      var parsed = null;
-      try { parsed = JSON.parse(resp.text); } catch (e) { parsed = null; }
-      if (!parsed && resp.status === 207) { // save-error: body is empty but status indicates a warning
-        return { error: "save-error", queued: payload.inputs, status: resp.status };
-      }
-      return parsed || { status: resp.status, text: resp.text };
-    });
-  }
-
-  function getItems(base_url, token) {
-    var url = _base_url(base_url);
-    return _http(url, DEFAULT_ITEMS, "GET", undefined, token).then(function (resp) {
-      try { return JSON.parse(resp.text); } catch (e) { return null; }
-    });
-  }
-
-  function healthz(base_url, token) {
-    var url = _base_url(base_url);
-    return _http(url, DEFAULT_HEALTHZ, "GET", undefined, token).then(function (resp) {
-      try { return JSON.parse(resp.text); } catch (e) { return null; }
-    });
-  }
-
-  // --- local queue-file helpers ------------------------------------------------------------
-  function readQueue(path) {
-    if (!path) return Promise.resolve({});
-    var fs = global.fs;
-    if (fs && typeof fs.existsSync === "function") {
-      try {
-        var txt = fs.readFileSync(path, "utf8");
-        var trimmed = txt.trim();
-        if (!trimmed) return Promise.resolve({});
-        return Promise.resolve(JSON.parse(trimmed));
-      } catch (e) { /* missing/corrupt -> empty queue */ }
+  function baseURL(value) {
+    const url = new URL(value || "http://127.0.0.1:8765");
+    if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.search || url.hash) {
+      throw new Error("Use an http(s) backend base URL without credentials, query, or fragment.");
     }
+    return url.href.replace(/\/+$/, "");
+  }
+
+  async function request(config, path, method = "GET", body) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 10000);
     try {
-      var url = "file:///" + path.replace(/^\/+/, "");
-      return _http(url, "", "GET").then(function (resp) {
-        if (!resp.text || !resp.text.trim()) return {};
-        return JSON.parse(resp.text);
+      const headers = { Accept: "application/json" };
+      if (config.token) headers.Authorization = "Bearer " + config.token;
+      if (body !== undefined) headers["Content-Type"] = "application/json";
+      const response = await global.fetch(baseURL(config.url) + path, {
+        method, headers, body: body === undefined ? undefined : JSON.stringify(body),
+        signal: controller.signal, cache: "no-store",
       });
-    } catch (e) { /* unavailable */ return Promise.resolve({}); }
-  }
-
-  function writeQueue(path, obj) {
-    if (!path) return Promise.resolve();
-    var fs = global.fs;
-    if (fs && typeof fs.writeFileSync === "function") {
+      let payload;
       try {
-        // best-effort atomic-ish: temp file + rename so a crash never leaves a half-written queue
-        var tmp = path + ".tmp-" + Date.now();
-        fs.writeFileSync(tmp, JSON.stringify(obj));
-        try { fs.renameSync(tmp, path); } catch (e) { fs.unlinkSync(tmp); }
-        return Promise.resolve();
-      } catch (e) { /* best-effort; the running server owns durable state */ return Promise.resolve(); }
+        payload = await response.json();
+      } catch (_error) {
+        throw new Error("The backend returned an invalid response.");
+      }
+      if (!response.ok) {
+        throw new Error(payload.error || "Backend HTTP " + response.status);
+      }
+      return payload;
+    } finally {
+      clearTimeout(timer);
     }
-    return Promise.resolve();
   }
 
-  // Expose only what callers need.
-  global.autoConvertClient = {
-    DEFAULT_ENDPOINT: DEFAULT_ENDPOINT,
-    DEFAULT_ADD: DEFAULT_ADD,
-    pollStatus: pollStatus,
-    addInputs: addInputs,
-    getItems: getItems,
-    healthz: healthz,
-    readQueue: readQueue,
-    writeQueue: writeQueue,
+  async function status(config) {
+    const result = await request(config, "/status");
+    if (result.api_version !== 2 || !Array.isArray(result.jobs)) {
+      throw new Error("Backend and browser versions differ; update both Jamly components.");
+    }
+    return result;
+  }
+
+  function outputURL(config, relative) {
+    const base = baseURL(config.url);
+    if (typeof relative !== "string" || !relative.startsWith("/outputs/")) {
+      throw new Error("The backend returned an invalid output URL.");
+    }
+    const url = new URL(base + relative);
+    if (url.origin !== new URL(base).origin ||
+        !url.pathname.startsWith(new URL(base).pathname.replace(/\/$/, "") + "/outputs/")) {
+      throw new Error("The backend returned an invalid output URL.");
+    }
+    return url.href;
+  }
+
+  const client = {
+    baseURL, outputURL, status,
+    health: config => request(config, "/healthz"),
+    addInputs: (config, inputs, replace = false) => request(config, "/add", "POST", {
+      inputs, replace_existing: replace,
+    }),
+    retry: (config, id, replace = false) => request(
+      config, "/retry/" + encodeURIComponent(id), "POST", { replace_existing: replace }
+    ),
   };
-})(typeof self !== "undefined" ? self : this);
+  global.jamlyClient = client;
+  if (typeof module !== "undefined" && module.exports) module.exports = client;
+})(globalThis);

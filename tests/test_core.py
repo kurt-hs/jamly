@@ -1,271 +1,77 @@
-"""Unit tests for core.py command builders + pure helpers (no network/subprocess)."""
 import os
 import sys
+import threading
+import time
 import unittest
+from unittest.mock import patch
+
+from jamly import core
 
 
-# src-layout: make the ``jamly`` package importable for both `pytest` and
-# `python -m unittest discover -s tests` without an editable install. Inserted before any
-# absolute-package import so it always runs first.
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
-import jamly.core as core  # noqa: E402 (module alias for core.X attribute access)
-from jamly.core import (  # noqa: E402
-    build_htdemucs_four_stems_cmd,
-    build_ffmpeg_mix_cmd, build_ytdlp_extract_cmd, ensure_output_dir,
-    sanitize_filename, run, which, _abs, _exists_exe,
-)
+class CommandTests(unittest.TestCase):
+    def test_download_keeps_flags_before_leading_dash_source(self):
+        with patch("jamly.bootstrap.ytdlp_options", return_value=["--ignore-config"]):
+            command = core.build_ytdlp_extract_cmd(
+                [sys.executable, "-m", "yt_dlp"], "-abcdefghij",
+                "audio.%(ext)s", "tools",
+            )
+        self.assertEqual(command[:3], [sys.executable, "-m", "yt_dlp"])
+        self.assertEqual(command[-2:], ["--", "-abcdefghij"])
+        self.assertEqual(command[command.index("--ffmpeg-location") + 1], "tools")
+        self.assertEqual(command[command.index("-f") + 1], "bestaudio/best")
+        self.assertLess(command.index("-o"), command.index("--"))
+
+    def test_encoder_uses_same_bitrate_for_each_output(self):
+        for stem in ("drums", "no_drums"):
+            command = core.build_stem_encode_cmd("ffmpeg", stem + ".wav", stem + ".mp3")
+            self.assertEqual(command[command.index("-c:a") + 1], "libmp3lame")
+            self.assertEqual(command[command.index("-b:a") + 1], "320k")
+        with self.assertRaises(ValueError):
+            core.build_stem_encode_cmd("ffmpeg", "audio.wav", "audio.bad", "bad")
 
 
-class YtdlpCmdTests(unittest.TestCase):
-    def test_with_custom_ffmpeg_location(self):
-        cmd = build_ytdlp_extract_cmd("yt-dlp.exe", "https://youtu.be/dQw4w9WgXcQ",
-                                       ffmpeg_dir=r"C:\f\ffmpeg")
-        self.assertEqual(cmd[0], "yt-dlp.exe")
-        self.assertIn("--extract-audio", cmd)
-        self.assertEqual(cmd[cmd.index("-o") + 1], "%(title)s.%(ext)s")
-        self.assertEqual(cmd[-1], "https://youtu.be/dQw4w9WgXcQ")
-        # --ffmpeg-location must be present so the mux step has BOTH ffmpeg + ffprobe
-        self.assertIn("C:\\f\\ffmpeg", cmd)
-        # portable default suppresses subtitle writes on every host (the option yt-dlp accepts)
-        self.assertIn("--no-write-subs", cmd)
+class ProcessTests(unittest.TestCase):
+    def test_capture_and_stream(self):
+        result = core.run([sys.executable, "-c", "print('captured')"])
+        self.assertTrue(result.ok)
+        self.assertEqual(result.stdout.strip(), "captured")
+        lines = []
+        result = core.run([sys.executable, "-c", "print('streamed')"], stream=True,
+                          on_line=lines.append)
+        self.assertTrue(result.ok)
+        self.assertEqual(lines, ["streamed\n"])
+        self.assertEqual(result.stdout, "")
 
-    def test_without_ffmpeg_location(self):
-        cmd = build_ytdlp_extract_cmd("yt-dlp.exe", "https://youtu.be/dQw4w9WgXcQ")
-        self.assertTrue(cmd[0].endswith("yt-dlp.exe"))
-        self.assertIn("--audio-format", cmd)
-        self.assertNotIn("--ffmpeg-location", cmd)
-        # portable default suppresses subtitle writes (the option yt-dlp accepts)
-        self.assertIn("--no-write-subs", cmd)
+    def test_failure_retains_diagnostic(self):
+        with self.assertRaisesRegex(RuntimeError, "failure-detail"):
+            core.run([sys.executable, "-c",
+                      "import sys; print('failure-detail',file=sys.stderr);sys.exit(3)"], check=True)
+        self.assertFalse(core.run(["/no/such/jamly-tool"]).ok)
 
-    def test_suppress_subs_default_and_override(self):
-        # default: skip subtitle writes for this audio-only pipeline on every host
-        cmd = build_ytdlp_extract_cmd("yt-dlp.exe", "https://youtu.be/dQw4w9WgXcQ")
-        self.assertIn("--no-write-subs", cmd)
-        # a specific build that rejects the flag -> opt out explicitly
-        cmd = build_ytdlp_extract_cmd("yt-dlp.exe", "https://youtu.be/dQw4w9WgXcQ", suppress_subs=False)
-        self.assertNotIn("--no-write-subs", cmd)
-
-    def test_suppress_subs_env_override_reaches_builder(self):
-        # JAMLY_SUPPRESS_SUBS=0 must actually reach the builder (run.build_download_cmd used
-        # to short-circuit with 'suppress_subs or True', which made this override a no-op).
-        import os
-        import jamly.run as run_mod
-        old = os.environ.pop("JAMLY_SUPPRESS_SUBS", None)
+    def test_cancellation_reaps_the_command(self):
+        stop = threading.Event()
+        timer = threading.Timer(0.2, stop.set)
+        timer.start()
+        start = time.monotonic()
         try:
-            os.environ["JAMLY_SUPPRESS_SUBS"] = "0"
-            self.assertFalse(run_mod._resolve_suppress_subs())   # resolves to False
-            cmd = build_ytdlp_extract_cmd("yt-dlp.exe", "https://youtu.be/dQw4w9WgXcQ",
-                                          suppress_subs=run_mod._resolve_suppress_subs())
-            self.assertNotIn("--no-write-subs", cmd)
+            with self.assertRaises(InterruptedError):
+                core.run([sys.executable, "-c", "import time;time.sleep(60)"], cancel_event=stop)
         finally:
-            if old is not None:
-                os.environ["JAMLY_SUPPRESS_SUBS"] = old
+            timer.cancel()
+        self.assertLess(time.monotonic() - start, 5)
 
-    def test_leading_dash_source_is_not_an_option(self):
-        # a bare watch id can start with '-' (base64url); yt-dlp must treat it as the positional
-        # URL/id arg, not a flag. '--' ends option parsing so '-bcdefghij' is not parsed as '-b ...'.
-        cmd = build_ytdlp_extract_cmd("yt-dlp.exe", "-bcdefghijX")
-        self.assertEqual(cmd[0], "yt-dlp.exe")
-        self.assertIn("--", cmd)
-        # the source sits AFTER the '--' terminator, so it is never read as an option
-        self.assertEqual(cmd[cmd.index("--") + 1], "-bcdefghijX")
-        # normal URL sources are unaffected (no '--' injected)
-        plain = build_ytdlp_extract_cmd("yt-dlp.exe", "https://youtu.be/dQw4w9WgXcQ")
-        self.assertNotIn("--", plain)
-        self.assertEqual(plain[-1], "https://youtu.be/dQw4w9WgXcQ")
+    def test_timeout_reaps_the_command(self):
+        with self.assertRaises(TimeoutError):
+            core.run([sys.executable, "-c", "import time;time.sleep(60)"], timeout=0.2)
 
 
-class DemucsCmdTests(unittest.TestCase):
-    """Four-stem separation command for the portable torch-based `demucs` PyPI CLI."""
+class FilenameTests(unittest.TestCase):
+    def test_unsafe_names_and_reserved_devices(self):
+        self.assertEqual(core.sanitize_filename('My Title/<year>: "test".mp4'), "My Title-year test.mp4")
+        self.assertEqual(core.sanitize_filename("CON"), "_CON")
+        self.assertEqual(core.sanitize_filename("a\0b"), "ab")
+        self.assertNotIn(os.sep, core.sanitize_filename("a/b\\c"))
 
-    def test_four_stems_args(self):
-        cmd = build_htdemucs_four_stems_cmd(python_exe="python.exe", input_audio="in.wav", workdir="w")
-        self.assertIn("htdemucs", cmd)         # -n/--name selects the model
-        # demucs takes audio files as POSITIONAL arguments; there is no --audio option
-        self.assertNotIn("--audio", cmd)
-        self.assertNotIn("separate", cmd)
-        self.assertEqual(cmd[-1], "in.wav")
-        self.assertEqual(cmd[cmd.index("--out") + 1], "w")   # --out sets the output dir
-        # portable-only: no per-device override flag (auto on every host), and NO --four-stems flag
-        self.assertNotIn("--device", cmd)
-        self.assertNotIn("--four-stems", cmd)
-
-    def test_no_repo_means_official_model(self):
-        # portable-only: an empty repo means the official PyPI model, so no --repo flag is emitted
-        cmd = build_htdemucs_four_stems_cmd(python_exe="python.exe", input_audio="in.wav", workdir="w")
-        self.assertNotIn("--repo", cmd)
-
-    def test_threads_override(self):
-        cmd = build_htdemucs_four_stems_cmd(python_exe="python.exe", input_audio="in.wav", workdir="w", threads=4)
-        self.assertEqual(cmd[cmd.index("-j") + 1], "4")
-
-
-class FfmpegCmdTests(unittest.TestCase):
-    def test_mix_non_drum_stems(self):
-        cmd = build_ffmpeg_mix_cmd("ffmpeg.exe", "bass.wav", "other.wav", "vocals.wav", "out.wav")
-        self.assertEqual(cmd[0], "ffmpeg.exe")
-        self.assertIn("-i", cmd)
-        self.assertTrue(cmd.count("-i"), 3)                 # three inputs
-        self.assertIn("-filter_complex", cmd)               # portable amix filter graph
-        self.assertIn("amix=inputs=3", cmd[cmd.index("-filter_complex") + 1])
-        self.assertNotIn("-mixer_channels", cmd)            # rejected by newer ffmpeg (exit 8)
-        # -map must point at the amix filter output, not the raw first input (0? kept only bass)
-        self.assertEqual(cmd[cmd.index("-map") + 1], "[mix]")
-        self.assertIn("normalize=0", cmd[cmd.index("-filter_complex") + 1])
-        self.assertTrue(cmd[-1].endswith("out.wav"))
-
-    def test_float_wav_output(self):
-        cmd = build_ffmpeg_mix_cmd("ffmpeg.exe", "bass.wav", "other.wav", "vocals.wav", "out.wav")
-        self.assertEqual(cmd[cmd.index("-c:a") + 1], "pcm_f32le")
-
-
-class PureHelperTests(unittest.TestCase):
-    def test_abs_expands_user_and_vars(self):
-        a = _abs("~/../foo/../bar")
-        self.assertTrue(a.endswith(os.path.join("bar")))
-
-    def test_exists_exe_false_for_missing(self):
-        self.assertFalse(_exists_exe("/no/such/path/here"))
-
-    def test_which_returns_none_for_bogus(self):
-        # a name guaranteed not on PATH in CI; allow it to be None (not raise)
-        r = which("definitely-not-a-real-binary-xyz")
-        self.assertIsNone(r)
-
-    def test_sanitize_filename_windows_unsafe_chars(self):
-        raw = 'My Title/<year>: "test".mp4'
-        s = sanitize_filename(raw)
-        for bad in ['/', '\\', ':', '*', '?', '"', '<', '>', '|']:
-            self.assertNotIn(bad, s)
-        # slashes removed -> hyphen; ':' and '"' stripped
-        # '/' -> '-', ':' and '"' stripped; '<year>' angle-brackets also removed (safe)
-        self.assertEqual(s, 'My Title-year test.mp4')
-
-    def test_sanitize_allowed_set(self):
-        s = sanitize_filename("a b c", allowed="abcdefghijklmnopqrstuvwxyz")
-        self.assertEqual(s, "abc")
-
-    def test_sanitize_caps_utf8_bytes(self):
-        self.assertLessEqual(len(sanitize_filename("\U0001f941" * 100).encode("utf-8")), 180)
-
-    def test_ensure_output_dir_creates_and_returns_abs(self):
-        d = ensure_output_dir(os.path.join(os.getcwd(), "_t_out"))
-        self.assertTrue(os.path.isdir(d))
-        os.rmdir(_abs(d))
-
-
-class RunTests(unittest.TestCase):
-    def _python_ok(self):
-        # cross-platform: interpreter running a trivial script always exists here
-        return run([sys.executable, "-c", "print(1)"])
-
-    def test_run_success(self):
-        r = self._python_ok()
-        self.assertEqual(r.returncode, 0)
-        self.assertIn("1\n", r.stdout)
-
-    def test_run_file_not_found(self):
-        r = run(["/no/such/binary-xyz.exe"])
-        self.assertNotEqual(r.returncode, 0)
-        self.assertIn("NOT FOUND", r.stderr)
-
-    def test_run_streams_live_and_buffers_empty(self):
-        # Live mode writes output to the terminal (observed via on_line) and captures nothing into
-        # text buffers; RunResult.stdout must stay a plain empty string, never the live pipe handle.
-        seen = []
-        script = "import sys; print('a'); print('[download] 95% (1/2)')"
-        r = run([sys.executable, "-c", script], stream=True, on_line=seen.append)
-        self.assertEqual(seen, ["a\n", "[download] 95% (1/2)\n"])   # one call per decoded line
-        self.assertEqual(r.returncode, 0)
-        self.assertIsInstance(r.stdout, str) and self.assertEqual(r.stdout, "")
-        self.assertIsInstance(r.stderr, str) and self.assertEqual(r.stderr, "")
-
-    def test_run_stream_check_raises_on_failure(self):
-        # check=True + non-zero exit must raise even in live-stream mode (output already streamed).
-        raised = False
-        try:
-            run([sys.executable, "-c", "import sys; sys.exit(3)"], stream=True, check=True)
-        except RuntimeError as exc:
-            raised = True
-            self.assertIn("exit 3", str(exc))
-        self.assertTrue(raised, "streamed failing command with check=True must raise")
-
-    def test_run_stream_on_line_fires_per_line(self):
-        seen = []
-        run([sys.executable, "-c", "import sys; print('a'); print('b')"],
-             stream=True, on_line=seen.append)
-        self.assertEqual(seen, ["a\n", "b\n"])   # one call per decoded line
-
-    def test_run_stream_returns_empty_string_buffers(self):
-        r = run([sys.executable, "-c", "print('hi')"], stream=True)
-        self.assertIsInstance(r.stdout, str) and self.assertEqual(r.stdout, "")
-        self.assertIsInstance(r.stderr, str) and self.assertEqual(r.stderr, "")
-        self.assertEqual(r.returncode, 0)
-
-    def test_run_non_stream_still_captures(self):
-        # Non-streaming runs (the unchanged default contract) capture into buffers.
-        r = run([sys.executable, "-c", "import sys; print('captured')"], capture=True)
-        self.assertEqual(r.returncode, 0)
-        self.assertIn("captured\n", r.stdout)
-
-    def test_run_stream_live_script(self):
-        # stream=True runs a real interpreter subprocess and pumps its stdout/stderr to the terminal.
-        seen = []
-        script = "import sys; print('a'); print('[download] 95% (1/2)')"
-        r = run([sys.executable, "-c", script], stream=True, on_line=seen.append)
-        self.assertEqual(seen, ["a\n", "[download] 95% (1/2)\n"])
-        self.assertEqual(r.returncode, 0)
-        # live mode captures nothing into text buffers; RunResult stays a plain empty-string view.
-        self.assertIsInstance(r.stdout, str) and self.assertEqual(r.stdout, "")
-        self.assertIsInstance(r.stderr, str) and self.assertEqual(r.stderr, "")
-
-
-class AudioFormatCmdTests(unittest.TestCase):
-    """build_stem_encode_cmd: lossy re-encode vs raw verbatim-copy decision."""
-
-    def test_mp3_builds_lame_320k_reencode(self):
-        cmd = core.build_stem_encode_cmd("ffmpeg.exe", "in.wav", "out.mp3", fmt="mp3")
-        self.assertIsNotNone(cmd)
-        self.assertEqual(cmd[0], "ffmpeg.exe")
-        # libmp3lame V0 320kbps -- the lossy default encoder settings
-        self.assertIn("-c:a", cmd) and self.assertEqual(cmd[cmd.index("-c:a") + 1], "libmp3lame")
-        self.assertIn("-b:a", cmd) and self.assertEqual(cmd[cmd.index("-b:a") + 1], "320k")
-        # input is abs-pathed; output path passed through verbatim (last arg)
-        self.assertTrue(cmd[cmd.index("-i") + 1].endswith(os.path.abspath("in.wav")))
-        self.assertEqual(cmd[-1], "out.mp3")
-
-    def test_wav_returns_none_for_verbatim_copy(self):
-        # raw WAV needs no ffmpeg re-encode -> caller copies the stem verbatim instead
-        self.assertIsNone(core.build_stem_encode_cmd("ffmpeg.exe", "in.wav", "out.wav", fmt="wav"))
-
-    def test_unknown_format_is_treated_as_raw(self):
-        # defensive: an unrecognised format must not invent encoder flags -> None (verbatim copy)
-        self.assertIsNone(core.build_stem_encode_cmd("ffmpeg.exe", "in.wav", "out.aac", fmt="aac"))
-
-    def test_default_arg_is_mp3_reencode(self):
-        # default parameter is the lossy format, so omitting it still re-encodes
-        cmd = core.build_stem_encode_cmd("ffmpeg.exe", "in.wav", "out.mp3")
-        self.assertIsNotNone(cmd)
-        self.assertIn("libmp3lame", cmd)
-
-
-class DetectEngineTests(unittest.TestCase):
-    """detect_engine() availability check for the single separation engine (no heavy imports)."""
-
-    def test_returns_htdemucs_when_demucs_installed(self):
-        import unittest.mock as mock
-        with mock.patch.object(core, "_module_available", return_value=True) as available:
-            self.assertEqual(core.detect_engine(), core.ENGINE_HTDEMUCS)
-            available.assert_called_once_with("demucs")
-
-    def test_returns_none_when_demucs_missing(self):
-        import unittest.mock as mock
-        with mock.patch.object(core, "_module_available", return_value=False):
-            self.assertIsNone(core.detect_engine())
-
-    def test_no_fallback_to_other_engines(self):
-        # portable-only: a missing demucs package is not treated as another engine being usable
-        import unittest.mock as mock
-        with mock.patch.object(core, "_module_available", return_value=False) as available:
-            self.assertIsNone(core.detect_engine())
-            available.assert_called_once_with("demucs")
+    def test_unicode_byte_budget_and_empty_name(self):
+        self.assertLessEqual(len(core.sanitize_filename("\U0001f941" * 100).encode()), 180)
+        self.assertEqual(core.sanitize_filename("..."), "untitled")

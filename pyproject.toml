@@ -1,13 +1,11 @@
-# jamly — a small, portable audio-separation CLI + server.
-# src-layout: all application code lives under ``src/jamly/`` so the package
-# can be installed (``pip install -e .``) or run directly from a checkout.
+# Jamly CLI, backend, and packaged browser integration.
 [build-system]
 requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "jamly-audio-sep"
-version = "0.1.0"
+version = "0.2.0"
 description = "Download yt-dlp audio and create drums and no-drums tracks with Demucs."
 readme = "README.md"
 requires-python = ">=3.11,<3.13"
@@ -16,16 +14,18 @@ license-files = ["LICENSE.md"]
 keywords = ["audio", "demucs", "stem-separation", "yt-dlp"]
 dependencies = [
     "demucs>=4.1,<5",
+    "filelock>=3.16",
     "numpy>=1.26,<2",
-    "yt-dlp[default]>=2026.10.26",
+    "platformdirs>=4",
+    "soundfile>=0.13",
+    "yt-dlp[default,deno]>=2026.10.26",
 ]
 
 [project.scripts]
 jamly = "jamly.run:main"
 jamly-server = "jamly.server:main"
-
-[project.optional-dependencies]
-test = ["pytest>=8"]
+jamly-doctor = "jamly.bootstrap:main"
+jamly-service = "jamly.service:main"
 
 [dependency-groups]
 dev = ["pytest>=8", "ruff>=0.14"]
@@ -33,12 +33,18 @@ dev = ["pytest>=8", "ruff>=0.14"]
 [tool.setuptools.packages.find]
 where = ["src"]
 
-# Make the package importable (bare ``import jamly.*``) when running tests
-# or scripts straight from a checkout without an editable install.
-# Pin ruff's ruleset so VS Code (@sumneko/ruff-languageserver) uses the SAME
-# checks as the anaconda `ruff` binary — no more editor-vs-CLI disagreement.
-# Keep E4/E7/E9/F (the real bug class, e.g. undefined names) ON; drop only the
-# line-length/whitespace nits that clutter the editor but aren't bugs.
+[tool.setuptools.data-files]
+"share/jamly/browser/extension" = [
+    "browser/extension/manifest.json",
+    "browser/extension/jamly_client.js",
+    "browser/extension/jamly_extension_bg.js",
+    "browser/extension/jamly_options.html",
+    "browser/extension/jamly_options.js",
+    "browser/extension/jamly_popup.html",
+    "browser/extension/jamly_popup.js",
+]
+"share/jamly/browser/userscripts" = ["browser/userscripts/jamly.user.js"]
+
 [tool.ruff]
 line-length = 88
 
@@ -47,5 +53,4 @@ select = ["E4", "E7", "E9", "F"]
 ignore = ["E501", "W291", "W293"]
 
 [tool.pytest.ini_options]
-pythonpath = ["src"]
 testpaths = ["tests"]

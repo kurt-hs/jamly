@@ -1,21 +1,22 @@
 {
   "manifest_version": 3,
-  "name": "jamly status",
-  "version": "1.0.0",
-  "description": "Enqueue audio-separation jobs from an always-on background page; polls the jamly /status server for live progress.",
+  "name": "Jamly",
+  "version": "0.2.0",
+  "minimum_chrome_version": "120",
+  "description": "Create drums and drumless tracks using a paired local Jamly backend.",
   "author": "jamly",
   "background": {
     "service_worker": "jamly_extension_bg.js"
   },
   "action": {
     "default_popup": "jamly_popup.html",
-    "default_title": "jamly status"
+    "default_title": "Jamly"
   },
   "options_ui": {
     "page": "jamly_options.html",
     "open_in_tab": true
   },
-  "permissions": ["storage"],
+  "permissions": ["storage", "activeTab", "downloads"],
   "host_permissions": [
     "http://127.0.0.1/*",
     "http://localhost/*"

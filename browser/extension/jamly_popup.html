@@ -1,46 +1,32 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-<meta charset="utf-8" />
-<style>
-  body { width:300px; margin:0; font:13px/1.5 -apple-system,Segoe UI,Roboto,sans-serif; background:#1e1e1e; color:#e6e6e6; }
-  h2 { font-size:14px; margin:8px;color:#4fc3f7; }
-  #enqueue { display:flex; flex-direction:column; gap:5px;padding:8px;border-bottom:1px solid #333; }
-  #inputs { width:100%; box-sizing:border-box;height:60px; padding:6px; border-radius:4px;border:1px solid #555;background:#252526;color:#fff;font-family:monospace;font-size:12px; }
-  #titles { width:100%; box-sizing:border-box;height:28px; padding:4px; border-radius:4px;border:1px solid #555;background:#252526;color:#fff;font-size:11px; }
-  button { padding:6px;border:none;border-radius:4px;background:#0e7eea;color:#fff;cursor:pointer;font-weight:600; }
-  button:hover { background:#0957b5; }
-  #counts { font-size:11px;color:#888;margin-left:6px;white-space:nowrap; }
-  .badge { display:inline-flex;align-items:center;gap:4px;font-weight:600;font-size:11px;padding:1px 5px;border-radius:3px;background:#303032;color:#e6e6e6;min-width:78px; }
-  .badge .lbl { text-transform:uppercase;letter-spacing:.4px; }
-  #status { min-height:1.5em;padding-left:6px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis; }
-  #current-title { padding-left:6px;word-break:break-all;color:#fff;font-family:monospace;font-size:11px; }
-  ul { list-style:none;margin:6px;padding:0;max-height:240px;overflow:auto; }
-  li { display:flex;align-items:center;gap:6px;padding:3px 6px;border-bottom:1px solid #333; }
-  .badge.done   { color:#7ee787; background:#1c3a22; }
-  .badge.error  { color:#ff9d9d; background:#3a1c1c; }
-  .badge.pending{ color:#bbb;    background:#2a2a2e; }
-  .badge.download{ color:#79c0ff; background:#142536; }
-  .badge.separate{ color:#d2a8ff; background:#2a1f3a; }
-  .badge.mix    { color:#e3b370; background:#3a2f1c; }
-  .current li b { font-weight:600;color:#fff; }
-  .idle #status { color:#888;font-weight:400; }
-  a { color:inherit;text-decoration:none; } a:hover { text-decoration:underline; }
-</style>
+  <meta charset="utf-8">
+  <title>Jamly</title>
+  <style>
+    body { width: 360px; margin: 12px; font: 14px/1.4 system-ui, sans-serif; color: #eee; background: #202124; }
+    h1 { font-size: 18px; margin: 0 0 8px; }
+    textarea { box-sizing: border-box; width: 100%; min-height: 64px; margin: 8px 0; }
+    button { cursor: pointer; margin: 3px 4px 3px 0; }
+    #connection, #counts { font-size: 12px; }
+    #error, .error { color: #ffaaaa; white-space: pre-wrap; overflow-wrap: anywhere; }
+    #jobs { list-style: none; padding: 0; max-height: 340px; overflow: auto; }
+    #jobs li { padding: 8px 0; border-top: 1px solid #555; overflow-wrap: anywhere; }
+    .job-status { font-weight: bold; }
+  </style>
 </head>
 <body>
-<h2>jamly <span id="counts"></span></h2>
-<div id="enqueue">
-  <input id="inputs" placeholder="YouTube URLs, one per line (e.g. https://youtu.be/abc)" />
-  <input id="titles" placeholder="optional titles (one per line) — leave blank to auto-title from the URL" />
-  <div style="display:flex;justify-content:space-between;align-items:center">
-    <button id="submit">Enqueue</button>
-    <span id="status"></span>
-  </div>
-</div>
-<div id="current-title"></div>
-<ul id="list"></ul>
-
-<script src="jamly_popup.js"></script>
+  <h1>Jamly</h1>
+  <div id="connection" role="status">Connecting...</div>
+  <button id="options">Pair / settings</button>
+  <button id="current">Use current page</button>
+  <label for="inputs">Individual media URLs or YouTube ids, one per line</label>
+  <textarea id="inputs"></textarea>
+  <label><input id="replace" type="checkbox"> Replace existing exports</label>
+  <button id="submit">Split drums</button>
+  <div id="error" role="alert"></div>
+  <div id="counts"></div>
+  <ul id="jobs"></ul>
+  <script src="jamly_popup.js"></script>
 </body>
 </html>

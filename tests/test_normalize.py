@@ -1,14 +1,8 @@
 """Unit tests for normalize.py -- pure-Python, no network/subprocess."""
-import os
-import sys
 import unittest
 
 
-# src-layout: make the ``jamly`` package importable for both `pytest` and
-# `python -m unittest discover -s tests` without an editable install. Inserted before any
-# absolute-package import so it always runs first.
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
-from jamly.normalize import (  # noqa: E402
+from jamly.normalize import (
     InputError, WATCH_ID_RE, extract_watch_id,
     make_input, normalize_inputs, normalize_inputs_full,
 )
@@ -41,13 +35,19 @@ class ExtractTests(unittest.TestCase):
         self._ok("http://youtu.be/DQW4W9WGXCQ", "DQW4W9WGXCQ")
 
     def test_host_only_no_scheme(self):
-        # plan lists `youtube.com/watch?v=ID` as an accepted partial path form
         self._ok("youtube.com/watch?v=dQw4w9WgXcQ", "dQw4w9WgXcQ")
         self._ok("youtube.com/shorts/DQW4W9WGXCQ", "DQW4W9WGXCQ")
 
     def test_shorts_and_embed(self):
         self._ok("https://www.youtube.com/shorts/dQw4w9WgXcQ", "dQw4w9WgXcQ")
         self._ok("https://www.youtube.com/embed/dQw4w9WgXcQ", "dQw4w9WgXcQ")
+
+    def test_completed_live_urls_use_the_same_video_id(self):
+        self._ok("https://www.youtube.com/live/dQw4w9WgXcQ", "dQw4w9WgXcQ")
+
+    def test_non_youtube_hosts_cannot_borrow_a_youtube_id(self):
+        with self.assertRaises(InputError):
+            extract_watch_id("https://youtube.com.example.test/watch?v=dQw4w9WgXcQ")
 
     def test_whitespace_and_trailing(self):
         self._ok("  https://youtu.be/dQw4w9WgXcQ  \n", "dQw4w9WgXcQ")
@@ -62,7 +62,7 @@ class NormalizeInputsTests(unittest.TestCase):
     def test_dedupe_preserves_order(self):
         ids = normalize_inputs([
             "dQw4w9WgXcQ",
-            "https://youtu.be/dQw4w9WgXcQ",          # dup of first (case-insensitive)
+            "https://youtu.be/dQw4w9WgXcQ",          # same case-sensitive video id
             None,                                      # skipped
             "",                                        # skipped
             "  youtube.com/shorts/DQW4W9WGXCQ  ",     # second unique id
