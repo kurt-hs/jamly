@@ -124,7 +124,7 @@ def notices(staging: Path) -> list[dict]:
         target.mkdir(exist_ok=True)
         (target / "METADATA.txt").write_text(distribution.read_text("METADATA") or "", encoding="utf-8")
         for file in distribution.files or []:
-            if (any(word in file.name.lower() for word in ("license", "copying", "notice"))
+            if (any(word in file.name.lower() for word in ("license", "copying", "notice", "copyright"))
                     and ".." not in file.parts):
                 source = Path(distribution.locate_file(file))
                 if source.is_file():
@@ -144,10 +144,13 @@ def notices(staging: Path) -> list[dict]:
         with tarfile.open(archive) as source:
             for entry in source:
                 relative = Path(entry.name)
-                if (entry.isfile() and len(relative.parts) == 2
-                        and any(word in relative.name.lower() for word in ("license", "copying", "notice"))):
+                if (entry.isfile() and len(relative.parts) >= 2 and ".." not in relative.parts
+                        and not relative.is_absolute()
+                        and any(word in relative.name.lower() for word in ("license", "copying", "notice", "copyright"))):
+                    copied = target.joinpath(*relative.parts[1:])
+                    copied.parent.mkdir(parents=True, exist_ok=True)
                     with source.extractfile(entry) as file:
-                        (target / relative.name).write_bytes(file.read())
+                        copied.write_bytes(file.read())
         if not any(target.iterdir()):
             raise RuntimeError("Missing native redistribution notices for " + name)
     shutil.copyfile(ROOT / "build" / "native-audio" / "built.json", destination / "native-build.json")
