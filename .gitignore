@@ -14,3 +14,6 @@ Thumbs.db
 *.egg-info/
 *.log
 jamly_queue.json
+build/
+dist/
+*.lock.tmp

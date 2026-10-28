@@ -4,23 +4,65 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
     strategy:
+      fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12"]
-
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python: ["3.12"]
+        include:
+          - os: ubuntu-latest
+            python: "3.11"
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v7
         with:
-          python-version: ${{ matrix.python-version }}
-
-      - run: uv lock --check
-      - run: uv run --no-project --python ${{ matrix.python-version }} --with pytest python -m pytest -q
-      - run: uv run --no-project --python ${{ matrix.python-version }} --with pytest python -m unittest discover -s tests
-      - run: uvx ruff check .
-      - run: node browser/extension/jamly_client_test.js
-      - run: node browser/extension/jamly_extension_bg_test.js
+          version: "0.11.7"
+          python-version: ${{ matrix.python }}
+          enable-cache: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - name: Install ffmpeg on Linux
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y ffmpeg
+      - name: Install ffmpeg on macOS
+        if: runner.os == 'macOS'
+        run: command -v ffmpeg || brew install ffmpeg
+      - name: Install ffmpeg on Windows
+        if: runner.os == 'Windows'
+        uses: FedericoCarboni/setup-ffmpeg@36c6454b5a2348e7794ba2d82a21506605921e3d
+      - run: uv sync --locked
+      - run: uv run --locked jamly-doctor
+      - run: uv run --locked pytest -q
+      - run: uv run --locked python -m unittest discover -s tests
+      - run: uv run --locked ruff check .
+      - run: node --test browser/extension/jamly_client_test.js browser/extension/jamly_extension_bg_test.js browser/extension/jamly_popup_test.js
+      - name: Validate PowerShell wrapper syntax
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Get-ChildItem scripts/windows/*.ps1 | ForEach-Object {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$errors) | Out-Null
+            if ($errors.Count) { throw ($errors | Out-String) }
+          }
       - run: uv build
+      - name: Exercise the built package, not the editable checkout
+        run: |
+          uv pip install --no-deps --force-reinstall dist/*.whl
+          uv run --no-sync jamly-doctor
+          uv run --no-sync jamly-service browser --state-dir "${{ runner.temp }}/jamly-smoke"
+          uv run --no-sync python -c "import jamly; assert 'site-packages' in jamly.__file__"
+      - name: Real generated-audio pipeline
+        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
+        run: uv run --no-sync python -m unittest discover -s tests -p integration_pipeline.py

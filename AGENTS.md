@@ -1,64 +1,14 @@
-# AGENTS.md — contributing & coding conventions
+# Contributing
 
-Guidance for anyone adding or changing code in this repo. Keep it about *how to work here*, not the design rationale (that lives in `DESIGN.md`) or usage (`README.md`).
-
-## Layout (structural only — not a checklist)
-
-All application code is a proper setuptools src-layout package under `src/jamly/`; tests are in `tests/`. The browser extension ships separately as static assets (`browser/extension/` + the standalone Tampermonkey panel), so keep those files out of `src/`/`tests/` and never import them from the suite.
-
-Do not maintain an exact list of member names here — it goes stale as modules are added or removed; refer to the package via its real path (`src/jamly`, see Imports) rather than by enumerating members.
-
-## Imports — do not use bare-sibling imports
-
-Every import across modules inside the package must be **relative** or **absolute**; never a
-bare sibling name that only works when the project root is on `sys.path`:
-
-- Within a module: `from .core import ...`, `import .queue as q`.
-- Across modules (e.g. from a test): `from jamly.core import ...`,
-  `mock.patch("jamly.core.detect_engine", ...)`.
-
-Reason: tests load the package via its real path (`src/`), so bare sibling imports break under
-a proper loader. The suite is green under both runners only when this holds (see Testing).
-
-## Do not shadow stdlib — in particular `queue`
-
-This box's Python ships a stdlib `queue` that **lacks the CPython watch_queue extension**
-(no `WatchQueue`). Code must therefore import our own implementation directly:
-
-```python
-from jamly.watch_queue import WatchQueue, default_queue_path
-```
-
-Never name a module `queue.py`, and never rely on repo-root shadowing to make `from queue import` work.
-
-> This file is deliberately free of hard-coded counts (pass numbers, module lists). Those drift the moment something changes; replace them with behavior-based checks instead. See Testing rules below for how.
-
-## Testing rules (run BOTH runners)
-
-The suite must pass under **both** of these; do not let it only work under one:
-
-```bash
-python -m pytest                    # pythonpath=["src"] from pyproject.toml
-python -m unittest discover -s tests  # each test file shims src onto sys.path
-```
-
-- Every test passes under both runners without skips. If either runner reports failures or skips,
-  fix the cause rather than changing an expected count.
-- Tests must be **portable across machines**, never dependent on this box's Python or PATH. Mock
-  any environment-specific lookup (locating an interpreter, scanning a portable yt-dlp cache) with
-  `mock.patch`; do not call code that relies on host filesystem/PATH state and then assert real results.
-  A test green only because of something unique to this machine will silently break elsewhere — write it so the box is irrelevant.
-
-- Each test module imports the package via its absolute name and adds a single line to put
-  `src/` on `sys.path`; it must not add the project root or any redundant inserts.
-- `mock.patch` targets use **full dotted paths** (`"jamly.core.X"`), never bare `"core.X"`.
-- Source stays ASCII-only so it compiles and loads under any locale; keep `py_compile` clean.
-
-SSE integration tests use `GET /status?once=1`, which emits the same event as the continuous stream
-and then closes. Keep browser and server tests bounded this way.
-
-## Hygiene
-
-- Commit messages use an **inline, single-quoted `git -m`**. Do not put literal backticks inside a *double*-quoted body: bash treats `` `...` `` as command substitution (it strips them and runs the inner text). Single-quoting avoids this entirely. `/tmp/...` works fine here; no alias workaround is needed for it. If you need multi-line prose, write it directly in one `-m`.
-- Commit only source, tests, and docs. `.portable/`, downloaded models/cache, and stray temp dirs are gitignored — never commit them.
-- Do not leave diagnostic/probe scripts in the tree; clean up before committing.
+- Application code is under `src/jamly`; Python tests are under `tests`.
+- Use package imports (`from .core import ...` internally, `from jamly.core import ...` in tests).
+- Install with `uv sync --locked`. Run pytest, unittest and Ruff through `uv run --locked`.
+- Browser code is under `browser/`; its Node tests run with `node --test`.
+- Keep fast tests offline and deterministic. Use temporary directories and explicit process cleanup.
+- Test external-tool contracts with real audio in the dedicated integration check, not only mocked
+  command strings. Put each unittest assertion on its own statement.
+- Preserve source levels, paired-output integrity, durable job states, and explicit error reporting.
+- Keep subprocess arguments as lists. Never put secrets into source, logs, URLs, or shell commands.
+- Keep README focused on install/use and DESIGN focused on current behavior. Git history records
+  superseded designs.
+- Do not commit environments, model weights, output audio, logs, or temporary probes.

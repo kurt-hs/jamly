@@ -1,29 +1,15 @@
 {
-    "python.defaultInterpreterPath": "",
+    "python.defaultInterpreterPath": "${workspaceFolder}/.venv",
+    "python.testing.pytestEnabled": true,
+    "python.testing.unittestEnabled": false,
+    "python.testing.pytestArgs": ["tests"],
     "files.trimTrailingWhitespace": true,
-    "editor.tabSize": 4,
     "files.insertFinalNewline": true,
-    "editor.codeActionsOnSave": {
-        "source.organizeImports.beforeSave": "always",
-        "source.fixAll.beforeSave": "always"
-    },
     "files.eol": "\n",
     "files.exclude": {
         "**/__pycache__": true,
-        "**/*.pyc": true,
-        ".pytest_cache": true,
         ".venv": true,
-        ".venv-audio-sep": true,
-        "_work/": true,
-        ".portable/": true
-    },
-    "python.testing.unittestArgs": [
-        "-v",
-        "tests"
-    ],
-    "python.testing.pytestArgs": [
-        "tests"
-    ],
-    "python.testing.unittestEnabled": false,
-    "python.testing.pytestEnabled": true
+        ".pytest_cache": true,
+        ".ruff_cache": true
+    }
 }

@@ -12,9 +12,7 @@
             ],
             "justMyCode": true,
             "cwd": "${workspaceFolder}",
-            "env": {
-                "PYTHONPATH": "${workspaceFolder}/src"
-            },
+            "preLaunchTask": "setup",
             "console": "integratedTerminal"
         },
         {
@@ -29,9 +27,7 @@
             ],
             "justMyCode": true,
             "cwd": "${workspaceFolder}",
-            "env": {
-                "PYTHONPATH": "${workspaceFolder}/src"
-            },
+            "preLaunchTask": "setup",
             "console": "integratedTerminal"
         },
         {
@@ -41,9 +37,7 @@
             "module": "jamly.server",
             "justMyCode": false,
             "cwd": "${workspaceFolder}",
-            "env": {
-                "PYTHONPATH": "${workspaceFolder}/src"
-            },
+            "preLaunchTask": "setup",
             "console": "integratedTerminal"
         }
     ]

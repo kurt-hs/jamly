@@ -1,139 +1,77 @@
-# Design
+# Current design
 
-Jamly is a small orchestration layer around yt-dlp, Demucs, and ffmpeg:
+## Pipeline
 
-```text
-source
-  -> yt-dlp best available audio
-  -> Demucs htdemucs four-stem separation
-  -> drums stem
-  -> bass + other + vocals -> no-drums mix
-  -> matching WAV or MP3 outputs + metadata
-```
+`run.process_one` validates one media item, downloads it through the installed interpreter's yt-dlp,
+invokes an isolated Demucs worker, and publishes one drums/drumless pair. Collections and active live
+streams are rejected before download. Deno is resolved from the same Python environment.
 
-## Packaging and supported Python
+`demucs_worker` uses the Demucs API and writes its raw estimates as float32 WAV with soundfile.
+There is no per-stem rescaling or clamping. The default and only exposed model is `htdemucs`.
 
-The package supports Python 3.11 and 3.12. yt-dlp and Demucs are declared runtime dependencies.
-Demucs currently constrains PyTorch to versions without Python 3.13 wheels on some platforms, so
-Python 3.13 is deliberately excluded.
+`audio` validates matching frame count, sample rate and channels, then sums every non-drum stem.
+It processes these files in blocks, rejects non-finite samples, and applies one shared gain to
+both final outputs. WAV remains float32. MP3 uses 320 kbps encoding and a decoded, 4x-oversampled
+peak check targeting -1 dBFS; any additional attenuation is shared and re-encoded from the raw pair.
 
-ffmpeg and ffprobe remain system dependencies. `bootstrap.py` detects them from explicit paths,
-legacy portable directories, or `PATH`; it does not download or install binaries.
+## Output transaction
 
-## Inputs and stable ids
+Exports live at `<output>/<stable-id>/<format>/`. That directory contains both audio files and
+`metadata.json`, including a generation id and SHA-256 checksums.
 
-`normalize.py` separates the processing source from the filesystem-safe queue id:
+A per-track/format lock prevents overlapping publishers. All output files are completed in a
+sibling staging directory. A first publication is one directory rename. Replacement renames the
+old directory to a fixed backup, then renames the staged directory into place. A failed second
+rename restores the backup; an interrupted swap is recovered before the next attempt.
 
-- YouTube ids and URLs use the canonical 11-character video id.
-- Other yt-dlp sources use `src-<16 hex characters>`, derived from SHA-256 of the exact input.
-- The original source is retained in every `Input` and queue record.
+Readers never receive a mixture of files from a partially published directory. During replacement
+there can be a short interval with no directory. Authenticated downloads check the generation
+under the same lock and return 409 if the result is being replaced or superseded.
 
-This allows arbitrary yt-dlp URLs and extractor expressions without placing raw URLs in filenames or
-losing the source when work is resumed from the queue.
+Existing outputs are reusable only when their processing version, identity, format and checksums
+match. Cache lookup precedes network/model work. Metadata and audio are published together.
 
-## Queue
+## Queue and lifecycle
 
-`WatchQueue` persists:
+The CLI or backend holds an exclusive process lock for the lifetime of queue ownership. Concurrent
+standalone CLI/backend writers are refused rather than silently overwriting one another. Revision
+checks also reject stale direct saves.
 
-```json
-{
-  "items": [
-    {
-      "watch_id": "src-0123456789abcdef",
-      "source_url": "https://soundcloud.com/artist/song",
-      "title": null
-    }
-  ],
-  "done": [],
-  "updated_at": 0
-}
-```
+Job records retain the stable id, source URL, options, status, attempts, error and output generation.
+States are `pending`, `running`, `done`, `skipped`, `error`, and `cancelled`. A legacy JSON done-set
+is readable, but new error records are not treated as successful completions.
 
-The stable id is the deduplication key. `source_url` is passed to yt-dlp. Writes use a unique
-temporary file followed by `os.replace`.
+Explicit submission requeues terminal jobs and captures the requested settings. Pending/running
+duplicates are ignored. Server errors require explicit retry; interrupted running jobs resume after
+restart. CLI invocation without inputs retries failed jobs once, not in an infinite loop.
 
-## Download and metadata
+The backend persists `running` before starting expensive work. Progress stages remain in memory.
+Subprocesses run in owned process groups; cancellation terminates the owned tree, cleans staging
+files and returns interrupted work to the queue. Shutdown joins the worker before releasing ownership.
+Queue persistence errors are exposed, not converted into successful acceptance.
 
-The extraction command uses:
+## Local API and browser
 
-```text
-yt-dlp --no-playlist --no-write-subs --extract-audio
-       --audio-format best --audio-quality 0
-       -o <workdir>/<id>.%(ext)s <source>
-```
+API version 2 uses finite JSON snapshots. The backend owns all durable state; the extension service
+worker handles requests on demand, while the popup polls only during its lifetime.
 
-Metadata is queried before expensive work with `--dump-single-json --skip-download --no-playlist`.
-That establishes deterministic output names and allows complete existing outputs to be skipped.
+A private per-user token is required for jobs, status and downloads. The unauthenticated health probe
+contains no paths or credentials. Origin and Host checks are independent of authentication. Result
+URLs refer to known completed artifacts, never arbitrary client-supplied filesystem paths.
 
-## Separation
+The extension renders server text with DOM text APIs, shows failed HTTP requests, and uses the
+browser download manager with an Authorization header. Tokens are not placed in result URLs.
+The optional userscript is a limited status/enqueue helper, not a second full application.
 
-The official Demucs CLI has no `separate` subcommand:
+## Installed environment
 
-```text
-python -m demucs --out <workdir> -n htdemucs [-j N] <audio>
-```
+CLI, backend, doctor and service commands share configuration helpers. Defaults use per-user
+application data and `~/Music/jamly`, not whichever directory launched the service.
 
-With `--out <workdir>`, Demucs writes `<workdir>/htdemucs/<track>/<stem>.wav`. Jamly scans the unique
-per-item work directory for exactly `drums`, `bass`, `other`, and `vocals`.
+`service` renders OS-specific registration definitions around the exact installed Python executable.
+Windows uses a per-user logon task, macOS a LaunchAgent, and Linux a user systemd unit. Browser assets
+are included in the wheel and can be copied to a stable directory for unpacked loading.
 
-Availability uses `importlib.util.find_spec("demucs")`; arbitrary `sys.path` directories are never
-treated as site-packages.
-
-## Mix and finalization
-
-ffmpeg mixes the three non-drum stems with a labeled filter output:
-
-```text
-[0:a][1:a][2:a]amix=inputs=3:duration=longest:normalize=0:dropout_transition=0[mix]
-```
-
-The intermediate no-drums file is float WAV. Both drums and no-drums then pass through the same
-finalizer:
-
-- WAV: verbatim copy of the float stem/mix.
-- MP3: libmp3lame at 320 kbps.
-
-Files are written to same-directory temporary paths and atomically replaced only after both audio
-outputs and metadata succeed. Failed runs therefore do not leave a newly created partial pair.
-
-Named outputs always include the stable id:
-
-```text
-Artist - Song [id]_drums.mp3
-Artist - Song [id]_no_drums.mp3
-id.meta.json
-```
-
-## Server
-
-`ItemServer` owns one in-memory `WatchQueue` and one worker. Queue mutation and status snapshots use
-short locks; downloads and inference run outside locks.
-
-`GET /status` is a continuous SSE stream. `GET /status?once=1` sends one identical event and closes,
-which makes browser polling bounded without maintaining a permanent connection.
-
-Off-loopback binds require a bearer token for `POST /add`. CORS preflight permits `Authorization`
-and private-network requests. Completed event history is bounded to the latest 100 records.
-
-## Browser clients
-
-The Manifest V3 extension and userscript poll the one-event status endpoint. The extension stores the
-resolved status object, never the pending Promise. Its options page stores an optional bearer token
-and requests permission only for the configured non-local origin.
-
-The userscript is limited to YouTube and YouTube Music pages. All server-provided text is escaped
-before insertion into HTML.
-
-## Service wrappers
-
-The Windows batch file sets `PYTHONPATH=<repo>/src` before invoking the module. The scheduled task
-executes that launcher through `cmd.exe` at startup.
-
-The Linux launcher either runs in the foreground or generates a user-level systemd unit containing
-the resolved repository, Python, port, scope, and `PYTHONPATH`.
-
-## Validation
-
-CI runs pytest, unittest, Ruff, JavaScript contract tests, lock verification, and package builds on
-Python 3.11 and 3.12. Tests mock network/model work; focused integration checks exercise real ffmpeg
-commands and the live HTTP/SSE contract.
+Development and CI use `uv.lock`. Fast tests exercise error/recovery contracts without downloading a
+model; a separate integration test runs the real installed pipeline on generated audio. Broader
+model support, native desktop packaging and marketplace distribution remain out of scope.
