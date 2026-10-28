@@ -32,7 +32,7 @@ from .core import (
     AUDIO_FORMATS, DEFAULT_OUTPUT_FORMAT, FORMAT_WAV,
     build_stem_encode_cmd,
     ENGINE_HTDEMUCS,
-    RunResult, _abs, PLATFORM_WINDOWS, run as _run, sanitize_filename,
+    RunResult, _abs, _print_tail, PLATFORM_WINDOWS, run as _run, sanitize_filename,
     tool_source,
 )
 from .bootstrap import find_ffmpeg
@@ -153,7 +153,7 @@ def build_download_cmd(
     from .core import build_ytdlp_extract_cmd as b
     # None => let the builder apply its portable default; an explicit value is forwarded verbatim.
     return b(ytdlp_exe, url, output_template=out, ffmpeg_dir=ffmpeg_dir,
-             suppress_subs=(suppress_subs or True))
+             suppress_subs=suppress_subs)
 
 
 def build_mix_cmd(ffmpeg_exe: str, bass: str, other: str, vocals: str, output: str) -> List[str]:
@@ -365,7 +365,9 @@ def process_one(wid: str, args, progress=None, source_url: Optional[str] = None)
         # parsing the raw input text (a bare id / partial path has no usable fields) then the watch-
         # id prefix. The real title is parsed for filenames, while .meta.json records every field.
         item_meta = _fetch_item_metadata(ytdlp_exe, source_url)
-        parsed = parse_title_artist(item_meta["title"] if item_meta else source_url)
+        # item_meta may be None or a dict missing keys (yt-dlp can drop an empty title line); use
+        # .get() so a partial/empty result degrades to the input-text fallback instead of KeyError.
+        parsed = parse_title_artist((item_meta or {}).get("title") or source_url)
         drums_out, nodrums_out, meta_path = stem_output_paths(args.output_dir, wid, fmt, parsed=parsed)
         # Finalize the primary (drums) stem first. Both stems are produced together before success;
         # doing it here means a drum re-encode failure surfaces immediately and never leaves its
@@ -376,14 +378,22 @@ def process_one(wid: str, args, progress=None, source_url: Optional[str] = None)
         # nodrums_out. build_mix_cmd takes the established 5-arg form -- (ffmpeg, bass, other,
         # vocals, output) -- matching core.build_ffmpeg_mix_cmd and its tests; 'drums' is intentionally
         # omitted so it never lands in the mix.
+        # No-drums mix: ffmpeg blends bass+other+vocals (drums excluded by construction) into
+        # nodrums_out. build_mix_cmd takes the established 5-arg form -- (ffmpeg, bass, other,
+        # vocals, output) -- matching core.build_ffmpeg_mix_cmd and its tests; 'drums' is
+        # intentionally omitted so it never lands in the mix.
         mix_cmd = build_mix_cmd(ffmpeg_exe_for(ffmpeg_dir), stems["bass"],
                                 stems["other"], stems["vocals"], nodrums_out)
-        _run(mix_cmd)
+        mix_res = _run(mix_cmd)
+        if not mix_res.ok:
+            _print_tail(mix_res.stderr)
+            raise RuntimeError("mix failed (exit %d): %s"
+                               % (mix_res.returncode, " ".join(mix_res.args[:4])))
 
         # both stems succeeded: surface the human name and write the structured sidecar. output_dir
         # already holds the written stems, so its parent exists -- safe to open the meta file there.
         res.status, res.stage = "done", ""
-        if item_meta is not None:
+        if item_meta and "title" in item_meta:
             title = item_meta["title"] or None
             artist = item_meta.get("artist") or None
             uploader = item_meta.get("uploader") or None
@@ -519,12 +529,14 @@ def echo_inputs(raw, titles):
             tag = "  (blank)" if isinstance(source, str) and source.strip() == "" else "  (non-string)"
         else:
             try:
-                wid = extract_watch_id(w)
+                # ``w`` may be an :class:`Input`; extract from its string source (not the object,
+                # which has no .strip()) so a valid bare id / URL is recognised, not flagged invalid.
+                wid = extract_watch_id(source)
             except Exception:
                 wid = ""
                 tag = "  (invalid)"
         kept += bool(wid)
-        dropped += not kept
+        dropped += not bool(wid)
         line = "%2d. %s -> %s%s" % (i, w, wid, tag)
         hint = '   "%s"' % hint if hint else ""
         _log.note(line + hint)
@@ -626,9 +638,11 @@ def main(argv=None) -> int:
             _log.fail("%s: %s" % (res.watch_id[:16], res.error or "unknown error"))
         if res.ok:
             ok += 1
+            # only a success is terminal: a failed item stays PENDING so it is retried on the next
+            # run (a persistent failure would otherwise be marked done and dropped from the queue).
+            queue.mark_done(wid)
         else:
             err += 1
-        queue.mark_done(wid)
         done += 1
         try:
             queue.save()

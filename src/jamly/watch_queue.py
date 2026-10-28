@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 import uuid
 from typing import List, Optional
@@ -37,6 +38,9 @@ class WatchQueue:
         self.path = os.path.abspath(path) if path else ""
         self._items: List[dict] = list(items) if items else []
         self._done: List[str] = list(done) if done else []
+        # serialises save() so concurrent writers (the CLI loop AND the HTTP worker both call
+        # save() on the same queue) never race the write-temp + os.replace -> WinError 5 on Windows.
+        self._save_lock = threading.Lock()
 
     # -- construction -------------------------------------------------------- #
     @classmethod
@@ -131,19 +135,25 @@ class WatchQueue:
 
     # -- persistence ---------------------------------------------------------- #
     def save(self) -> None:
-        """Atomically write the queue file (write-temp + rename)."""
-        data = {
-            "items": [{"watch_id": i["watch_id"], "title": i.get("title")} for i in self._items],
-            "done": self._done,
-            "updated_at": time.time(),
-        }
-        if self.path:
-            os.makedirs(os.path.dirname(self.path), exist_ok=True)
-            # unique temp name so two concurrent writers don't collide on the same .tmp before replace.
-            tmp = "%s.tmp.%d.%s" % (self.path, os.getpid(), uuid.uuid4().hex[:8])
-            with open(tmp, "w", encoding="utf-8") as fh:
-                json.dump(data, fh, ensure_ascii=False, indent=2)
-            os.replace(tmp, self.path)
+        """Atomically write the queue file (write-temp + rename).
+
+        Guarded by a per-instance lock so concurrent callers (the CLI loop and the HTTP worker both
+        save the same queue) are serialised -- otherwise two os.replace() calls on the same
+        destination race and Windows raises WinError 5 (access denied).
+        """
+        with self._save_lock:
+            data = {
+                "items": [{"watch_id": i["watch_id"], "title": i.get("title")} for i in self._items],
+                "done": list(self._done),
+                "updated_at": time.time(),
+            }
+            if self.path:
+                os.makedirs(os.path.dirname(self.path), exist_ok=True)
+                # unique temp name so the on-disk target is never a half-written file.
+                tmp = "%s.tmp.%d.%s" % (self.path, os.getpid(), uuid.uuid4().hex[:8])
+                with open(tmp, "w", encoding="utf-8") as fh:
+                    json.dump(data, fh, ensure_ascii=False, indent=2)
+                os.replace(tmp, self.path)
 
     def __len__(self) -> int:
         return len(self._items)

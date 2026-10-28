@@ -359,5 +359,152 @@ class FinalizeOutputTests(unittest.TestCase):
                     run_mod.finalize_output("bogus.exe", src, dst, fmt="mp3")
 
 
+class MixFailureTests(unittest.TestCase):
+    """A failed no-drums mix must NOT mark the item done with a missing no_drums file."""
+
+    def _fake_stems(self, workdir):
+        stems = {}
+        for name in ("drums", "bass", "other", "vocals"):
+            p = os.path.join(workdir, "%s.wav" % name)
+            with open(p, "wb") as fh:
+                fh.write(b"FAKE_STEM_" + name.encode())
+            stems[name] = os.path.abspath(p)
+        return stems
+
+    def test_failed_mix_marks_item_error_and_writes_no_nodrums(self):
+        # fmt=wav -> drums finalized by verbatim copy (no _run before the mix), so exactly one _run call.
+        wid = "aBcDeFg1234"
+        workdir = tempfile.mkdtemp()
+        out_dir = tempfile.mkdtemp()
+        extract_name = "%s.webm" % wid
+
+        def fake_stream_download(cmd):
+            with open(os.path.join(workdir, extract_name), "wb") as fh:
+                fh.write(b"FAKE_EXTRACT_")
+            return RunResult(args=list(cmd), returncode=0, stdout="", stderr="")
+
+        args = argparse.Namespace(audio_format="wav", threads=0, output_dir=out_dir, replace_existing=True)
+        with mock.patch.object(run_mod, "make_workdir", return_value=workdir), \
+             mock.patch.object(run_mod, "_find_ytdlp", return_value="fake-ytdlp"), \
+             mock.patch.object(run_mod, "_stream_download", fake_stream_download), \
+             mock.patch.object(run_mod, "separate", lambda audio=None, _workdir=None, threads=0, **_rest: self._fake_stems(workdir)), \
+             mock.patch.object(run_mod, "_fetch_item_metadata", return_value={}), \
+             mock.patch.object(run_mod, "_run", return_value=RunResult(args=["ffmpeg.exe"],
+                                                                       returncode=1, stdout="", stderr="boom")):
+            res = run_mod.process_one(wid, args)
+
+        # a non-zero mix exit is recorded as an error, not swallowed into 'done'
+        self.assertEqual(res.status, "error")
+        self.assertIn("mix failed", res.error)
+        # no <title>_no_drums file was written; only the drums stem (finalized by copy) exists
+        self.assertIsNone(res.nodrums_path)
+        # res.drums_path is only assigned after the mix succeeds, so check the file on disk
+        # directly -- the copy landed there before the mix was dispatched.
+        self.assertTrue(os.path.exists(os.path.join(out_dir, "%s_drums.wav" % wid)),
+                        "drums stem should still be present")
+        self.assertFalse([f for f in os.listdir(out_dir) if "no_drums" in f], "no no-drums file written")
+
+    def test_successful_mix_marks_item_done(self):
+        # the happy path: a clean mix exit leaves both stems + marks the item done.
+        wid = "aBcDeFg1234"
+        workdir = tempfile.mkdtemp()
+        out_dir = tempfile.mkdtemp()
+        extract_name = "%s.webm" % wid
+
+        def fake_stream_download(cmd):
+            with open(os.path.join(workdir, extract_name), "wb") as fh:
+                fh.write(b"FAKE_EXTRACT_")
+            return RunResult(args=list(cmd), returncode=0, stdout="", stderr="")
+
+        args = argparse.Namespace(audio_format="wav", threads=0, output_dir=out_dir, replace_existing=True)
+
+        # a real mix writes its output to disk; the mock does the same so the "file exists"
+        # assertion below exercises the real path rather than just the return code.
+        def fake_run(cmd):
+            with open(cmd[-1], "wb") as fh:
+                fh.write(b"FAKE_MIX")
+            return RunResult(args=list(cmd), returncode=0, stdout="", stderr="")
+
+        with mock.patch.object(run_mod, "make_workdir", return_value=workdir), \
+             mock.patch.object(run_mod, "_find_ytdlp", return_value="fake-ytdlp"), \
+             mock.patch.object(run_mod, "_stream_download", fake_stream_download), \
+             mock.patch.object(run_mod, "separate", lambda audio=None, _workdir=None, threads=0, **_rest: self._fake_stems(workdir)), \
+             mock.patch.object(run_mod, "_fetch_item_metadata", return_value={}), \
+             mock.patch.object(run_mod, "_run", fake_run):
+            res = run_mod.process_one(wid, args)
+
+        self.assertTrue(res.ok, res.error)
+        self.assertEqual(os.path.basename(res.nodrums_path), "%s_no_drums.wav" % wid)
+        self.assertTrue(os.path.exists(res.nodrums_path), "no-drums file should exist on success")
+
+
+class MainRetryTests(unittest.TestCase):
+    """A failed item must stay PENDING (not marked done) so it is retried on the next run.
+
+    Drives the real ``main()`` queue loop with the heavy steps stubbed, so no network / binary is
+    needed. The queue file lives in a temp dir (via AUTOCV_QUEUE) so no host cwd state is touched.
+    """
+
+    def _failed(self, wid):
+        from jamly.run import ItemResult
+        return ItemResult(watch_id=wid, status="error", stage="download", error="boom")
+
+    def test_failed_item_stays_pending_for_retry(self):
+        from jamly.normalize import Input
+        import jamly.watch_queue as wq_mod
+        wid = "aBcDeFg1234"
+        with tempfile.TemporaryDirectory() as tmp:
+            qpath = os.path.join(tmp, "jamly_queue.json")
+            prev = os.environ.get("AUTOCV_QUEUE")
+            os.environ["AUTOCV_QUEUE"] = qpath
+            try:
+                with mock.patch.object(run_mod, "gather_inputs", return_value=[Input(watch_id=wid, source_url=wid)]), \
+                     mock.patch.object(run_mod, "process_one", return_value=self._failed(wid)), \
+                     mock.patch.object(run_mod, "_find_ytdlp", return_value="fake-ytdlp"), \
+                     mock.patch.object(run_mod, "find_ffmpeg", return_value=None), \
+                     mock.patch.object(run_mod, "resolve_engine", return_value="htdemucs"), \
+                     mock.patch.object(run_mod, "describe_tools", lambda *a, **k: None):
+                    rc = run_mod.main(["-i", wid])
+                # the run reports the failure (non-zero) ...
+                self.assertNotEqual(rc, 0)
+                # ... but the failed item is NOT marked done: it is still pending for the next run.
+                queue = wq_mod.WatchQueue.from_path(qpath)
+                self.assertIn(wid, queue.pending_ids(), "failed item must stay pending for retry")
+                self.assertNotIn(wid, queue.done_ids())
+            finally:
+                if prev is None:
+                    os.environ.pop("AUTOCV_QUEUE", None)
+                else:
+                    os.environ["AUTOCV_QUEUE"] = prev
+
+    def test_successful_item_is_marked_done(self):
+        from jamly.run import ItemResult
+        from jamly.normalize import Input
+        import jamly.watch_queue as wq_mod
+        wid = "zYxWvUt5678"
+        with tempfile.TemporaryDirectory() as tmp:
+            qpath = os.path.join(tmp, "jamly_queue.json")
+            prev = os.environ.get("AUTOCV_QUEUE")
+            os.environ["AUTOCV_QUEUE"] = qpath
+            try:
+                ok = ItemResult(watch_id=wid, status="done", stage="mix", drums_path="/x/drums.wav")
+                with mock.patch.object(run_mod, "gather_inputs", return_value=[Input(watch_id=wid, source_url=wid)]), \
+                     mock.patch.object(run_mod, "process_one", return_value=ok), \
+                     mock.patch.object(run_mod, "_find_ytdlp", return_value="fake-ytdlp"), \
+                     mock.patch.object(run_mod, "find_ffmpeg", return_value=None), \
+                     mock.patch.object(run_mod, "resolve_engine", return_value="htdemucs"), \
+                     mock.patch.object(run_mod, "describe_tools", lambda *a, **k: None):
+                    rc = run_mod.main(["-i", wid])
+                self.assertEqual(rc, 0)
+                queue = wq_mod.WatchQueue.from_path(qpath)
+                self.assertIn(wid, queue.done_ids(), "successful item must be marked done")
+                self.assertNotIn(wid, queue.pending_ids())
+            finally:
+                if prev is None:
+                    os.environ.pop("AUTOCV_QUEUE", None)
+                else:
+                    os.environ["AUTOCV_QUEUE"] = prev
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
