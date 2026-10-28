@@ -10,7 +10,6 @@ import platform
 import shutil
 import subprocess
 import sys
-import sysconfig
 import tarfile
 from urllib.parse import quote
 from urllib.request import urlopen
@@ -78,8 +77,8 @@ def python_notices(destination: Path) -> None:
                     with source.extractfile(entry) as notice:
                         target.write_bytes(notice.read())
                     copied += 1
-    if not copied:
-        raise RuntimeError("The Python distribution did not contain dependency notices")
+    if not copied or not (destination / "python" / "licenses" / "LICENSE.cpython.txt").is_file():
+        raise RuntimeError("The Python distribution did not contain interpreter and dependency notices")
     (destination / "provenance.json").write_text(json.dumps({
         "url": url, "sha256": digest, "build": release,
     }, indent=2))
@@ -131,10 +130,6 @@ def notices(staging: Path) -> list[dict]:
                     copied = target / str(file)
                     copied.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copyfile(source, copied)
-    python_license = Path(sysconfig.get_path("stdlib")) / "LICENSE.txt"
-    if not python_license.is_file():
-        raise RuntimeError("The build Python is missing its LICENSE.txt")
-    shutil.copyfile(python_license, destination / "PYTHON-LICENSE.txt")
     python_notices(destination / "python-runtime")
     shutil.copyfile(ROOT / "LICENSE.md", destination / "JAMLY-LICENSE.md")
     for name in SOURCES:
