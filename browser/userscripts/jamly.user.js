@@ -1,16 +1,18 @@
-/* ==UserScript: jamly status UI==
- * Shows live progress from a running `python -m jamly.server` (GET /status SSE) in a
- * floating panel, and alerts when items finish with links back to the source URL. Zero-install:
- * install via Tampermonkey/Greasemonkey (or your userscript manager), then run the server on another
- * tab. The queue file is read/written locally so it survives across sessions and can be loaded by
- * `python -m jamly.server` as its resume source.
- *
- * Protocol shared with the WebExtension background variant (jamly_client.js):
- *   GET  /status -> {pending, done, total, current, last_completed}
- *   POST /add    body {"inputs":[...], "titles":[...]} -> {queued, newly_added, pending_count}
- *   GET  /items  -> {pending:[], done:[]}
- *   GET  /healthz-> {ok:true,...}
- */
+/* jamly status UI userscript.
+
+   Shows live progress from a running `python -m jamly.server` (GET /status SSE) in a floating
+   panel, and alerts when items finish with links back to the source URL. Zero-install: install
+   via Tampermonkey/Greasemonkey (or your userscript manager), then run the server on another tab.
+   The queue file is read/written locally so it survives across sessions and can be loaded by
+   `python -m jamly.server` as its resume source.
+
+   Protocol shared with the WebExtension background variant (jamly_client.js):
+     GET  /status -> {pending, done, total, current, last_completed}
+     POST /add    body {"inputs":[...], "titles":[...]} -> {queued, newly_added, pending_count}
+     GET  /items  -> {pending:[], done:[]}
+     GET  /healthz-> {ok:true,...}
+*/
+// ==UserScript==
 // @name         jamly status UI
 // @namespace    https://example.com/jamly
 // @version      1.0.0
@@ -18,8 +20,8 @@
 // @author       jamly
 // @match        *://*/*
 // @grant        GM_addStyle
-// @grant        none
 // @run-at       document-end
+// ==/UserScript==
 
 (function () {
   "use strict";
@@ -49,9 +51,17 @@
 
   var panel = document.createElement("div");
   panel.id = "ac-panel";
+  // create every element the render functions below write to (#ac-counts / #ac-status /
+  // #ac-current-title / #ac-list); the panel used to build only #ac-body, so those writes hit a
+  // null node and threw. Build them here so the first poll paints without error.
   panel.innerHTML =
     '<div class="ac-head"><span id="ac-title">jamly</span><span id="ac-close" title="close">×</span></div>' +
-    '<div id="ac-body"></div>';
+    '<div id="ac-body">' +
+      '<div id="ac-counts"></div>' +
+      '<div id="ac-status"></div>' +
+      '<div id="ac-current-title"></div>' +
+      '<ul id="ac-list"></ul>' +
+    '</div>';
   document.body.appendChild(panel);
   var closeBtn = panel.querySelector("#ac-close");
   if (closeBtn) closeBtn.addEventListener("click", function () { panel.remove(); });
@@ -144,12 +154,36 @@
     } catch (e) { return {}; }
   }
 
+  // Read a SINGLE SSE event from the stream (bounded). The server streams /status forever, so an
+  // unbounded read (resp.text()) never resolves and would hang this poll; instead we drain the
+  // reader until the first event terminator ("\n\n"), with a hard timeout cap so a stalled socket
+  // can never block the UI. (Fix for the "waits for a status response that never ends" bug.)
+  async function readOneEvent(resp, timeoutMs) {
+    var reader = resp.body.getReader();
+    var decoder = new TextDecoder();
+    var acc = "";
+    var deadline = Date.now() + timeoutMs;
+    try {
+      while (Date.now() < deadline) {
+        var chunk = await reader.read();
+        if (chunk.done) break;
+        acc += decoder.decode(chunk.value, { stream: true });
+        var end = acc.indexOf("\n\n");
+        if (end !== -1) { acc = acc.slice(0, end); break; }
+      }
+    } finally {
+      try { reader.cancel(); } catch (e) { /* already released */ }
+    }
+    return acc;
+  }
+
   // --- poll loop -------------------------------------------------------------------------------
   async function poll() {
     try {
       var resp = await fetch(SERVER_URL + "/status", { cache: "no-store" });
       if (!resp.ok) return;
-      var txt = await resp.text();
+      // read only the first event (bounded), not the whole never-ending SSE stream
+      var txt = await readOneEvent(resp, 5000);
       var m = txt.match(/\{[\s\S]*\}/); // outermost JSON object (server writes data:{...} ticks)
       if (!m) return;
       var body = JSON.parse(m[0]);
